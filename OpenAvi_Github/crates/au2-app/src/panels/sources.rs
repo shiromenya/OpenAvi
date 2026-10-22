@@ -1,0 +1,217 @@
+//! ソースパネル（メディアプール・標準オブジェクトパレット・プラグイン一覧）。
+//!
+//! - 動画・画像・音声素材のサムネイル確認とタイムラインへのワンクリック配置
+//! - 標準オブジェクト（テキスト・図形・制御・フィルタ）のワンクリック追加
+//! - プラグイン・スクリプトのワンクリックインストール＆選択オブジェクトへの効果適用
+
+use std::path::PathBuf;
+
+use au2_core::{EffectKind, TimelineObject};
+use au2_media::MediaKind;
+use au2_plugin::{PluginKind, SupportStatus};
+use eframe::egui::{self, vec2, CollapsingHeader, Color32, RichText, ScrollArea};
+
+use crate::state::EditorState;
+
+pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
+    // ---- 1. 上部クイックバー（ファイルから簡単にインストール＆開く） ----
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .button("📂 開く / 一括取込...")
+            .on_hover_text("プロジェクト(.aup/.exo)、動画・画像・音声、プラグイン(.anm/.auf等)を自動判別して開く・インストールします")
+            .clicked()
+        {
+            st.smart_open_dialog();
+        }
+        if ui
+            .button("🎬 素材追加...")
+            .on_hover_text("動画・画像・音声ファイルをソース一覧に追加します")
+            .clicked()
+        {
+            st.import_sources_dialog();
+        }
+        if ui
+            .button("🧩 プラグイン追加...")
+            .on_hover_text(".anm / .obj / .auf 等のスクリプト・プラグインをインストールします")
+            .clicked()
+        {
+            st.install_plugin_dialog();
+        }
+    });
+    ui.separator();
+
+    // ---- 2. ソースモニター（選択中のメディア素材のプレビュー） ----
+    if let Some(sel_idx) = st.selected_source.filter(|&i| i < st.sources.len()) {
+        let item = st.sources[sel_idx].clone();
+        let egui_ctx = ui.ctx().clone();
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.strong(&item.name);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("➕ タイムラインに配置").clicked() {
+                        let layer = st.timeline.context_target.layer;
+                        let frame = st.frame;
+                        st.add_media_file(&item.path, layer, frame);
+                    }
+                });
+            });
+
+            if matches!(item.kind, MediaKind::Image | MediaKind::Video) {
+                let path_str = item.path.to_string_lossy().into_owned();
+                if let Some((tex_id, [w, h])) = st.get_media_texture(&egui_ctx, &path_str, 0, 0.0) {
+                    let avail_w = ui.available_width().max(60.0);
+                    let max_h = 110.0;
+                    let scale = (avail_w / w as f32).min(max_h / h as f32);
+                    let disp = vec2(w as f32 * scale, h as f32 * scale);
+                    ui.vertical_centered(|ui| {
+                        ui.image(egui::load::SizedTexture::new(tex_id, disp));
+                    });
+                    ui.small(format!("解像度: {w}x{h} / パス: {}", item.path.display()));
+                }
+            } else {
+                ui.small(format!("音声ファイル: {}", item.path.display()));
+            }
+        });
+        ui.add_space(4.0);
+    }
+
+    ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        // ---- 3. メディア素材リスト ----
+        CollapsingHeader::new(RichText::new(format!("📁 メディア素材 ({})", st.sources.len())).strong())
+            .default_open(true)
+            .show(ui, |ui| {
+                if st.sources.is_empty() {
+                    ui.weak("素材がありません。「🎬 素材追加...」またはドラッグ＆ドロップで追加できます。");
+                } else {
+                    let mut to_place: Option<PathBuf> = None;
+                    for (idx, src) in st.sources.iter().enumerate() {
+                        let icon = match src.kind {
+                            MediaKind::Video => "🎞",
+                            MediaKind::Image => "🖼",
+                            MediaKind::Audio => "🔊",
+                        };
+                        let selected = st.selected_source == Some(idx);
+                        ui.horizontal(|ui| {
+                            let resp = ui.selectable_label(selected, format!("{icon} {}", src.name));
+                            if resp.clicked() {
+                                st.selected_source = Some(idx);
+                            }
+                            if resp.double_clicked() {
+                                to_place = Some(src.path.clone());
+                            }
+                            resp.on_hover_text(format!(
+                                "{}\n(クリックでプレビュー、ダブルクリックまたは右のボタンでタイムラインへ配置)",
+                                src.path.display()
+                            ));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button("＋配置").clicked() {
+                                    to_place = Some(src.path.clone());
+                                }
+                            });
+                        });
+                    }
+                    if let Some(path) = to_place {
+                        let layer = st.timeline.context_target.layer;
+                        let frame = st.frame;
+                        st.add_media_file(&path, layer, frame);
+                    }
+                }
+            });
+
+        ui.add_space(4.0);
+
+        // ---- 4. 標準オブジェクト・プリセット ----
+        CollapsingHeader::new(RichText::new("✨ 標準オブジェクトの追加").strong())
+            .default_open(true)
+            .show(ui, |ui| {
+                let layer = st.timeline.context_target.layer;
+                let start = st.frame;
+                let end = start + 149;
+
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("📝 テキスト").clicked() {
+                        st.add_object_at(layer, TimelineObject::new_text(start, end, "サンプルテキスト"));
+                    }
+                    if ui.button("🔴 図形 (円)").clicked() {
+                        st.add_object_at(layer, TimelineObject::new_shape(start, end, 1, "e94560"));
+                    }
+                    if ui.button("🟩 図形 (四角形)").clicked() {
+                        st.add_object_at(layer, TimelineObject::new_shape(start, end, 2, "0f9b8e"));
+                    }
+                    if ui.button("⭐ 図形 (星型)").clicked() {
+                        st.add_object_at(layer, TimelineObject::new_shape(start, end, 6, "ffd166"));
+                    }
+                    if ui.button("🖥 フレームバッファ").clicked() {
+                        st.add_object_at(layer, TimelineObject::new_framebuffer(start, end));
+                    }
+                    if ui.button("🎨 色調補正").clicked() {
+                        st.add_object_at(layer, TimelineObject::new_color_correction(start, end));
+                    }
+                    if ui.button("📐 グループ制御").clicked() {
+                        st.add_object_at(layer, TimelineObject::new_group_control(start, end));
+                    }
+                    if ui.button("🎥 カメラ制御").clicked() {
+                        st.add_object_at(layer, TimelineObject::new_camera_control(start, end));
+                    }
+                });
+            });
+
+        ui.add_space(4.0);
+
+        // ---- 5. プラグイン & スクリプト一覧 ----
+        CollapsingHeader::new(
+            RichText::new(format!("🧩 プラグイン・スクリプト ({})", st.plugins.plugins.len())).strong(),
+        )
+        .default_open(true)
+        .show(ui, |ui| {
+            let mut apply_effect = None;
+            for p in &st.plugins.plugins {
+                let badge_color = match p.status {
+                    SupportStatus::Supported => Color32::from_rgb(100, 220, 120),
+                    SupportStatus::PartialScript => Color32::from_rgb(240, 200, 90),
+                    _ => Color32::from_rgb(170, 170, 185),
+                };
+                ui.horizontal(|ui| {
+                    ui.monospace(&p.file_name);
+                    ui.colored_label(badge_color, format!("[{}]", p.kind.label()));
+                });
+                for entry in &p.entries {
+                    ui.horizontal(|ui| {
+                        ui.add_space(12.0);
+                        ui.label(format!("・{}", entry.display_name));
+                        if matches!(p.kind, PluginKind::AnmScript) && st.selected.is_some() {
+                            if ui
+                                .small_button("＋選択オブジェクトに適用")
+                                .on_hover_text("現在選択中のタイムラインオブジェクトにこのスクリプト効果を追加します")
+                                .clicked()
+                            {
+                                apply_effect = Some((p.kind, entry.clone()));
+                            }
+                        }
+                    });
+                }
+            }
+            if let Some((kind, entry)) = apply_effect {
+                if let Some(sel_id) = st.selected {
+                    if let Some((_, obj)) = st.scene.find_mut(sel_id) {
+                        let insert_pos = obj
+                            .effects
+                            .iter()
+                            .position(|e| {
+                                matches!(
+                                    e.kind,
+                                    EffectKind::StandardDraw
+                                        | EffectKind::ExtendedDraw
+                                        | EffectKind::StandardPlayback
+                                )
+                            })
+                            .unwrap_or(obj.effects.len());
+                        obj.effects.insert(insert_pos, entry.to_effect(kind));
+                        st.dirty = true;
+                        st.status = format!("「{}」を選択オブジェクトに適用しました", entry.display_name);
+                    }
+                }
+            }
+        });
+    });
+}

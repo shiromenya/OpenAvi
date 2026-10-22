@@ -1,0 +1,22 @@
+[package]
+name = "au2-app"
+description = "OpenAvi desktop application"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "openavi"
+path = "src/main.rs"
+
+[dependencies]
+au2-core.workspace = true
+au2-exo.workspace = true
+au2-aup.workspace = true
+au2-media.workspace = true
+au2-plugin.workspace = true
+eframe.workspace = true
+egui_dock.workspace = true
+rfd.workspace = true
+log.workspace = true
+env_logger.workspace = true

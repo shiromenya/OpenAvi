@@ -1,0 +1,11 @@
+[package]
+name = "au2-plugin"
+description = "OpenAvi plugin and ExEdit Lua script (.anm/.obj/.cam/.scn/.tra & .auf/.aui/.auo/.auc) loader and manager"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+au2-core.workspace = true
+encoding_rs.workspace = true
+thiserror.workspace = true

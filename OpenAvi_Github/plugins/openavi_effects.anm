@@ -1,0 +1,20 @@
+@揺れ
+--track0:X振幅,0,500,25,0.1
+--track1:Y振幅,0,500,15,0.1
+--track2:周期,0.05,10,0.4,0.01
+--check0:有効,1
+if (obj.check0) then
+    local t = obj.time / obj.track2 * math.pi * 2
+    obj.ox = obj.ox + math.sin(t) * obj.track0
+    obj.oy = obj.oy + math.cos(t * 1.3) * obj.track1
+end
+
+@点滅
+--track0:周期,0.05,10,0.5,0.01
+--track1:最小透明度,0,100,60,1
+local w = (math.sin(obj.time / obj.track0 * math.pi * 2) + 1) * 0.5
+obj.alpha = obj.alpha * (1 - (obj.track1 / 100) * w)
+
+@回転
+--track0:角速度,-720,720,90,0.1
+obj.rz = obj.rz + obj.time * obj.track0

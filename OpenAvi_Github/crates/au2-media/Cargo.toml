@@ -1,0 +1,11 @@
+[package]
+name = "au2-media"
+description = "Image and video decoder and frame cache for OpenAvi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+image.workspace = true
+log.workspace = true
+thiserror.workspace = true

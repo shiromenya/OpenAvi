@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/au2-core",
+    "crates/au2-exo",
+    "crates/au2-aup",
+    "crates/au2-media",
+    "crates/au2-plugin",
+    "crates/au2-app",
+]
+default-members = ["crates/au2-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/openavi/openavi"
+authors = ["OpenAvi Contributors"]
+
+[workspace.dependencies]
+au2-core = { path = "crates/au2-core" }
+au2-exo = { path = "crates/au2-exo" }
+au2-aup = { path = "crates/au2-aup" }
+au2-media = { path = "crates/au2-media" }
+au2-plugin = { path = "crates/au2-plugin" }
+encoding_rs = "0.8"
+thiserror = "1"
+log = "0.4"
+env_logger = "0.11"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "webp", "gif"] }
+eframe = { version = "0.29", default-features = false, features = ["wgpu", "default_fonts", "accesskit", "wayland", "x11"] }
+egui_dock = "0.14"
+rfd = "0.15"
+
+[profile.dev]
+# 依存クレート（wgpu等）は最適化してプレビューの応答性を確保し、デバッグシンボル肥大化を防ぐ
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

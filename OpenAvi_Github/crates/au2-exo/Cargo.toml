@@ -1,0 +1,11 @@
+[package]
+name = "au2-exo"
+description = "AviUtl ExEdit object file (.exo) reader/writer for OpenAvi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+au2-core.workspace = true
+encoding_rs.workspace = true
+thiserror.workspace = true
