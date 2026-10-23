@@ -111,3 +111,12 @@ foreach ($folder in @([Environment]::GetFolderPath("Desktop"), [Environment]::Ge
     $lnk.Save()
     Write-Host "Created shortcut: $lnkPath"
 }
+
+# 5. Sync Desktop ZIP and OpenAvi_Github folder
+$desktopDir = [Environment]::GetFolderPath("Desktop")
+Copy-Item -Force $zipPath (Join-Path $desktopDir "OpenAvi-windows-x64.zip")
+$githubDir = Join-Path $desktopDir "OpenAvi_Github"
+if (Test-Path $githubDir) {
+    & robocopy $PSScriptRoot $githubDir /MIR /XD target dist .git /XF *.pdb | Out-Null
+    Write-Host "Synced source tree to: $githubDir"
+}

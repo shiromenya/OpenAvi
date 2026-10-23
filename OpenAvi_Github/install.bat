@@ -7,21 +7,23 @@ echo ========================================================
 echo   OpenAvi ワンクリック・インストーラー (Windows x64)
 echo ========================================================
 
+REM 既に起動中の OpenAvi がある場合はファイルロック解除のため終了する
+taskkill /F /IM openavi.exe >nul 2>&1
+
+set "INSTALL_DIR=%LOCALAPPDATA%\Programs\OpenAvi"
 set "EXE_SRC="
+
 if exist "%~dp0openavi.exe" (
     set "EXE_SRC=%~dp0openavi.exe"
-) else if exist "%~dp0target\release\openavi.exe" (
-    set "EXE_SRC=%~dp0target\release\openavi.exe"
-) else if exist "%~dp0target\debug\openavi.exe" (
-    set "EXE_SRC=%~dp0target\debug\openavi.exe"
-)
-
-if "%EXE_SRC%"=="" (
-    echo [1/3] 実行ファイルをビルドしています...
-    set "PATH=%USERPROFILE%\.cargo\bin;%PATH%"
+) else (
+    echo [1/3] 最新ソースコードから実行ファイルをビルド・確認しています...
+    set "PATH=%USERPROFILE%\.cargo\bin;C:\Users\user\AppData\Local\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin;%PATH%"
+    set "CARGO_TARGET_DIR=%LOCALAPPDATA%\OpenAvi-BuildCache"
     cargo build --release
-    if exist "%~dp0target\release\openavi.exe" (
-        set "EXE_SRC=%~dp0target\release\openavi.exe"
+    if exist "%LOCALAPPDATA%\OpenAvi-BuildCache\release\openavi.exe" (
+        set "EXE_SRC=%LOCALAPPDATA%\OpenAvi-BuildCache\release\openavi.exe"
+    ) else if exist "%INSTALL_DIR%\openavi.exe" (
+        set "EXE_SRC=%INSTALL_DIR%\openavi.exe"
     ) else (
         echo [エラー] openavi.exe が見つかりません。
         pause
@@ -29,11 +31,12 @@ if "%EXE_SRC%"=="" (
     )
 )
 
-set "INSTALL_DIR=%LOCALAPPDATA%\Programs\OpenAvi"
 echo [2/3] インストール先: "%INSTALL_DIR%"
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
 
-copy /Y "%EXE_SRC%" "%INSTALL_DIR%\openavi.exe" > nul
+if /I not "%EXE_SRC%"=="%INSTALL_DIR%\openavi.exe" (
+    copy /Y "%EXE_SRC%" "%INSTALL_DIR%\openavi.exe" > nul
+)
 if exist "%~dp0assets" xcopy /E /I /Y "%~dp0assets" "%INSTALL_DIR%\assets" > nul
 if exist "%~dp0samples" xcopy /E /I /Y "%~dp0samples" "%INSTALL_DIR%\samples" > nul
 if exist "%~dp0plugins" xcopy /E /I /Y "%~dp0plugins" "%INSTALL_DIR%\plugins" > nul

@@ -249,7 +249,16 @@ impl EditorState {
         frame_index: u32,
         time_sec: f64,
     ) -> Option<(egui::TextureId, [usize; 2])> {
-        let path = PathBuf::from(path_str);
+        let mut path = PathBuf::from(path_str);
+        if !path.exists() {
+            if let Some(resolved) = resolve_app_path(path_str) {
+                path = resolved;
+            } else if path_str.ends_with("sample.mp4") {
+                if let Some(sample_vid) = resolve_app_path("samples/sample_video.mp4") {
+                    path = sample_vid;
+                }
+            }
+        }
         // 静止画の場合は frame_index = 0 で共通化
         let key_frame = match MediaKind::from_path(&path) {
             Some(MediaKind::Image) => 0,
