@@ -50,6 +50,10 @@ pub enum TimelineDrag {
     Scrub,
     /// オブジェクト移動。`grab_offset` は掴んだ位置とオブジェクト先頭の差（フレーム）
     Move { id: ObjectId, grab_offset: i64 },
+    /// 中クリックやドラッグによるタイムライン自由パン（縦横スクロール）
+    Pan { start_scroll_x: f32, start_scroll_y: f32, start_pos: egui::Pos2 },
+    /// 下部横スクロールバーのドラッグ
+    ScrollbarThumb { grab_rel: f32 },
 }
 
 impl Default for TimelineView {
@@ -163,7 +167,10 @@ impl EditorState {
     }
 
     pub fn set_frame(&mut self, frame: Frame) {
-        self.frame = frame.min(self.last_frame());
+        if frame >= self.scene.settings.length {
+            self.scene.settings.length = (frame + 300).max(self.scene.settings.length);
+        }
+        self.frame = frame;
         if self.playing {
             self.play_origin = Some((Instant::now(), self.frame));
         }
@@ -292,6 +299,9 @@ impl EditorState {
     /// タイムラインにオブジェクトを追加し、選択状態にします。
     pub fn add_object_at(&mut self, preferred_layer: usize, obj: TimelineObject) {
         let name = obj.display_name();
+        if obj.frame_end + 1 > self.scene.settings.length {
+            self.scene.settings.length = obj.frame_end + 1;
+        }
         let (placed_layer, id) = self.scene.insert_object_at_free_layer(preferred_layer, obj);
         self.selected = Some(id);
         self.dirty = true;
@@ -303,6 +313,9 @@ impl EditorState {
         let _ = self.register_source(path);
         let default_len = 150;
         let end_frame = start_frame + default_len - 1;
+        if end_frame + 1 > self.scene.settings.length {
+            self.scene.settings.length = end_frame + 1;
+        }
         let path_str = path.to_string_lossy().into_owned();
         let obj = match MediaKind::from_path(path) {
             Some(MediaKind::Image) => TimelineObject::new_image(start_frame, end_frame, path_str),
@@ -433,6 +446,9 @@ impl EditorState {
                     log::warn!("{w}");
                 }
                 self.scene = doc.scene;
+                if self.scene.settings.length < 18000 {
+                    self.scene.settings.length = self.scene.settings.length.max(self.scene.content_end()).max(18000);
+                }
                 self.encoding = doc.encoding;
                 self.warnings = doc.warnings;
                 self.file_path = path.map(Path::to_path_buf);

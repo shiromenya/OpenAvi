@@ -39,7 +39,7 @@ impl Default for SceneSettings {
             width: 1920,
             height: 1080,
             frame_rate: Rational::new(30, 1),
-            length: 300,
+            length: 18000, // 30fps で 10 分（必要に応じて自動拡張）
             audio_rate: 48000,
             audio_channels: 2,
         }
@@ -106,6 +106,9 @@ impl Scene {
         if layer >= self.layers.len() {
             self.layers.resize_with(layer + 1, Layer::default);
         }
+        if obj.frame_end + 1 > self.settings.length {
+            self.settings.length = obj.frame_end + 1;
+        }
         let l = &mut self.layers[layer];
         let free = l.is_free(obj.frame_start, obj.frame_end, None);
         l.objects.push(obj);
@@ -145,6 +148,9 @@ impl Scene {
         let mut obj = self.layers[old_layer].objects.remove(idx);
         obj.frame_start = new_start;
         obj.frame_end = new_end;
+        if new_end + 1 > self.settings.length {
+            self.settings.length = new_end + 1;
+        }
         self.layers[new_layer].objects.push(obj);
         self.layers[new_layer].sort();
         true
@@ -165,6 +171,9 @@ impl Scene {
     pub fn insert_object_at_free_layer(&mut self, preferred_layer: usize, mut obj: TimelineObject) -> (usize, ObjectId) {
         let start = obj.frame_start;
         let len = obj.length();
+        if obj.frame_end + 1 > self.settings.length {
+            self.settings.length = obj.frame_end + 1;
+        }
         // まず希望レイヤーで、後続オブジェクトにぶつかる場合は長さを詰めるか空きレイヤーを探す
         for l_idx in preferred_layer..self.layers.len() {
             let layer = &self.layers[l_idx];

@@ -22,6 +22,7 @@ use crate::state::{ContextTarget, EditorState, TimelineDrag};
 
 const HEADER_W: f32 = 88.0;
 const RULER_H: f32 = 22.0;
+const H_SCROLLBAR_H: f32 = 14.0;
 /// Premiere Pro 風のインクリップ・サムネイル／波形／図形プレビュー表示時のレイヤー高さ
 const LAYER_H_PREVIEW: f32 = 46.0;
 /// プレビュー OFF 時（従来の AviUtl 風コンパクト表示）のレイヤー高さ
@@ -46,10 +47,45 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
     let full = resp.rect;
     let ruler = Rect::from_min_max(pos2(full.left() + HEADER_W, full.top()), pos2(full.right(), full.top() + RULER_H));
-    let headers = Rect::from_min_max(pos2(full.left(), full.top() + RULER_H), pos2(full.left() + HEADER_W, full.bottom()));
-    let lanes = Rect::from_min_max(pos2(full.left() + HEADER_W, full.top() + RULER_H), full.max);
-
+    let headers = Rect::from_min_max(pos2(full.left(), full.top() + RULER_H), pos2(full.left() + HEADER_W, full.bottom() - H_SCROLLBAR_H));
+    let lanes = Rect::from_min_max(pos2(full.left() + HEADER_W, full.top() + RULER_H), pos2(full.right(), full.bottom() - H_SCROLLBAR_H));
+    let h_scrollbar = Rect::from_min_max(pos2(full.left() + HEADER_W, full.bottom() - H_SCROLLBAR_H), full.max);
+    let corner_bl = Rect::from_min_max(pos2(full.left(), full.bottom() - H_SCROLLBAR_H), pos2(full.left() + HEADER_W, full.bottom()));
     let corner = Rect::from_min_max(full.min, pos2(headers.right(), ruler.bottom()));
+
+    let ppf = st.timeline.px_per_frame;
+    let layer_h = if st.timeline.show_clip_previews {
+        LAYER_H_PREVIEW
+    } else {
+        LAYER_H_COMPACT
+    };
+    let max_y = (MAX_LAYERS as f32 * layer_h - lanes.height()).max(0.0);
+
+    // 水平スクロール可能範囲の動的計算（現在の長さ＋常に先へスクロール可能な余白）
+    let content_frames = (st.scene.settings.length.max(st.scene.content_end()) as f32).max(1800.0);
+    let visible_frames = (lanes.width() / ppf).max(1.0);
+    let total_scrollable_frames = (content_frames + 3600.0).max(st.timeline.scroll_x + visible_frames + 1200.0);
+    let max_scroll_x = (total_scrollable_frames - visible_frames).max(1.0);
+    let thumb_w = ((visible_frames / total_scrollable_frames) * h_scrollbar.width()).clamp(28.0, h_scrollbar.width());
+    let track_free = (h_scrollbar.width() - thumb_w).max(1.0);
+    let scroll_ratio = (st.timeline.scroll_x / max_scroll_x).clamp(0.0, 1.0);
+    let thumb_left = h_scrollbar.left() + scroll_ratio * track_free;
+    let thumb_rect = Rect::from_min_size(pos2(thumb_left, h_scrollbar.top() + 2.0), vec2(thumb_w, H_SCROLLBAR_H - 4.0));
+
+    // ---- 中クリック (ホイールクリック) / Alt+ドラッグによる縦横パン操作 ----
+    let middle_down = ui.input(|i| i.pointer.button_down(egui::PointerButton::Middle));
+    let alt_down = ui.input(|i| i.modifiers.alt && i.pointer.button_down(egui::PointerButton::Primary));
+    if (middle_down || alt_down) && st.timeline.drag.is_none() {
+        if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+            if full.contains(p) {
+                st.timeline.drag = Some(TimelineDrag::Pan {
+                    start_scroll_x: st.timeline.scroll_x,
+                    start_scroll_y: st.timeline.scroll_y,
+                    start_pos: p,
+                });
+            }
+        }
+    }
 
     // ---- スクロール / ズーム ----
     if resp.hovered() {
@@ -59,22 +95,22 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
             if let Some(p) = resp.hover_pos() {
                 let anchor = (p.x - lanes.left()) / v.px_per_frame + v.scroll_x;
                 v.px_per_frame = (v.px_per_frame * zoom).clamp(0.05, 48.0);
-                v.scroll_x = anchor - (p.x - lanes.left()) / v.px_per_frame;
+                v.scroll_x = (anchor - (p.x - lanes.left()) / v.px_per_frame).max(0.0);
             }
         } else {
-            let (dx, dy) = if shift && scroll.x == 0.0 { (scroll.y, 0.0) } else { (scroll.x, scroll.y) };
-            v.scroll_x -= dx / v.px_per_frame;
-            v.scroll_y -= dy;
+            let hover_p = resp.hover_pos();
+            let is_over_ruler_or_scroll = hover_p.is_some_and(|p| ruler.contains(p) || h_scrollbar.contains(p));
+            // Shift+ホイール、水平ホイール/タッチパッド、またはルーラー／スクロールバー上のホイールで横スクロール
+            if shift || scroll.x != 0.0 || is_over_ruler_or_scroll {
+                let raw_h = if scroll.x != 0.0 { scroll.x } else { scroll.y };
+                v.scroll_x = (v.scroll_x - (raw_h * 2.5) / v.px_per_frame).max(0.0);
+            } else if scroll.y != 0.0 {
+                v.scroll_y = (v.scroll_y - scroll.y).clamp(0.0, max_y);
+            }
         }
     }
-    let layer_h = if st.timeline.show_clip_previews {
-        LAYER_H_PREVIEW
-    } else {
-        LAYER_H_COMPACT
-    };
     {
         let v = &mut st.timeline;
-        let max_y = (MAX_LAYERS as f32 * layer_h - lanes.height()).max(0.0);
         v.scroll_y = v.scroll_y.clamp(0.0, max_y);
         v.scroll_x = v.scroll_x.max(0.0);
     }
@@ -129,7 +165,17 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     // ---- 左ドラッグ・クリック操作 ----
     if resp.drag_started_by(egui::PointerButton::Primary) {
         if let Some(p) = ui.input(|i| i.pointer.press_origin()) {
-            st.timeline.drag = if ruler.contains(p) {
+            st.timeline.drag = if h_scrollbar.contains(p) {
+                if thumb_rect.contains(p) {
+                    Some(TimelineDrag::ScrollbarThumb { grab_rel: (p.x - thumb_left) / thumb_w.max(1.0) })
+                } else if p.x < thumb_left {
+                    st.timeline.scroll_x = (st.timeline.scroll_x - visible_frames * 0.75).max(0.0);
+                    None
+                } else {
+                    st.timeline.scroll_x = (st.timeline.scroll_x + visible_frames * 0.75).min(max_scroll_x);
+                    None
+                }
+            } else if ruler.contains(p) {
                 Some(TimelineDrag::Scrub)
             } else if let Some((id, start)) = hit(st, p) {
                 st.selected = Some(id);
@@ -141,11 +187,44 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
             };
         }
     }
-    if resp.dragged_by(egui::PointerButton::Primary) {
-        if let Some(p) = resp.interact_pointer_pos() {
-            match st.timeline.drag {
-                Some(TimelineDrag::Scrub) => st.set_frame(xf(p.x)),
-                Some(TimelineDrag::Move { id, grab_offset }) => {
+    if let Some(drag_mode) = st.timeline.drag {
+        match drag_mode {
+            TimelineDrag::Pan { start_scroll_x, start_scroll_y, start_pos } => {
+                if middle_down || alt_down {
+                    if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                        let dx = (p.x - start_pos.x) / ppf;
+                        let dy = p.y - start_pos.y;
+                        st.timeline.scroll_x = (start_scroll_x - dx).max(0.0);
+                        st.timeline.scroll_y = (start_scroll_y - dy).clamp(0.0, max_y);
+                    }
+                } else {
+                    st.timeline.drag = None;
+                }
+            }
+            TimelineDrag::ScrollbarThumb { grab_rel } => {
+                if ui.input(|i| i.pointer.primary_down()) {
+                    if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                        let desired_left = p.x - grab_rel * thumb_w;
+                        let rel_x = (desired_left - h_scrollbar.left()).clamp(0.0, track_free);
+                        st.timeline.scroll_x = (rel_x / track_free) * max_scroll_x;
+                    }
+                } else {
+                    st.timeline.drag = None;
+                }
+            }
+            TimelineDrag::Scrub => {
+                if let Some(p) = resp.interact_pointer_pos() {
+                    st.set_frame(xf(p.x));
+                }
+            }
+            TimelineDrag::Move { id, grab_offset } => {
+                if let Some(p) = resp.interact_pointer_pos() {
+                    // 端に近づいた時の自動横スクロール
+                    if p.x > lanes.right() - 24.0 {
+                        st.timeline.scroll_x += 16.0 / ppf;
+                    } else if p.x < lanes.left() + 24.0 {
+                        st.timeline.scroll_x = (st.timeline.scroll_x - 16.0 / ppf).max(0.0);
+                    }
                     let new_start = (xf(p.x) as i64 - grab_offset).max(0) as Frame;
                     let new_layer = y_layer(p.y);
                     if let Some((cur_layer, obj)) = st.scene.find(id) {
@@ -156,17 +235,24 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                         }
                     }
                 }
-                None => {}
             }
         }
     }
     if resp.drag_stopped() {
-        st.timeline.drag = None;
+        if matches!(st.timeline.drag, Some(TimelineDrag::Scrub | TimelineDrag::Move { .. } | TimelineDrag::ScrollbarThumb { .. })) {
+            st.timeline.drag = None;
+        }
     }
     if resp.clicked() {
         if let Some(p) = resp.interact_pointer_pos() {
             if corner.contains(p) {
                 st.timeline.show_clip_previews = !st.timeline.show_clip_previews;
+            } else if h_scrollbar.contains(p) {
+                if p.x < thumb_left {
+                    st.timeline.scroll_x = (st.timeline.scroll_x - visible_frames * 0.75).max(0.0);
+                } else if p.x > thumb_rect.right() {
+                    st.timeline.scroll_x = (st.timeline.scroll_x + visible_frames * 0.75).min(max_scroll_x);
+                }
             } else if headers.contains(p) {
                 let l = &mut st.scene.layers[y_layer(p.y)];
                 l.visible = !l.visible;
@@ -457,6 +543,25 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
             Stroke::NONE,
         ));
     }
+
+    // 下部水平スクロールバー
+    painter.rect_filled(h_scrollbar, 0.0, Color32::from_gray(30));
+    painter.line_segment([h_scrollbar.left_top(), h_scrollbar.right_top()], Stroke::new(1.0_f32, Color32::from_gray(45)));
+    let thumb_hovered = hover_pos.is_some_and(|p| thumb_rect.contains(p));
+    let thumb_bg = if matches!(st.timeline.drag, Some(TimelineDrag::ScrollbarThumb { .. })) {
+        Color32::from_rgb(100, 145, 215)
+    } else if thumb_hovered {
+        Color32::from_gray(115)
+    } else {
+        Color32::from_gray(80)
+    };
+    painter.rect_filled(thumb_rect, 3.0, thumb_bg);
+    painter.rect_stroke(thumb_rect, 3.0, Stroke::new(1.0_f32, Color32::from_white_alpha(50)));
+
+    // 左下角
+    painter.rect_filled(corner_bl, 0.0, Color32::from_gray(38));
+    painter.line_segment([corner_bl.left_top(), corner_bl.right_top()], Stroke::new(1.0_f32, Color32::from_gray(45)));
+    painter.line_segment([corner_bl.right_top(), corner_bl.right_bottom()], Stroke::new(1.0_f32, Color32::from_gray(45)));
 }
 
 /// タイムライン右クリック時のコンテキストメニュー。
