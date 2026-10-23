@@ -15,8 +15,8 @@ use crate::state::EditorState;
 pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     let egui_ctx = ui.ctx().clone();
 
-    // 下部のシークバー＆再生コントロール領域の高さ（約 54px）を残して上部にプレビューキャンバスを配置
-    let control_height = 54.0;
+    // 下部のシークバー＆再生コントロール領域の高さ（マージン込みで約 82px）を残して上部にプレビューキャンバスを配置
+    let control_height = 84.0;
     let avail = ui.available_size();
     let preview_size = vec2(avail.x.max(64.0), (avail.y - control_height).max(64.0));
 
@@ -94,45 +94,110 @@ fn bottom_transport_bar(ui: &mut egui::Ui, st: &mut EditorState) {
     let last = st.last_frame();
     let mut f = st.frame;
 
-    // 1段目：プレビュー幅いっぱいのシークバー
-    ui.horizontal(|ui| {
-        ui.spacing_mut().slider_width = (ui.available_width() - 8.0).max(80.0);
-        if ui
-            .add(egui::Slider::new(&mut f, 0..=last).show_value(false))
-            .on_hover_text("シークバー（ドラッグでフレーム移動）")
-            .changed()
-        {
-            st.set_frame(f);
-        }
-    });
+    egui::Frame::none()
+        .fill(Color32::from_rgb(20, 22, 27))
+        .stroke(Stroke::new(1.0_f32, Color32::from_gray(38)))
+        .rounding(egui::Rounding::same(6.0))
+        .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+        .show(ui, |ui| {
+            // 1段目：シークバー
+            ui.horizontal(|ui| {
+                ui.spacing_mut().slider_width = (ui.available_width() - 8.0).max(80.0);
+                if ui
+                    .add(egui::Slider::new(&mut f, 0..=last).show_value(false))
+                    .on_hover_text("シークバー（ドラッグで再生位置を移動）")
+                    .changed()
+                {
+                    st.set_frame(f);
+                }
+            });
 
-    // 2段目：再生・コマ送りボタンと現在タイムコード / フレーム番号
-    ui.horizontal(|ui| {
-        if ui.button("⏮").on_hover_text("先頭フレームへ (Home)").clicked() {
-            st.set_frame(0);
-        }
-        if ui.button("◀").on_hover_text("1 フレーム戻る (←)").clicked() {
-            st.step(-1);
-        }
-        let play_label = if st.playing { "⏸ 一時停止" } else { "▶ 再生" };
-        if ui
-            .button(play_label)
-            .on_hover_text("再生 / 一時停止 (Space)")
-            .clicked()
-        {
-            st.toggle_play();
-        }
-        if ui.button("▶|").on_hover_text("1 フレーム進む (→)").clicked() {
-            st.step(1);
-        }
-        if ui.button("⏭").on_hover_text("最終フレームへ (End)").clicked() {
-            st.set_frame(last);
-        }
+            ui.add_space(3.0);
 
-        ui.separator();
-        let tc = st.scene.settings.frame_rate.timecode(st.frame);
-        ui.monospace(format!("{tc}  ({} / {} F)", st.frame + 1, last + 1));
-    });
+            // 2段目：プロ仕様 3 カラムレイアウト（すべて高さ 24px で垂直中央に統一）
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
+
+                // 左側：タイムコードバッジ [TC] + タイムコード (ベースライン・高さを完璧に統一)
+                let rate = st.scene.settings.frame_rate;
+                let tc = rate.timecode(st.frame);
+
+                let tc_badge = egui::Button::new(
+                    egui::RichText::new("TC")
+                        .monospace()
+                        .size(10.0)
+                        .strong()
+                        .color(Color32::from_rgb(147, 197, 253)),
+                )
+                .fill(Color32::from_rgb(28, 34, 46))
+                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(45, 60, 90)))
+                .min_size(vec2(26.0, 24.0));
+                ui.add(tc_badge);
+
+                ui.add_space(2.0);
+                ui.label(
+                    egui::RichText::new(&tc)
+                        .monospace()
+                        .size(13.0)
+                        .strong()
+                        .color(Color32::from_rgb(240, 244, 252)),
+                );
+                ui.label(
+                    egui::RichText::new(format!("({} / {} F)", st.frame + 1, last + 1))
+                        .monospace()
+                        .size(11.0)
+                        .color(Color32::from_gray(140)),
+                );
+
+                ui.separator();
+
+                // 中央：再生・コマ送りボタン群（すべて高さ 24px で統一）
+                let nav_btn = |ui: &mut egui::Ui, text: &'static str, tip: &'static str| -> egui::Response {
+                    ui.add(
+                        egui::Button::new(egui::RichText::new(text).size(12.0).color(Color32::from_gray(225)))
+                            .min_size(vec2(28.0, 24.0)),
+                    )
+                    .on_hover_text(tip)
+                };
+
+                if nav_btn(ui, "⏮", "先頭フレームへ (Home)").clicked() {
+                    st.set_frame(0);
+                }
+                if nav_btn(ui, "◀", "1 コマ戻る (←)").clicked() {
+                    st.step(-1);
+                }
+
+                // 再生 / 一時停止ボタン（アクティブ時は鮮やかなブルーで強調、高さ 24px）
+                let (play_label, play_color) = if st.playing {
+                    ("⏸ 一時停止", Color32::from_rgb(220, 38, 38))
+                } else {
+                    ("▶ 再生", Color32::from_rgb(37, 99, 235))
+                };
+                let play_btn = egui::Button::new(egui::RichText::new(play_label).strong().size(12.0).color(Color32::WHITE))
+                    .fill(play_color)
+                    .min_size(vec2(86.0, 24.0));
+                if ui.add(play_btn).on_hover_text("再生 / 一時停止 (Space)").clicked() {
+                    st.toggle_play();
+                }
+
+                if nav_btn(ui, "▶|", "1 コマ進む (→)").clicked() {
+                    st.step(1);
+                }
+                if nav_btn(ui, "⏭", "最終フレームへ (End)").clicked() {
+                    st.set_frame(last);
+                }
+
+                // 右側：解像度とフレームレート情報
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let s = &st.scene.settings;
+                    ui.label(
+                        egui::RichText::new(format!("{}×{}  {:.0}fps", s.width, s.height, s.frame_rate.as_f64()))
+                            .size(11.0)
+                            .color(Color32::from_gray(145)),
+                    );
+                });
+            });
+        });
 }
 
 struct DrawCtx<'a> {

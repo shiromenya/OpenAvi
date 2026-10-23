@@ -129,7 +129,6 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     let scroll_y = st.timeline.scroll_y;
     let fx = |f: f32| lanes.left() + (f - scroll_x) * ppf;
     let xf = |x: f32| ((x - lanes.left()) / ppf + scroll_x).max(0.0) as Frame;
-    let row_top = |li: usize| lanes.top() + li as f32 * layer_h - scroll_y;
     let y_layer = |y: f32| (((y - lanes.top() + scroll_y) / layer_h).floor().max(0.0) as usize).min(MAX_LAYERS - 1);
 
     let hit = |st: &EditorState, p: egui::Pos2| -> Option<(ObjectId, Frame)> {
@@ -214,7 +213,22 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
             }
             TimelineDrag::Scrub => {
                 if let Some(p) = resp.interact_pointer_pos() {
-                    st.set_frame(xf(p.x));
+                    let frame = xf(p.x);
+                    st.set_frame(frame);
+
+                    // 赤い縦線（再生位置）をドラッグした際、画面端に近づくか見切れたらタイムラインを自動で一緒にスクロール
+                    let margin = 32.0;
+                    if p.x > lanes.right() - margin {
+                        let overflow = (p.x - (lanes.right() - margin)).max(1.0);
+                        let speed = (overflow * 0.75).clamp(2.0, 36.0);
+                        st.timeline.scroll_x += speed / ppf;
+                        ui.ctx().request_repaint();
+                    } else if p.x < lanes.left() + margin {
+                        let overflow = ((lanes.left() + margin) - p.x).max(1.0);
+                        let speed = (overflow * 0.75).clamp(2.0, 36.0);
+                        st.timeline.scroll_x = (st.timeline.scroll_x - speed / ppf).max(0.0);
+                        ui.ctx().request_repaint();
+                    }
                 }
             }
             TimelineDrag::Move { id, grab_offset } => {
@@ -402,16 +416,24 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                     lane_painter.rect_stroke(r, 3.5, Stroke::new(1.0_f32, Color32::from_black_alpha(110)));
                 }
 
-                // ヘッダーラベル + アイコン + fx バッジ
+                // ヘッダーラベル + アイコン + fx バッジ（高さを正確に統一）
                 let text_clip = header_rect.shrink2(vec2(3.0, 0.0)).intersect(lanes);
                 if text_clip.width() > 8.0 {
                     let hp = painter.with_clip_rect(text_clip);
                     let icon = clip_kind_icon(obj);
-                    let label = format!("{icon} {}", obj.display_name());
+                    let left_x = header_rect.left().max(lanes.left()) + 5.0;
+                    let cy = header_rect.center().y;
                     hp.text(
-                        pos2(header_rect.left().max(lanes.left()) + 4.0, header_rect.center().y),
+                        pos2(left_x, cy),
                         Align2::LEFT_CENTER,
-                        label,
+                        icon,
+                        FontId::proportional(11.0),
+                        Color32::WHITE,
+                    );
+                    hp.text(
+                        pos2(left_x + 15.0, cy),
+                        Align2::LEFT_CENTER,
+                        obj.display_name(),
                         FontId::proportional(11.0),
                         Color32::WHITE,
                     );
@@ -420,7 +442,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                         let badge_text = format!("fx+{extra_fx}");
                         let bx = header_rect.right().min(lanes.right()) - 4.0;
                         hp.text(
-                            pos2(bx, header_rect.center().y),
+                            pos2(bx, cy),
                             Align2::RIGHT_CENTER,
                             badge_text,
                             FontId::monospace(9.5),
@@ -471,7 +493,8 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     }
 
     // ルーラー
-    painter.rect_filled(ruler, 0.0, Color32::from_gray(46));
+    painter.rect_filled(ruler, 0.0, Color32::from_rgb(26, 28, 35));
+    painter.line_segment([ruler.left_bottom(), ruler.right_bottom()], Stroke::new(1.0_f32, Color32::from_gray(44)));
     let rate = st.scene.settings.frame_rate;
     let fps = rate.as_f64().round().max(1.0) as u32;
     let candidates = [1, 2, 5, 10, fps / 2, fps, fps * 2, fps * 5, fps * 10, fps * 30, fps * 60, fps * 300, fps * 600];
@@ -484,53 +507,72 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
         let x = fx(f as f32);
         let major = f % step == 0;
         let h = if major { RULER_H * 0.6 } else { RULER_H * 0.25 };
-        ruler_painter.line_segment([pos2(x, ruler.bottom() - h), pos2(x, ruler.bottom())], Stroke::new(1.0_f32, Color32::from_gray(150)));
+        ruler_painter.line_segment([pos2(x, ruler.bottom() - h), pos2(x, ruler.bottom())], Stroke::new(1.0_f32, Color32::from_gray(120)));
         if major {
-            ruler_painter.text(pos2(x + 3.0, ruler.top() + 1.0), Align2::LEFT_TOP, fmt_time(f, rate), FontId::monospace(10.0), Color32::from_gray(200));
+            ruler_painter.text(pos2(x + 3.0, ruler.top() + 2.0), Align2::LEFT_TOP, fmt_time(f, rate), FontId::monospace(10.0), Color32::from_gray(190));
         }
         f += minor;
     }
 
     // レイヤーヘッダ
     let header_painter = painter.with_clip_rect(headers);
-    header_painter.rect_filled(headers, 0.0, Color32::from_gray(42));
+    header_painter.rect_filled(headers, 0.0, Color32::from_rgb(24, 26, 32));
     for li in visible_rows {
         let y = row_top(li);
         let r = Rect::from_min_size(pos2(headers.left(), y), vec2(HEADER_W, layer_h));
         let layer = &st.scene.layers[li];
-        let color = if layer.visible { Color32::from_gray(220) } else { Color32::from_gray(90) };
+        let color = if layer.visible { Color32::from_gray(225) } else { Color32::from_gray(100) };
         let base_name = layer.name.clone().unwrap_or_else(|| format!("Layer {}", li + 1));
-        let label = if layer.locked { format!("🔒 {base_name}") } else { base_name };
-        header_painter.text(r.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, label, FontId::proportional(12.0), color);
-        header_painter.line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(1.0_f32, Color32::from_gray(30)));
+
+        // レイヤーバッジ [L1]
+        let badge_rect = Rect::from_min_size(pos2(r.left() + 5.0, r.center().y - 8.0), vec2(22.0, 16.0));
+        header_painter.rect_filled(badge_rect, 3.0, Color32::from_rgb(34, 38, 48));
+        header_painter.text(badge_rect.center(), Align2::CENTER_CENTER, format!("L{}", li + 1), FontId::monospace(10.0), Color32::from_rgb(175, 195, 225));
+
+        // レイヤー名
+        header_painter.text(pos2(badge_rect.right() + 5.0, r.center().y), Align2::LEFT_CENTER, base_name, FontId::proportional(11.5), color);
+
+        // 状態アイコン (右端)
+        if layer.locked {
+            header_painter.text(pos2(r.right() - 5.0, r.center().y), Align2::RIGHT_CENTER, "🔒", FontId::proportional(10.0), Color32::from_rgb(250, 204, 21));
+        } else if !layer.visible {
+            header_painter.text(pos2(r.right() - 5.0, r.center().y), Align2::RIGHT_CENTER, "🚫", FontId::proportional(10.0), Color32::from_gray(120));
+        }
+        header_painter.line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(1.0_f32, Color32::from_gray(35)));
     }
 
-    // 左上コーナー：クリップ内プレビュー ON/OFF ワンクリック切替ボタン
+    // 左上コーナー：クリップ内プレビュー ON/OFF スタイリッシュピルボタン
     let corner_hovered = hover_pos.is_some_and(|p| corner.contains(p));
-    let corner_bg = if show_previews {
+    painter.rect_filled(corner, 0.0, Color32::from_rgb(22, 24, 30));
+    painter.line_segment([corner.right_top(), corner.right_bottom()], Stroke::new(1.0_f32, Color32::from_gray(40)));
+    painter.line_segment([corner.left_bottom(), corner.right_bottom()], Stroke::new(1.0_f32, Color32::from_gray(40)));
+
+    let btn_rect = corner.shrink2(vec2(4.0, 3.0));
+    let (btn_fill, btn_stroke, text_color) = if show_previews {
         if corner_hovered {
-            Color32::from_rgb(65, 105, 175)
+            (Color32::from_rgb(45, 110, 245), Stroke::new(1.0_f32, Color32::from_rgb(147, 197, 253)), Color32::WHITE)
         } else {
-            Color32::from_rgb(52, 86, 148)
+            (Color32::from_rgb(37, 99, 235), Stroke::new(1.0_f32, Color32::from_rgb(96, 165, 250)), Color32::WHITE)
         }
     } else if corner_hovered {
-        Color32::from_gray(64)
+        (Color32::from_rgb(52, 56, 68), Stroke::new(1.0_f32, Color32::from_gray(120)), Color32::from_gray(225))
     } else {
-        Color32::from_gray(50)
+        (Color32::from_rgb(38, 41, 50), Stroke::new(1.0_f32, Color32::from_gray(65)), Color32::from_gray(175))
     };
-    painter.rect_filled(corner, 0.0, corner_bg);
-    painter.rect_stroke(corner.shrink(1.0), 2.0, Stroke::new(1.0_f32, Color32::from_white_alpha(40)));
+    painter.rect_filled(btn_rect, 4.0, btn_fill);
+    painter.rect_stroke(btn_rect, 4.0, btn_stroke);
+
     let toggle_label = if show_previews {
         "🖼 プレビュー: ON"
     } else {
         "🖼 プレビュー: OFF"
     };
     painter.text(
-        corner.center(),
+        btn_rect.center(),
         Align2::CENTER_CENTER,
         toggle_label,
-        FontId::proportional(10.5),
-        Color32::WHITE,
+        FontId::proportional(10.0),
+        text_color,
     );
 
     // 再生位置
@@ -545,23 +587,23 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     }
 
     // 下部水平スクロールバー
-    painter.rect_filled(h_scrollbar, 0.0, Color32::from_gray(30));
-    painter.line_segment([h_scrollbar.left_top(), h_scrollbar.right_top()], Stroke::new(1.0_f32, Color32::from_gray(45)));
+    painter.rect_filled(h_scrollbar, 0.0, Color32::from_gray(24));
+    painter.line_segment([h_scrollbar.left_top(), h_scrollbar.right_top()], Stroke::new(1.0_f32, Color32::from_gray(40)));
     let thumb_hovered = hover_pos.is_some_and(|p| thumb_rect.contains(p));
     let thumb_bg = if matches!(st.timeline.drag, Some(TimelineDrag::ScrollbarThumb { .. })) {
-        Color32::from_rgb(100, 145, 215)
+        Color32::from_rgb(37, 99, 235)
     } else if thumb_hovered {
-        Color32::from_gray(115)
+        Color32::from_gray(120)
     } else {
-        Color32::from_gray(80)
+        Color32::from_gray(75)
     };
     painter.rect_filled(thumb_rect, 3.0, thumb_bg);
-    painter.rect_stroke(thumb_rect, 3.0, Stroke::new(1.0_f32, Color32::from_white_alpha(50)));
+    painter.rect_stroke(thumb_rect, 3.0, Stroke::new(1.0_f32, Color32::from_white_alpha(45)));
 
     // 左下角
-    painter.rect_filled(corner_bl, 0.0, Color32::from_gray(38));
-    painter.line_segment([corner_bl.left_top(), corner_bl.right_top()], Stroke::new(1.0_f32, Color32::from_gray(45)));
-    painter.line_segment([corner_bl.right_top(), corner_bl.right_bottom()], Stroke::new(1.0_f32, Color32::from_gray(45)));
+    painter.rect_filled(corner_bl, 0.0, Color32::from_rgb(24, 26, 32));
+    painter.line_segment([corner_bl.left_top(), corner_bl.right_top()], Stroke::new(1.0_f32, Color32::from_gray(40)));
+    painter.line_segment([corner_bl.right_top(), corner_bl.right_bottom()], Stroke::new(1.0_f32, Color32::from_gray(40)));
 }
 
 /// タイムライン右クリック時のコンテキストメニュー。

@@ -15,30 +15,38 @@ use crate::state::EditorState;
 
 pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     // ---- 1. 上部クイックバー（ファイルから簡単にインストール＆開く） ----
-    ui.horizontal_wrapped(|ui| {
-        if ui
-            .button("📂 開く / 一括取込...")
-            .on_hover_text("プロジェクト(.aup/.exo)、動画・画像・音声、プラグイン(.anm/.auf等)を自動判別して開く・インストールします")
-            .clicked()
-        {
-            st.smart_open_dialog();
-        }
-        if ui
-            .button("🎬 素材追加...")
-            .on_hover_text("動画・画像・音声ファイルをソース一覧に追加します")
-            .clicked()
-        {
-            st.import_sources_dialog();
-        }
-        if ui
-            .button("🧩 プラグイン追加...")
-            .on_hover_text(".anm / .obj / .auf 等のスクリプト・プラグインをインストールします")
-            .clicked()
-        {
-            st.install_plugin_dialog();
-        }
-    });
-    ui.separator();
+    egui::Frame::none()
+        .fill(Color32::from_rgb(24, 26, 33))
+        .stroke(egui::Stroke::new(1.0_f32, Color32::from_gray(38)))
+        .rounding(egui::Rounding::same(6.0))
+        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().button_padding = vec2(8.0, 5.0);
+                if ui
+                    .button(RichText::new("📂 開く / 一括取込").strong())
+                    .on_hover_text("プロジェクト(.aup/.exo)、動画・画像・音声、プラグイン(.anm/.auf等)を自動判別して開く・インストールします")
+                    .clicked()
+                {
+                    st.smart_open_dialog();
+                }
+                if ui
+                    .button(RichText::new("🎬 素材追加").color(Color32::from_rgb(147, 197, 253)))
+                    .on_hover_text("動画・画像・音声ファイルをソース一覧に追加します")
+                    .clicked()
+                {
+                    st.import_sources_dialog();
+                }
+                if ui
+                    .button(RichText::new("🧩 プラグイン追加").color(Color32::from_rgb(167, 243, 208)))
+                    .on_hover_text(".anm / .obj / .auf 等のスクリプト・プラグインをインストールします")
+                    .clicked()
+                {
+                    st.install_plugin_dialog();
+                }
+            });
+        });
+    ui.add_space(4.0);
 
     // ---- 2. ソースモニター（選択中のメディア素材のプレビュー） ----
     if let Some(sel_idx) = st.selected_source.filter(|&i| i < st.sources.len()) {

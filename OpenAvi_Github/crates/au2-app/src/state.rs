@@ -557,8 +557,37 @@ impl EditorState {
         }
     }
 
+    /// プロジェクトを保存します（保存先が決まっていれば上書き、未設定ならダイアログ）。
+    pub fn save_project(&mut self) -> bool {
+        if let Some(path) = self.file_path.clone() {
+            let is_legacy_aup = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("aup"));
+            let bytes = if is_legacy_aup {
+                au2_aup::write_aup_bytes(&self.scene)
+            } else {
+                au2_aup::write_aup2_bytes(&self.scene, Some(&path), self.frame)
+            };
+            match std::fs::write(&path, bytes) {
+                Ok(()) => {
+                    let kind_label = if is_legacy_aup { ".aup" } else { ".aup2" };
+                    self.status = format!("プロジェクトを {} に保存しました ({kind_label})", path.display());
+                    self.dirty = false;
+                    true
+                }
+                Err(e) => {
+                    self.status = format!("プロジェクト保存に失敗しました: {e}");
+                    false
+                }
+            }
+        } else {
+            self.save_project_dialog()
+        }
+    }
+
     /// `.aup2` (AviUtl2 プロジェクト) または `.aup` として保存するダイアログ。
-    pub fn save_project_dialog(&mut self) {
+    pub fn save_project_dialog(&mut self) -> bool {
         let mut dlg = rfd::FileDialog::new()
             .set_title("プロジェクトを保存 (.aup2 / .aup)")
             .add_filter("AviUtl2 プロジェクトファイル (.aup2)", &["aup2"])
@@ -588,9 +617,15 @@ impl EditorState {
                     self.status = format!("プロジェクトを {} に保存しました ({kind_label})", path.display());
                     self.file_path = Some(path);
                     self.dirty = false;
+                    true
                 }
-                Err(e) => self.status = format!("プロジェクト保存に失敗しました: {e}"),
+                Err(e) => {
+                    self.status = format!("プロジェクト保存に失敗しました: {e}");
+                    false
+                }
             }
+        } else {
+            false
         }
     }
 

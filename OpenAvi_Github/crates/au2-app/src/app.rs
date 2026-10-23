@@ -3,7 +3,9 @@
 use std::path::PathBuf;
 
 use au2_plugin::SupportStatus;
-use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, RichText, ViewportBuilder, ViewportClass, ViewportId};
+use eframe::egui::{
+    self, vec2, Color32, Key, KeyboardShortcut, Modifiers, RichText, Stroke, ViewportBuilder, ViewportClass, ViewportId,
+};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 
 use crate::panels;
@@ -45,6 +47,8 @@ pub struct OpenAviApp {
     gpu_info: String,
     show_plugins: bool,
     show_about: bool,
+    show_unsaved_confirm: bool,
+    last_title: String,
 }
 
 fn default_dock() -> DockState<Tab> {
@@ -63,7 +67,42 @@ const SC_SAVE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key:
 impl OpenAviApp {
     pub fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>) -> Self {
         crate::fonts::install_japanese_font(&cc.egui_ctx);
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
+
+        // プロ向け動画編集ソフトに最適化した洗練されたダークテーマ
+        let mut visuals = egui::Visuals::dark();
+        visuals.panel_fill = Color32::from_rgb(20, 21, 25);
+        visuals.window_fill = Color32::from_rgb(26, 28, 34);
+        visuals.extreme_bg_color = Color32::from_rgb(13, 14, 17);
+        visuals.faint_bg_color = Color32::from_rgb(28, 30, 36);
+        visuals.selection.bg_fill = Color32::from_rgb(37, 99, 235);
+        visuals.selection.stroke = Stroke::new(1.0_f32, Color32::from_rgb(96, 165, 250));
+
+        let rounding = egui::Rounding::same(4.0);
+        visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(24, 25, 30);
+        visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, Color32::from_gray(38));
+        visuals.widgets.noninteractive.rounding = rounding;
+
+        visuals.widgets.inactive.bg_fill = Color32::from_rgb(34, 37, 46);
+        visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, Color32::from_gray(48));
+        visuals.widgets.inactive.rounding = rounding;
+
+        visuals.widgets.hovered.bg_fill = Color32::from_rgb(46, 52, 65);
+        visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(96, 165, 250));
+        visuals.widgets.hovered.rounding = rounding;
+
+        visuals.widgets.active.bg_fill = Color32::from_rgb(37, 99, 235);
+        visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
+        visuals.widgets.active.rounding = rounding;
+
+        visuals.widgets.open.bg_fill = Color32::from_rgb(38, 42, 52);
+        visuals.widgets.open.rounding = rounding;
+        cc.egui_ctx.set_visuals(visuals);
+
+        let mut style = (*cc.egui_ctx.style()).clone();
+        style.spacing.item_spacing = vec2(8.0, 6.0);
+        style.spacing.button_padding = vec2(9.0, 5.0);
+        style.spacing.window_margin = egui::Margin::same(8.0);
+        cc.egui_ctx.set_style(style);
 
         let gpu_info = cc
             .wgpu_render_state
@@ -87,6 +126,8 @@ impl OpenAviApp {
             gpu_info,
             show_plugins: false,
             show_about: false,
+            show_unsaved_confirm: false,
+            last_title: String::new(),
         }
     }
 }
@@ -171,6 +212,28 @@ impl TabViewer for Viewer<'_> {
 
 impl eframe::App for OpenAviApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // ウィンドウ閉じる要求 (Alt+F4 や [X] ボタン) を検知し、未保存の変更がある場合は確認ダイアログを表示
+        if ctx.input(|i| i.viewport().close_requested()) {
+            if self.st.dirty {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.show_unsaved_confirm = true;
+            }
+        }
+
+        // タイトルバーにファイル名と編集状態 (*) を反映
+        let doc_name = self
+            .st
+            .file_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "無題".to_string());
+        let current_title = format!("OpenAvi - [{}{}]", doc_name, if self.st.dirty { " *" } else { "" });
+        if current_title != self.last_title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(current_title.clone()));
+            self.last_title = current_title;
+        }
+
         // ドラッグ＆ドロップで .aup / .exo / メディア / プラグインを一括処理
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
         for path in dropped {
@@ -218,6 +281,9 @@ impl eframe::App for OpenAviApp {
                     ui.label("ライセンス: MIT License");
                 });
         }
+
+        // 保存確認モーダルダイアログ
+        self.unsaved_confirm_dialog(ctx);
     }
 }
 
@@ -283,7 +349,11 @@ impl OpenAviApp {
                     }
                     ui.separator();
                     if ui.button("終了").clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        if self.st.dirty {
+                            self.show_unsaved_confirm = true;
+                        } else {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
                     }
                 });
                 ui.menu_button("表示", |ui| {
@@ -452,5 +522,86 @@ impl OpenAviApp {
             );
         }
         closed
+    }
+
+    /// 未保存の変更があるままアプリを終了しようとした際の確認ダイアログ。
+    fn unsaved_confirm_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_unsaved_confirm {
+            return;
+        }
+
+        // 半透明の暗い背景オーバーレイ（画面全体のクリックをガード）
+        egui::Area::new(egui::Id::new("unsaved_backdrop"))
+            .interactable(true)
+            .order(egui::Order::Middle)
+            .fixed_pos([0.0, 0.0])
+            .show(ctx, |ui| {
+                let screen_rect = ctx.screen_rect();
+                ui.painter().rect_filled(screen_rect, 0.0, Color32::from_black_alpha(150));
+            });
+
+        let mut close_modal = false;
+        let mut do_exit = false;
+
+        let doc_name = self
+            .st
+            .file_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "無題のプロジェクト".to_string());
+
+        egui::Window::new("保存の確認")
+            .id(egui::Id::new("unsaved_confirm_window"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .order(egui::Order::Foreground)
+            .fixed_size([440.0, 150.0])
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing = vec2(10.0, 12.0);
+
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("⚠").size(32.0).color(Color32::from_rgb(250, 204, 21)));
+                    ui.vertical(|ui| {
+                        ui.strong(RichText::new("変更内容が保存されていません").size(15.0));
+                        ui.label(format!("「{}」への変更を保存しますか？", doc_name));
+                        ui.weak("保存せずに終了すると、編集内容はすべて失われます。");
+                    });
+                });
+
+                ui.separator();
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // キャンセル
+                    if ui.button("キャンセル").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
+                        close_modal = true;
+                    }
+
+                    // 保存しない
+                    if ui.add(egui::Button::new("保存しない").fill(Color32::from_rgb(180, 50, 50))).clicked() {
+                        self.st.dirty = false;
+                        close_modal = true;
+                        do_exit = true;
+                    }
+
+                    // 保存する
+                    let save_btn = egui::Button::new(RichText::new("💾 保存する").color(Color32::WHITE).strong())
+                        .fill(Color32::from_rgb(37, 99, 235));
+                    if ui.add(save_btn).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
+                        if self.st.save_project() {
+                            close_modal = true;
+                            do_exit = true;
+                        }
+                    }
+                });
+            });
+
+        if close_modal {
+            self.show_unsaved_confirm = false;
+        }
+        if do_exit {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
     }
 }

@@ -6,7 +6,7 @@
 
 use au2_core::{Effect, EffectKind, Frame, Param, ParamValue, Track};
 use au2_plugin::PluginKind;
-use eframe::egui::{self, CollapsingHeader, DragValue, Grid, RichText, TextEdit};
+use eframe::egui::{self, CollapsingHeader, Color32, DragValue, Grid, RichText, Stroke, TextEdit};
 
 use crate::state::EditorState;
 
@@ -37,30 +37,58 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
 
     let mut pending_effect: Option<Effect> = None;
 
-    ui.horizontal(|ui| {
-        ui.heading(obj.display_name());
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.menu_button("＋ フィルタ効果を追加", |ui| {
-                if ui.button("フェード (内蔵)").clicked() {
-                    let mut eff = Effect::new("フェード");
-                    eff.push_track("イン", Track::constant(0.50, 2));
-                    eff.push_track("アウト", Track::constant(0.50, 2));
-                    pending_effect = Some(eff);
-                    ui.close_menu();
-                }
-                if !available_scripts.is_empty() {
-                    ui.separator();
-                    ui.label(RichText::new("スクリプト (.anm)").weak().small());
-                    for (kind, entry) in &available_scripts {
-                        if ui.button(&entry.display_name).clicked() {
-                            pending_effect = Some(entry.to_effect(*kind));
+    egui::Frame::none()
+        .fill(Color32::from_rgb(24, 26, 33))
+        .stroke(Stroke::new(1.0_f32, Color32::from_gray(40)))
+        .rounding(egui::Rounding::same(6.0))
+        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading(RichText::new(obj.display_name()).strong().size(15.0));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.menu_button("＋ フィルタ効果を追加", |ui| {
+                        if ui.button("フェード (内蔵)").clicked() {
+                            let mut eff = Effect::new("フェード");
+                            eff.push_track("イン", Track::constant(0.50, 2));
+                            eff.push_track("アウト", Track::constant(0.50, 2));
+                            pending_effect = Some(eff);
                             ui.close_menu();
                         }
-                    }
+                        if !available_scripts.is_empty() {
+                            ui.separator();
+                            ui.label(RichText::new("スクリプト (.anm)").weak().small());
+                            for (kind, entry) in &available_scripts {
+                                if ui.button(&entry.display_name).clicked() {
+                                    pending_effect = Some(entry.to_effect(*kind));
+                                    ui.close_menu();
+                                }
+                            }
+                        }
+                    });
+                });
+            });
+
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(format!("Layer {}", layer + 1)).size(11.0).color(Color32::from_rgb(147, 197, 253)));
+                ui.separator();
+                ui.label(RichText::new(format!("{} 〜 {} ({}F)", obj.frame_start + 1, obj.frame_end + 1, obj.length())).size(11.0).color(Color32::from_gray(185)));
+                if !obj.midpoints.is_empty() {
+                    ui.separator();
+                    ui.label(RichText::new(format!("中間点: {} / 区間: {}", obj.midpoints.len(), seg + 1)).size(11.0).color(Color32::from_rgb(250, 204, 21)));
+                }
+                if let Some(g) = obj.group {
+                    ui.separator();
+                    ui.label(RichText::new(format!("グループ {g}")).size(11.0).color(Color32::from_gray(170)));
                 }
             });
+            if !obj.contains(frame) {
+                ui.add_space(2.0);
+                ui.label(RichText::new("※ 現在フレームはオブジェクトの範囲外です").size(10.5).color(Color32::from_rgb(250, 204, 21)));
+            }
         });
-    });
+
+    ui.add_space(4.0);
 
     let mut changed = false;
     if let Some(eff) = pending_effect {
@@ -73,24 +101,6 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
         obj.effects.insert(insert_pos, eff);
         changed = true;
     }
-
-    ui.horizontal_wrapped(|ui| {
-        ui.label(format!("レイヤー {}", layer + 1));
-        ui.separator();
-        ui.label(format!("{} 〜 {} ({} フレーム)", obj.frame_start + 1, obj.frame_end + 1, obj.length()));
-        if !obj.midpoints.is_empty() {
-            ui.separator();
-            ui.label(format!("中間点 {} 個 / 区間 {}", obj.midpoints.len(), seg + 1));
-        }
-        if let Some(g) = obj.group {
-            ui.separator();
-            ui.label(format!("グループ {g}"));
-        }
-    });
-    if !obj.contains(frame) {
-        ui.weak("※ 現在フレームはオブジェクトの範囲外です");
-    }
-    ui.separator();
 
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         for (ei, eff) in obj.effects.iter_mut().enumerate() {
@@ -189,44 +199,73 @@ fn track_editor(ui: &mut egui::Ui, t: &mut Track, keys: &[Frame], seg: usize, re
 }
 
 fn scene_settings_ui(ui: &mut egui::Ui, st: &mut EditorState) {
-    ui.heading(format!("シーン: {}", st.scene.name));
-    ui.weak("タイムラインのオブジェクトをクリックすると、ここに設定が表示されます。");
-    ui.separator();
+    egui::Frame::none()
+        .fill(Color32::from_rgb(24, 26, 33))
+        .stroke(Stroke::new(1.0_f32, Color32::from_gray(40)))
+        .rounding(egui::Rounding::same(6.0))
+        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading(RichText::new(format!("🎬 シーン設定: {}", st.scene.name)).strong().size(15.0));
+            });
+            ui.add_space(2.0);
+            ui.label(RichText::new("タイムライン上のオブジェクトをクリックすると、そのオブジェクトの個別パラメータを編集できます。").weak().size(11.0));
+        });
+
+    ui.add_space(6.0);
 
     let obj_count = st.scene.object_count();
     let s = &mut st.scene.settings;
-    Grid::new("au2-scene-settings").num_columns(2).striped(true).show(ui, |ui| {
-        ui.label("画像サイズ");
-        ui.horizontal(|ui| {
-            ui.add(DragValue::new(&mut s.width).range(1..=8192));
-            ui.label("x");
-            ui.add(DragValue::new(&mut s.height).range(1..=8192));
+    egui::Frame::none()
+        .fill(Color32::from_rgb(20, 22, 27))
+        .stroke(Stroke::new(1.0_f32, Color32::from_gray(36)))
+        .rounding(egui::Rounding::same(6.0))
+        .inner_margin(egui::Margin::same(10.0))
+        .show(ui, |ui| {
+            Grid::new("au2-scene-settings").num_columns(2).striped(true).spacing([12.0, 6.0]).show(ui, |ui| {
+                ui.label(RichText::new("解像度 (幅×高)").strong());
+                ui.horizontal(|ui| {
+                    ui.add(DragValue::new(&mut s.width).range(1..=8192));
+                    ui.label("×");
+                    ui.add(DragValue::new(&mut s.height).range(1..=8192));
+                    ui.label(RichText::new("px").weak());
+                });
+                ui.end_row();
+
+                ui.label(RichText::new("フレームレート").strong());
+                ui.horizontal(|ui| {
+                    ui.add(DragValue::new(&mut s.frame_rate.num).range(1..=240_000));
+                    ui.label("/");
+                    ui.add(DragValue::new(&mut s.frame_rate.den).range(1..=1001));
+                    ui.label(RichText::new(format!("= {:.3} fps", s.frame_rate.as_f64())).color(Color32::from_rgb(147, 197, 253)));
+                });
+                ui.end_row();
+
+                ui.label(RichText::new("総フレーム数").strong());
+                ui.horizontal(|ui| {
+                    ui.add(DragValue::new(&mut s.length).range(1..=10_000_000));
+                    let dur_sec = s.frame_rate.frame_to_seconds(s.length);
+                    ui.label(RichText::new(format!("(約 {:.1} 秒)", dur_sec)).weak());
+                });
+                ui.end_row();
+
+                ui.label(RichText::new("音声フォーマット").strong());
+                ui.label(format!("{} Hz / {} ch", s.audio_rate, s.audio_channels));
+                ui.end_row();
+
+                ui.label(RichText::new("配置オブジェクト数").strong());
+                ui.label(format!("{} 個", obj_count));
+                ui.end_row();
+
+                ui.label(RichText::new("プロジェクトファイル").strong());
+                ui.label(st.file_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "未保存 (サンプル)".into()));
+                ui.end_row();
+
+                ui.label(RichText::new("テキスト文字コード").strong());
+                ui.label(format!("{:?}", st.encoding));
+                ui.end_row();
+            });
         });
-        ui.end_row();
-        ui.label("フレームレート");
-        ui.horizontal(|ui| {
-            ui.add(DragValue::new(&mut s.frame_rate.num).range(1..=240_000));
-            ui.label("/");
-            ui.add(DragValue::new(&mut s.frame_rate.den).range(1..=1001));
-            ui.label(format!("= {:.3} fps", s.frame_rate.as_f64()));
-        });
-        ui.end_row();
-        ui.label("長さ（フレーム）");
-        ui.add(DragValue::new(&mut s.length).range(1..=10_000_000));
-        ui.end_row();
-        ui.label("音声");
-        ui.label(format!("{} Hz / {} ch", s.audio_rate, s.audio_channels));
-        ui.end_row();
-        ui.label("オブジェクト数");
-        ui.label(obj_count.to_string());
-        ui.end_row();
-        ui.label("ファイル");
-        ui.label(st.file_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "(サンプル)".into()));
-        ui.end_row();
-        ui.label("文字コード");
-        ui.label(format!("{:?}", st.encoding));
-        ui.end_row();
-    });
 
     if !st.warnings.is_empty() {
         ui.separator();
