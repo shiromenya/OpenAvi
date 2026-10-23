@@ -40,6 +40,8 @@ pub struct TimelineView {
     pub drag: Option<TimelineDrag>,
     /// 右クリックされた座標に対応するレイヤー・フレーム・オブジェクト情報
     pub context_target: ContextTarget,
+    /// Premiere Pro 風のクリップ内ビジュアルプレビュー表示の ON/OFF（既定: ON）
+    pub show_clip_previews: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -62,6 +64,7 @@ impl Default for TimelineView {
                 frame: 0,
                 object_id: None,
             },
+            show_clip_previews: true,
         }
     }
 }

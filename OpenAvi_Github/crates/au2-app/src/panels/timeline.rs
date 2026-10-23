@@ -22,8 +22,10 @@ use crate::state::{ContextTarget, EditorState, TimelineDrag};
 
 const HEADER_W: f32 = 88.0;
 const RULER_H: f32 = 22.0;
-/// Premiere Pro 風のインクリップ・サムネイル／波形／図形プレビューを描画できるレイヤー高さ
-const LAYER_H: f32 = 46.0;
+/// Premiere Pro 風のインクリップ・サムネイル／波形／図形プレビュー表示時のレイヤー高さ
+const LAYER_H_PREVIEW: f32 = 46.0;
+/// プレビュー OFF 時（従来の AviUtl 風コンパクト表示）のレイヤー高さ
+const LAYER_H_COMPACT: f32 = 24.0;
 const CLIP_HEADER_H: f32 = 15.0;
 
 fn category_color(c: ObjectCategory) -> Color32 {
@@ -47,6 +49,8 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     let headers = Rect::from_min_max(pos2(full.left(), full.top() + RULER_H), pos2(full.left() + HEADER_W, full.bottom()));
     let lanes = Rect::from_min_max(pos2(full.left() + HEADER_W, full.top() + RULER_H), full.max);
 
+    let corner = Rect::from_min_max(full.min, pos2(headers.right(), ruler.bottom()));
+
     // ---- スクロール / ズーム ----
     if resp.hovered() {
         let (zoom, scroll, shift) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta, i.modifiers.shift));
@@ -63,9 +67,14 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
             v.scroll_y -= dy;
         }
     }
+    let layer_h = if st.timeline.show_clip_previews {
+        LAYER_H_PREVIEW
+    } else {
+        LAYER_H_COMPACT
+    };
     {
         let v = &mut st.timeline;
-        let max_y = (MAX_LAYERS as f32 * LAYER_H - lanes.height()).max(0.0);
+        let max_y = (MAX_LAYERS as f32 * layer_h - lanes.height()).max(0.0);
         v.scroll_y = v.scroll_y.clamp(0.0, max_y);
         v.scroll_x = v.scroll_x.max(0.0);
     }
@@ -84,8 +93,8 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     let scroll_y = st.timeline.scroll_y;
     let fx = |f: f32| lanes.left() + (f - scroll_x) * ppf;
     let xf = |x: f32| ((x - lanes.left()) / ppf + scroll_x).max(0.0) as Frame;
-    let row_top = |li: usize| lanes.top() + li as f32 * LAYER_H - scroll_y;
-    let y_layer = |y: f32| (((y - lanes.top() + scroll_y) / LAYER_H).floor().max(0.0) as usize).min(MAX_LAYERS - 1);
+    let row_top = |li: usize| lanes.top() + li as f32 * layer_h - scroll_y;
+    let y_layer = |y: f32| (((y - lanes.top() + scroll_y) / layer_h).floor().max(0.0) as usize).min(MAX_LAYERS - 1);
 
     let hit = |st: &EditorState, p: egui::Pos2| -> Option<(ObjectId, Frame)> {
         if !lanes.contains(p) {
@@ -156,7 +165,9 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     }
     if resp.clicked() {
         if let Some(p) = resp.interact_pointer_pos() {
-            if headers.contains(p) {
+            if corner.contains(p) {
+                st.timeline.show_clip_previews = !st.timeline.show_clip_previews;
+            } else if headers.contains(p) {
                 let l = &mut st.scene.layers[y_layer(p.y)];
                 l.visible = !l.visible;
             } else if ruler.contains(p) {
@@ -175,17 +186,21 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
         context_menu_ui(ui, st);
     });
 
+    let show_previews = st.timeline.show_clip_previews;
+    let layer_h = if show_previews { LAYER_H_PREVIEW } else { LAYER_H_COMPACT };
+    let row_top = |li: usize| lanes.top() + li as f32 * layer_h - scroll_y;
+
     // ---- 描画 ----
     painter.rect_filled(full, 0.0, Color32::from_gray(28));
-    let first_row = (scroll_y / LAYER_H).floor() as usize;
-    let rows = (lanes.height() / LAYER_H).ceil() as usize + 1;
+    let first_row = (scroll_y / layer_h).floor() as usize;
+    let rows = (lanes.height() / layer_h).ceil() as usize + 1;
     let visible_rows = first_row..(first_row + rows).min(MAX_LAYERS);
 
     // レーン背景
     let lane_painter = painter.with_clip_rect(lanes);
     for li in visible_rows.clone() {
         let y = row_top(li);
-        let r = Rect::from_min_size(pos2(lanes.left(), y), vec2(lanes.width(), LAYER_H));
+        let r = Rect::from_min_size(pos2(lanes.left(), y), vec2(lanes.width(), layer_h));
         let base = if li % 2 == 0 { 34 } else { 38 };
         lane_painter.rect_filled(r, 0.0, Color32::from_gray(base));
     }
@@ -199,31 +214,33 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
         );
     }
 
-    // オブジェクト用サムネイルの事前取得 (VideoFile / ImageFile)
-    let egui_ctx = ui.ctx().clone();
-    let mut media_paths: Vec<String> = Vec::new();
-    for li in visible_rows.clone() {
-        for obj in &st.scene.layers[li].objects {
-            let (x0, x1) = (fx(obj.frame_start as f32), fx(obj.frame_end as f32 + 1.0));
-            if x1 < lanes.left() || x0 > lanes.right() {
-                continue;
-            }
-            if let Some(src) = obj.source() {
-                if matches!(src.kind, EffectKind::VideoFile | EffectKind::ImageFile) {
-                    if let Some(p) = effect_file_path(src).filter(|s| !s.is_empty()) {
-                        let s = p.to_string();
-                        if !media_paths.contains(&s) {
-                            media_paths.push(s);
+    // オブジェクト用サムネイルの事前取得 (プレビュー ON 時のみ)
+    let mut clip_textures: HashMap<String, egui::TextureId> = HashMap::new();
+    if show_previews {
+        let egui_ctx = ui.ctx().clone();
+        let mut media_paths: Vec<String> = Vec::new();
+        for li in visible_rows.clone() {
+            for obj in &st.scene.layers[li].objects {
+                let (x0, x1) = (fx(obj.frame_start as f32), fx(obj.frame_end as f32 + 1.0));
+                if x1 < lanes.left() || x0 > lanes.right() {
+                    continue;
+                }
+                if let Some(src) = obj.source() {
+                    if matches!(src.kind, EffectKind::VideoFile | EffectKind::ImageFile) {
+                        if let Some(p) = effect_file_path(src).filter(|s| !s.is_empty()) {
+                            let s = p.to_string();
+                            if !media_paths.contains(&s) {
+                                media_paths.push(s);
+                            }
                         }
                     }
                 }
             }
         }
-    }
-    let mut clip_textures: HashMap<String, egui::TextureId> = HashMap::new();
-    for path_str in media_paths {
-        if let Some((tex_id, _)) = st.get_media_texture(&egui_ctx, &path_str, 0, 0.0) {
-            clip_textures.insert(path_str, tex_id);
+        for path_str in media_paths {
+            if let Some((tex_id, _)) = st.get_media_texture(&egui_ctx, &path_str, 0, 0.0) {
+                clip_textures.insert(path_str, tex_id);
+            }
         }
     }
 
@@ -239,7 +256,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
             if x1 < lanes.left() || x0 > lanes.right() {
                 continue;
             }
-            let r = Rect::from_min_max(pos2(x0, y + 2.0), pos2(x1.max(x0 + 3.0), y + LAYER_H - 2.0));
+            let r = Rect::from_min_max(pos2(x0, y + 2.0), pos2(x1.max(x0 + 3.0), y + layer_h - 2.0));
             if let Some(hp) = hover_pos {
                 if lanes.contains(hp) && r.contains(hp) {
                     hovered_clip = Some((li, obj.id));
@@ -256,83 +273,110 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                 base_color = base_color.gamma_multiply(0.35);
             }
 
-            // クリップ背景（ボディは少し暗め、ヘッダー帯はカテゴリ色）
-            let body_bg = base_color.gamma_multiply(0.45);
-            lane_painter.rect_filled(r, 3.5, body_bg);
+            if show_previews {
+                // --- Premiere Pro 風の2段表示（ヘッダー + ボディプレビュー） ---
+                let body_bg = base_color.gamma_multiply(0.45);
+                lane_painter.rect_filled(r, 3.5, body_bg);
 
-            let header_bottom = (r.top() + CLIP_HEADER_H).min(r.bottom());
-            let header_rect = Rect::from_min_max(r.min, pos2(r.right(), header_bottom));
-            let body_rect = Rect::from_min_max(pos2(r.left(), header_bottom), r.max);
+                let header_bottom = (r.top() + CLIP_HEADER_H).min(r.bottom());
+                let header_rect = Rect::from_min_max(r.min, pos2(r.right(), header_bottom));
+                let body_rect = Rect::from_min_max(pos2(r.left(), header_bottom), r.max);
 
-            lane_painter.rect_filled(header_rect, 3.5, base_color);
+                lane_painter.rect_filled(header_rect, 3.5, base_color);
 
-            // ボディ領域のビジュアルプレビュー (Premiere Pro 風)
-            let body_clip = body_rect.shrink(1.0).intersect(lanes);
-            if body_clip.width() > 4.0 && body_clip.height() > 6.0 {
-                let body_painter = painter.with_clip_rect(body_clip);
-                draw_clip_preview(&body_painter, body_rect, lanes, obj, &clip_textures, dimmed);
-            }
+                let body_clip = body_rect.shrink(1.0).intersect(lanes);
+                if body_clip.width() > 4.0 && body_clip.height() > 6.0 {
+                    let body_painter = painter.with_clip_rect(body_clip);
+                    draw_clip_preview(&body_painter, body_rect, lanes, obj, &clip_textures, dimmed);
+                }
 
-            // ヘッダーとボディの境界線
-            lane_painter.line_segment(
-                [pos2(r.left(), header_bottom), pos2(r.right(), header_bottom)],
-                Stroke::new(1.0_f32, Color32::from_black_alpha(90)),
-            );
-
-            // 中間点マーカー
-            for &m in &obj.midpoints {
-                let mx = fx((obj.frame_start + m) as f32);
                 lane_painter.line_segment(
-                    [pos2(mx, r.top()), pos2(mx, r.bottom())],
-                    Stroke::new(1.0_f32, Color32::from_white_alpha(160)),
+                    [pos2(r.left(), header_bottom), pos2(r.right(), header_bottom)],
+                    Stroke::new(1.0_f32, Color32::from_black_alpha(90)),
                 );
-                let c = pos2(mx, header_rect.center().y);
-                lane_painter.add(Shape::convex_polygon(
-                    vec![c + vec2(0.0, -3.5), c + vec2(3.5, 0.0), c + vec2(0.0, 3.5), c + vec2(-3.5, 0.0)],
-                    Color32::WHITE,
-                    Stroke::NONE,
-                ));
-            }
 
-            // 枠線（選択時は白枠を強調）
-            if selected {
-                lane_painter.rect_stroke(r, 3.5, Stroke::new(1.6_f32, Color32::WHITE));
-            } else {
-                lane_painter.rect_stroke(r, 3.5, Stroke::new(1.0_f32, Color32::from_black_alpha(110)));
-            }
+                // 中間点マーカー
+                for &m in &obj.midpoints {
+                    let mx = fx((obj.frame_start + m) as f32);
+                    lane_painter.line_segment(
+                        [pos2(mx, r.top()), pos2(mx, r.bottom())],
+                        Stroke::new(1.0_f32, Color32::from_white_alpha(160)),
+                    );
+                    let c = pos2(mx, header_rect.center().y);
+                    lane_painter.add(Shape::convex_polygon(
+                        vec![c + vec2(0.0, -3.5), c + vec2(3.5, 0.0), c + vec2(0.0, 3.5), c + vec2(-3.5, 0.0)],
+                        Color32::WHITE,
+                        Stroke::NONE,
+                    ));
+                }
 
-            // ヘッダーラベル + アイコン + fx バッジ
-            let text_clip = header_rect.shrink2(vec2(3.0, 0.0)).intersect(lanes);
-            if text_clip.width() > 8.0 {
-                let hp = painter.with_clip_rect(text_clip);
-                let icon = clip_kind_icon(obj);
-                let label = format!("{icon} {}", obj.display_name());
-                hp.text(
-                    pos2(header_rect.left().max(lanes.left()) + 4.0, header_rect.center().y),
-                    Align2::LEFT_CENTER,
-                    label,
-                    FontId::proportional(11.0),
-                    Color32::WHITE,
-                );
-                // フィルタ効果が追加されている場合は右端に "fx" バッジを表示
-                let extra_fx = obj.effects.iter().skip(1).filter(|e| !is_render_or_playback(&e.kind)).count();
-                if extra_fx > 0 && text_clip.width() > 54.0 {
-                    let badge_text = format!("fx+{extra_fx}");
-                    let bx = header_rect.right().min(lanes.right()) - 4.0;
+                if selected {
+                    lane_painter.rect_stroke(r, 3.5, Stroke::new(1.6_f32, Color32::WHITE));
+                } else {
+                    lane_painter.rect_stroke(r, 3.5, Stroke::new(1.0_f32, Color32::from_black_alpha(110)));
+                }
+
+                // ヘッダーラベル + アイコン + fx バッジ
+                let text_clip = header_rect.shrink2(vec2(3.0, 0.0)).intersect(lanes);
+                if text_clip.width() > 8.0 {
+                    let hp = painter.with_clip_rect(text_clip);
+                    let icon = clip_kind_icon(obj);
+                    let label = format!("{icon} {}", obj.display_name());
                     hp.text(
-                        pos2(bx, header_rect.center().y),
-                        Align2::RIGHT_CENTER,
-                        badge_text,
-                        FontId::monospace(9.5),
-                        Color32::from_rgb(255, 230, 120),
+                        pos2(header_rect.left().max(lanes.left()) + 4.0, header_rect.center().y),
+                        Align2::LEFT_CENTER,
+                        label,
+                        FontId::proportional(11.0),
+                        Color32::WHITE,
+                    );
+                    let extra_fx = obj.effects.iter().skip(1).filter(|e| !is_render_or_playback(&e.kind)).count();
+                    if extra_fx > 0 && text_clip.width() > 54.0 {
+                        let badge_text = format!("fx+{extra_fx}");
+                        let bx = header_rect.right().min(lanes.right()) - 4.0;
+                        hp.text(
+                            pos2(bx, header_rect.center().y),
+                            Align2::RIGHT_CENTER,
+                            badge_text,
+                            FontId::monospace(9.5),
+                            Color32::from_rgb(255, 230, 120),
+                        );
+                    }
+                }
+            } else {
+                // --- 従来の AviUtl 風コンパクト1段表示 ---
+                lane_painter.rect_filled(r, 3.0, base_color);
+                if selected {
+                    lane_painter.rect_stroke(r, 3.0, Stroke::new(1.5_f32, Color32::WHITE));
+                }
+                for &m in &obj.midpoints {
+                    let mx = fx((obj.frame_start + m) as f32);
+                    lane_painter.line_segment(
+                        [pos2(mx, r.top()), pos2(mx, r.bottom())],
+                        Stroke::new(1.0_f32, Color32::from_white_alpha(140)),
+                    );
+                    let c = pos2(mx, r.center().y);
+                    lane_painter.add(Shape::convex_polygon(
+                        vec![c + vec2(0.0, -4.0), c + vec2(4.0, 0.0), c + vec2(0.0, 4.0), c + vec2(-4.0, 0.0)],
+                        Color32::WHITE,
+                        Stroke::NONE,
+                    ));
+                }
+                let text_clip = r.shrink2(vec2(3.0, 0.0)).intersect(lanes);
+                if text_clip.width() > 8.0 {
+                    painter.with_clip_rect(text_clip).text(
+                        pos2(r.left().max(lanes.left()) + 5.0, r.center().y),
+                        Align2::LEFT_CENTER,
+                        obj.display_name(),
+                        FontId::proportional(12.0),
+                        Color32::WHITE,
                     );
                 }
             }
         }
     }
 
-    // クリップホバー時のフローティング・プレビューツールチップ
-    if st.timeline.drag.is_none() {
+    // クリップホバー時のフローティング・プレビューツールチップ (プレビュー ON 時のみ)
+    if show_previews && st.timeline.drag.is_none() {
         if let (Some(hp), Some((li, obj_id))) = (hover_pos, hovered_clip) {
             if let Some(obj) = st.scene.layers[li].objects.iter().find(|o| o.id == obj_id) {
                 draw_clip_hover_tooltip(&painter, full, hp, li, obj, st.scene.settings.frame_rate, &clip_textures);
@@ -366,7 +410,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     header_painter.rect_filled(headers, 0.0, Color32::from_gray(42));
     for li in visible_rows {
         let y = row_top(li);
-        let r = Rect::from_min_size(pos2(headers.left(), y), vec2(HEADER_W, LAYER_H));
+        let r = Rect::from_min_size(pos2(headers.left(), y), vec2(HEADER_W, layer_h));
         let layer = &st.scene.layers[li];
         let color = if layer.visible { Color32::from_gray(220) } else { Color32::from_gray(90) };
         let base_name = layer.name.clone().unwrap_or_else(|| format!("Layer {}", li + 1));
@@ -374,13 +418,33 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
         header_painter.text(r.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, label, FontId::proportional(12.0), color);
         header_painter.line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(1.0_f32, Color32::from_gray(30)));
     }
-    painter.rect_filled(Rect::from_min_max(full.min, pos2(headers.right(), ruler.bottom())), 0.0, Color32::from_gray(50));
+
+    // 左上コーナー：クリップ内プレビュー ON/OFF ワンクリック切替ボタン
+    let corner_hovered = hover_pos.is_some_and(|p| corner.contains(p));
+    let corner_bg = if show_previews {
+        if corner_hovered {
+            Color32::from_rgb(65, 105, 175)
+        } else {
+            Color32::from_rgb(52, 86, 148)
+        }
+    } else if corner_hovered {
+        Color32::from_gray(64)
+    } else {
+        Color32::from_gray(50)
+    };
+    painter.rect_filled(corner, 0.0, corner_bg);
+    painter.rect_stroke(corner.shrink(1.0), 2.0, Stroke::new(1.0_f32, Color32::from_white_alpha(40)));
+    let toggle_label = if show_previews {
+        "🖼 プレビュー: ON"
+    } else {
+        "🖼 プレビュー: OFF"
+    };
     painter.text(
-        full.min + vec2(6.0, RULER_H / 2.0),
-        Align2::LEFT_CENTER,
-        format!("x{:.2}", ppf),
-        FontId::monospace(10.0),
-        Color32::from_gray(160),
+        corner.center(),
+        Align2::CENTER_CENTER,
+        toggle_label,
+        FontId::proportional(10.5),
+        Color32::WHITE,
     );
 
     // 再生位置
@@ -572,6 +636,14 @@ fn context_menu_ui(ui: &mut egui::Ui, st: &mut EditorState) {
             layer.locked = !layer.locked;
             ui.close_menu();
         }
+    }
+
+    ui.separator();
+    if ui
+        .checkbox(&mut st.timeline.show_clip_previews, "🖼 クリップ内プレビューを表示")
+        .changed()
+    {
+        ui.close_menu();
     }
 }
 

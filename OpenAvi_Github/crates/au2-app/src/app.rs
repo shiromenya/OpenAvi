@@ -287,6 +287,11 @@ impl OpenAviApp {
                     }
                 });
                 ui.menu_button("表示", |ui| {
+                    ui.checkbox(
+                        &mut self.st.timeline.show_clip_previews,
+                        "🖼 タイムラインのクリップ内プレビューを表示",
+                    );
+                    ui.separator();
                     ui.radio_value(&mut self.layout, LayoutMode::Docked, "シングルウィンドウ（ドッキング）");
                     ui.radio_value(&mut self.layout, LayoutMode::Separated, "マルチウィンドウ（AviUtl 風）");
                     ui.separator();
