@@ -105,10 +105,19 @@ pub enum BinaryArch {
 impl BinaryArch {
     pub fn label(self) -> &'static str {
         match self {
-            Self::X86_32 => "32-bit (初代AviUtl互換ブリッジ)",
-            Self::X86_64 => "64-bit (AviUtl2 / x64ネイティブ)",
-            Self::Script => "Lua スクリプト (初代 / AviUtl2 両対応)",
+            Self::X86_32 => "32-bit",
+            Self::X86_64 => "64-bit",
+            Self::Script => "Lua",
             Self::Unknown => "不明",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::X86_32 => "32-bit (初代AviUtl互換プラグイン)",
+            Self::X86_64 => "64-bit (AviUtl2 / x64ネイティブプラグイン)",
+            Self::Script => "Lua スクリプト",
+            Self::Unknown => "不明な形式",
         }
     }
 }

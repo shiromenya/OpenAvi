@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use au2_core::{EffectKind, TimelineObject};
 use au2_media::MediaKind;
-use au2_plugin::SupportStatus;
+use au2_plugin::{PluginKind, SupportStatus};
 use eframe::egui::{self, vec2, CollapsingHeader, Color32, RichText, ScrollArea};
 
 use crate::state::EditorState;
@@ -166,7 +166,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
 
         ui.add_space(4.0);
 
-        // ---- 5. プラグイン & スクリプト一覧 (初代 32-bit / AviUtl2 64-bit 両対応) ----
+        // ---- 5. プラグイン & スクリプト一覧 ----
         CollapsingHeader::new(
             RichText::new(format!("🧩 プラグイン・スクリプト ({})", st.plugins.plugins.len())).strong(),
         )
@@ -180,34 +180,51 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                     SupportStatus::PartialScript => Color32::from_rgb(240, 200, 90),
                     _ => Color32::from_rgb(170, 170, 185),
                 };
-                ui.horizontal_wrapped(|ui| {
-                    ui.monospace(&p.file_name);
-                    ui.colored_label(badge_color, format!("[{}]", p.arch.label()));
+                let icon = match p.kind {
+                    PluginKind::AnmScript => "✨",
+                    PluginKind::ObjScript => "🔷",
+                    PluginKind::CamScript => "🎥",
+                    PluginKind::ScnScript => "🎬",
+                    PluginKind::TraScript => "📈",
+                    PluginKind::FilterDll => "🧪",
+                    PluginKind::InputDll => "📥",
+                    PluginKind::OutputDll => "📤",
+                    PluginKind::ColorDll => "🎨",
+                };
+                ui.horizontal(|ui| {
+                    ui.label(format!("{icon} {}", p.file_name));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.colored_label(badge_color, format!("[{}]", p.arch.label()))
+                            .on_hover_text(p.arch.description());
+                    });
                 });
                 for entry in &p.entries {
-                    ui.horizontal_wrapped(|ui| {
+                    ui.horizontal(|ui| {
                         ui.add_space(10.0);
-                        ui.label(format!("・{}", entry.display_name));
-                        if p.kind.can_apply_to_object() && st.selected.is_some() {
-                            if ui
-                                .small_button("＋選択に適用")
-                                .on_hover_text("現在選択中のタイムラインオブジェクトにこの効果を追加します")
-                                .clicked()
-                            {
-                                apply_effect = Some((p.kind, entry.clone()));
+                        ui.label(RichText::new(format!("・{}", entry.display_name)).size(12.0));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if p.kind.can_place_as_object() {
+                                if ui
+                                    .small_button("＋配置")
+                                    .on_hover_text("このスクリプト/フィルタを単体オブジェクトとしてタイムラインに配置")
+                                    .clicked()
+                                {
+                                    place_object = Some((p.kind, entry.clone()));
+                                }
                             }
-                        }
-                        if p.kind.can_place_as_object() {
-                            if ui
-                                .small_button("＋TL配置")
-                                .on_hover_text("このカスタムオブジェクト / フィルタを単体オブジェクトとしてタイムラインに配置します")
-                                .clicked()
-                            {
-                                place_object = Some((p.kind, entry.clone()));
+                            if p.kind.can_apply_to_object() && st.selected.is_some() {
+                                if ui
+                                    .small_button("＋適用")
+                                    .on_hover_text("選択中のオブジェクトにこの効果を追加")
+                                    .clicked()
+                                {
+                                    apply_effect = Some((p.kind, entry.clone()));
+                                }
                             }
-                        }
+                        });
                     });
                 }
+                ui.add_space(2.0);
             }
             if let Some((kind, entry)) = apply_effect {
                 if let Some(sel_id) = st.selected {

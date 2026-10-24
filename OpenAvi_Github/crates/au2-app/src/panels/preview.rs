@@ -16,10 +16,15 @@ use crate::state::EditorState;
 pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     let egui_ctx = ui.ctx().clone();
 
-    // 下部のシークバー＆再生コントロール領域の高さ（マージン込みで約 82px）を残して上部にプレビューキャンバスを配置
-    let control_height = 84.0;
-    let avail = ui.available_size();
-    let preview_size = vec2(avail.x.max(64.0), (avail.y - control_height).max(64.0));
+    // 毎フレームのレイアウト幅変動（ジッター）を完全に防止するため、UI幅を整数ピクセルにロック
+    let total_w = ui.available_width().floor();
+    let total_h = ui.available_height().floor();
+    ui.set_max_width(total_w);
+
+    // 下部のシークバー＆再生コントロール領域の高さ（マージン込みで約 84px）を残して上部にプレビューキャンバスを配置
+    let control_height = 84.0_f32;
+    let preview_h = (total_h - control_height).max(64.0);
+    let preview_size = vec2(total_w.max(64.0), preview_h);
 
     let (resp, painter) = ui.allocate_painter(preview_size, Sense::click());
     let area = resp.rect;
@@ -28,7 +33,11 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     let s = &st.scene.settings;
     let (sw, sh) = (s.width.max(1) as f32, s.height.max(1) as f32);
     let scale = (area.width() / sw).min(area.height() / sh).max(0.0001);
-    let canvas = Rect::from_center_size(area.center(), vec2(sw * scale, sh * scale));
+    let canvas_w = (sw * scale).floor();
+    let canvas_h = (sh * scale).floor();
+    let canvas_left = (area.center().x - canvas_w / 2.0).floor();
+    let canvas_top = (area.center().y - canvas_h / 2.0).floor();
+    let canvas = Rect::from_min_size(pos2(canvas_left, canvas_top), vec2(canvas_w, canvas_h));
     painter.rect_filled(canvas, 0.0, Color32::BLACK);
     let painter = painter.with_clip_rect(canvas.intersect(area));
 
@@ -104,9 +113,12 @@ fn bottom_transport_bar(ui: &mut egui::Ui, st: &mut EditorState) {
         .rounding(egui::Rounding::same(6.0))
         .inner_margin(egui::Margin::symmetric(10.0, 6.0))
         .show(ui, |ui| {
+            // 親 Ui へのフィードバックループ（毎フレームの幅伸縮・振動）を完全に遮断
+            ui.set_max_width(ui.available_width().floor());
+
             // 1段目：シークバー
             ui.horizontal(|ui| {
-                ui.spacing_mut().slider_width = (ui.available_width() - 8.0).max(80.0);
+                ui.spacing_mut().slider_width = (ui.available_width() - 8.0).floor().max(80.0);
                 if ui
                     .add(egui::Slider::new(&mut f, 0..=last).show_value(false))
                     .on_hover_text("シークバー（ドラッグで再生位置を移動）")
@@ -118,38 +130,45 @@ fn bottom_transport_bar(ui: &mut egui::Ui, st: &mut EditorState) {
 
             ui.add_space(3.0);
 
-            // 2段目：プロ仕様 3 カラムレイアウト（すべて高さ 24px で垂直中央に統一）
+            // 2段目：プロ仕様 3 カラムレイアウト（秒数・フレーム変化時も再生ボタンが一切揺れない完全固定幅設計）
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
 
                 let rate = st.scene.settings.frame_rate;
                 let tc = rate.timecode(st.frame);
 
-                let tc_badge = egui::Button::new(
-                    egui::RichText::new("TC")
-                        .monospace()
-                        .size(10.0)
-                        .strong()
-                        .color(Color32::from_rgb(147, 197, 253)),
-                )
-                .fill(Color32::from_rgb(28, 34, 46))
-                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(45, 60, 90)))
-                .min_size(vec2(26.0, 24.0));
-                ui.add(tc_badge);
+                // タイムコード＆フレーム数表示エリアを固定幅 (190px) に固定し、数字が変わっても右側のボタン群が一切揺れないようにする
+                ui.allocate_ui_with_layout(
+                    vec2(190.0, 24.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
+                        let tc_badge = egui::Button::new(
+                            egui::RichText::new("TC")
+                                .monospace()
+                                .size(10.0)
+                                .strong()
+                                .color(Color32::from_rgb(147, 197, 253)),
+                        )
+                        .fill(Color32::from_rgb(28, 34, 46))
+                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(45, 60, 90)))
+                        .min_size(vec2(26.0, 24.0));
+                        ui.add(tc_badge);
 
-                ui.add_space(2.0);
-                ui.label(
-                    egui::RichText::new(&tc)
-                        .monospace()
-                        .size(13.0)
-                        .strong()
-                        .color(Color32::from_rgb(240, 244, 252)),
-                );
-                ui.label(
-                    egui::RichText::new(format!("({} / {} F)", st.frame + 1, last + 1))
-                        .monospace()
-                        .size(11.0)
-                        .color(Color32::from_gray(140)),
+                        ui.label(
+                            egui::RichText::new(&tc)
+                                .monospace()
+                                .size(13.0)
+                                .strong()
+                                .color(Color32::from_rgb(240, 244, 252)),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!("({} / {} F)", st.frame + 1, last + 1))
+                                .monospace()
+                                .size(11.0)
+                                .color(Color32::from_gray(140)),
+                        );
+                    },
                 );
 
                 ui.separator();
@@ -169,17 +188,26 @@ fn bottom_transport_bar(ui: &mut egui::Ui, st: &mut EditorState) {
                     st.step(-1);
                 }
 
-                let (play_label, play_color) = if st.playing {
-                    ("⏸ 一時停止", Color32::from_rgb(220, 38, 38))
-                } else {
-                    ("▶ 再生", Color32::from_rgb(37, 99, 235))
-                };
-                let play_btn = egui::Button::new(egui::RichText::new(play_label).strong().size(12.0).color(Color32::WHITE))
-                    .fill(play_color)
-                    .min_size(vec2(86.0, 24.0));
-                if ui.add(play_btn).on_hover_text("再生 / 一時停止 (Space)").clicked() {
-                    st.toggle_play();
-                }
+                // 再生ボタンも固定幅 (96px) の領域に配置し、「再生」「一時停止」の文字数差でも右側ボタンがブレない
+                ui.allocate_ui_with_layout(
+                    vec2(96.0, 24.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        let (play_label, play_color) = if st.playing {
+                            ("⏸ 一時停止", Color32::from_rgb(220, 38, 38))
+                        } else {
+                            ("▶ 再生", Color32::from_rgb(37, 99, 235))
+                        };
+                        let play_btn = egui::Button::new(
+                            egui::RichText::new(play_label).strong().size(12.0).color(Color32::WHITE),
+                        )
+                        .fill(play_color)
+                        .min_size(vec2(96.0, 24.0));
+                        if ui.add(play_btn).on_hover_text("再生 / 一時停止 (Space)").clicked() {
+                            st.toggle_play();
+                        }
+                    },
+                );
 
                 if nav_btn(ui, "▶|", "1 コマ進む (→)").clicked() {
                     st.step(1);
@@ -188,14 +216,17 @@ fn bottom_transport_bar(ui: &mut egui::Ui, st: &mut EditorState) {
                     st.set_frame(last);
                 }
 
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let s = &st.scene.settings;
-                    ui.label(
-                        egui::RichText::new(format!("{}×{}  {:.0}fps", s.width, s.height, s.frame_rate.as_f64()))
-                            .size(11.0)
-                            .color(Color32::from_gray(145)),
-                    );
-                });
+                // 右端の解像度表示：十分な余白（110px 以上）がある時のみ描画し、左側のボタン群と決して衝突させない
+                if ui.available_width() >= 110.0 {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let s = &st.scene.settings;
+                        ui.label(
+                            egui::RichText::new(format!("{}×{}  {:.0}fps", s.width, s.height, s.frame_rate.as_f64()))
+                                .size(11.0)
+                                .color(Color32::from_gray(145)),
+                        );
+                    });
+                }
             });
         });
 }

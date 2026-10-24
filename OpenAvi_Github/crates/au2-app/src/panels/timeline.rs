@@ -22,7 +22,34 @@ use crate::state::{ContextTarget, EditorState, TimelineDrag};
 
 const HEADER_W: f32 = 88.0;
 const RULER_H: f32 = 22.0;
-const H_SCROLLBAR_H: f32 = 14.0;
+const H_SCROLLBAR_H: f32 = 18.0;
+const ZOOM_BAR_W: f32 = 200.0;
+const MIN_PPF: f32 = 0.05;
+const MAX_PPF: f32 = 48.0;
+
+fn ppf_to_slider_t(ppf: f32) -> f32 {
+    let p = ppf.clamp(MIN_PPF, MAX_PPF);
+    ((p / MIN_PPF).ln() / (MAX_PPF / MIN_PPF).ln()).clamp(0.0, 1.0)
+}
+
+fn slider_t_to_ppf(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    MIN_PPF * (MAX_PPF / MIN_PPF).powf(t)
+}
+
+fn zoom_at(v: &mut crate::state::TimelineView, lane_left: f32, center_x: f32, factor: f32) {
+    let anchor = ((center_x - lane_left) / v.px_per_frame + v.scroll_x).max(0.0);
+    v.px_per_frame = (v.px_per_frame * factor).clamp(MIN_PPF, MAX_PPF);
+    v.scroll_x = (anchor - (center_x - lane_left) / v.px_per_frame).max(0.0);
+}
+
+fn fit_timeline_to_view(st: &mut EditorState, view_w: f32) {
+    let end_f = (st.scene.content_end().max(180) + 30) as f32;
+    let target_ppf = (view_w / end_f).clamp(MIN_PPF, MAX_PPF);
+    st.timeline.px_per_frame = target_ppf;
+    st.timeline.scroll_x = 0.0;
+}
+
 /// Premiere Pro 風のインクリップ・サムネイル／波形／図形プレビュー表示時のレイヤー高さ
 const LAYER_H_PREVIEW: f32 = 46.0;
 /// プレビュー OFF 時（従来の AviUtl 風コンパクト表示）のレイヤー高さ
@@ -49,11 +76,32 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     let ruler = Rect::from_min_max(pos2(full.left() + HEADER_W, full.top()), pos2(full.right(), full.top() + RULER_H));
     let headers = Rect::from_min_max(pos2(full.left(), full.top() + RULER_H), pos2(full.left() + HEADER_W, full.bottom() - H_SCROLLBAR_H));
     let lanes = Rect::from_min_max(pos2(full.left() + HEADER_W, full.top() + RULER_H), pos2(full.right(), full.bottom() - H_SCROLLBAR_H));
-    let h_scrollbar = Rect::from_min_max(pos2(full.left() + HEADER_W, full.bottom() - H_SCROLLBAR_H), full.max);
+    let zoom_bar = Rect::from_min_max(
+        pos2((full.right() - ZOOM_BAR_W).max(full.left() + HEADER_W + 80.0), full.bottom() - H_SCROLLBAR_H),
+        full.max,
+    );
+    let h_scrollbar = Rect::from_min_max(
+        pos2(full.left() + HEADER_W, full.bottom() - H_SCROLLBAR_H),
+        pos2(zoom_bar.left(), full.bottom()),
+    );
     let corner_bl = Rect::from_min_max(pos2(full.left(), full.bottom() - H_SCROLLBAR_H), pos2(full.left() + HEADER_W, full.bottom()));
     let corner = Rect::from_min_max(full.min, pos2(headers.right(), ruler.bottom()));
 
+    // ズームバー内のUIコンポーネント配置
+    let btn_fit = Rect::from_min_size(pos2(zoom_bar.left() + 4.0, zoom_bar.top() + 2.0), vec2(44.0, H_SCROLLBAR_H - 4.0));
+    let btn_minus = Rect::from_min_size(pos2(btn_fit.right() + 4.0, zoom_bar.top() + 2.0), vec2(16.0, H_SCROLLBAR_H - 4.0));
+    let btn_plus = Rect::from_min_size(pos2(zoom_bar.right() - 48.0, zoom_bar.top() + 2.0), vec2(16.0, H_SCROLLBAR_H - 4.0));
+    let slider_track = Rect::from_min_max(
+        pos2(btn_minus.right() + 4.0, zoom_bar.top() + 7.0),
+        pos2(btn_plus.left() - 4.0, zoom_bar.bottom() - 7.0),
+    );
+    let lbl_percent = Rect::from_min_max(pos2(btn_plus.right() + 2.0, zoom_bar.top()), pos2(zoom_bar.right() - 2.0, zoom_bar.bottom()));
+
     let ppf = st.timeline.px_per_frame;
+    let current_t = ppf_to_slider_t(ppf);
+    let knob_x = slider_track.left() + current_t * slider_track.width();
+    let knob_rect = Rect::from_center_size(pos2(knob_x, slider_track.center().y), vec2(10.0, 14.0));
+
     let layer_h = if st.timeline.show_clip_previews {
         LAYER_H_PREVIEW
     } else {
@@ -87,15 +135,48 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
         }
     }
 
+    // ---- キーボードショートカットによるズーム操作 (Ctrl + +, Ctrl + -, Ctrl + 0) ----
+    let (ctrl_plus, ctrl_minus, ctrl_zero) = ui.input(|i| {
+        let ctrl = i.modifiers.command || i.modifiers.ctrl;
+        let plus = ctrl && (i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals));
+        let minus = ctrl && i.key_pressed(egui::Key::Minus);
+        let zero = ctrl && i.key_pressed(egui::Key::Num0);
+        (plus, minus, zero)
+    });
+    if ctrl_plus {
+        let center = (lanes.left() + (st.frame as f32 - st.timeline.scroll_x) * st.timeline.px_per_frame).clamp(lanes.left(), lanes.right());
+        zoom_at(&mut st.timeline, lanes.left(), center, 1.25);
+    } else if ctrl_minus {
+        let center = (lanes.left() + (st.frame as f32 - st.timeline.scroll_x) * st.timeline.px_per_frame).clamp(lanes.left(), lanes.right());
+        zoom_at(&mut st.timeline, lanes.left(), center, 0.8);
+    } else if ctrl_zero {
+        fit_timeline_to_view(st, lanes.width());
+    }
+
     // ---- スクロール / ズーム ----
     if resp.hovered() {
-        let (zoom, scroll, shift) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta, i.modifiers.shift));
+        let (zoom, scroll, shift, ctrl) = ui.input(|i| {
+            (
+                i.zoom_delta(),
+                i.smooth_scroll_delta,
+                i.modifiers.shift,
+                i.modifiers.command || i.modifiers.ctrl,
+            )
+        });
         let v = &mut st.timeline;
         if zoom != 1.0 {
             if let Some(p) = resp.hover_pos() {
-                let anchor = (p.x - lanes.left()) / v.px_per_frame + v.scroll_x;
-                v.px_per_frame = (v.px_per_frame * zoom).clamp(0.05, 48.0);
-                v.scroll_x = (anchor - (p.x - lanes.left()) / v.px_per_frame).max(0.0);
+                zoom_at(v, lanes.left(), p.x, zoom);
+            }
+        } else if ctrl && (scroll.y != 0.0 || scroll.x != 0.0) {
+            // Ctrl + ホイールによるカーソル位置中心のタイムライン横拡大縮小
+            let raw_delta = if scroll.y.abs() > scroll.x.abs() { scroll.y } else { scroll.x };
+            let factor = (1.0 + raw_delta * 0.003).clamp(0.2, 5.0);
+            if let Some(p) = resp.hover_pos() {
+                zoom_at(v, lanes.left(), p.x, factor);
+            } else {
+                let center_x = lanes.center().x;
+                zoom_at(v, lanes.left(), center_x, factor);
             }
         } else {
             let hover_p = resp.hover_pos();
@@ -196,7 +277,26 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     // ---- 左ドラッグ・クリック操作 ----
     if resp.drag_started_by(egui::PointerButton::Primary) {
         if let Some(p) = ui.input(|i| i.pointer.press_origin()) {
-            st.timeline.drag = if h_scrollbar.contains(p) {
+            st.timeline.drag = if btn_fit.contains(p) {
+                fit_timeline_to_view(st, lanes.width());
+                None
+            } else if btn_minus.contains(p) {
+                let center = (lanes.left() + (st.frame as f32 - st.timeline.scroll_x) * st.timeline.px_per_frame).clamp(lanes.left(), lanes.right());
+                zoom_at(&mut st.timeline, lanes.left(), center, 0.8);
+                None
+            } else if btn_plus.contains(p) {
+                let center = (lanes.left() + (st.frame as f32 - st.timeline.scroll_x) * st.timeline.px_per_frame).clamp(lanes.left(), lanes.right());
+                zoom_at(&mut st.timeline, lanes.left(), center, 1.25);
+                None
+            } else if slider_track.expand2(vec2(4.0, 4.0)).contains(p) {
+                let t = ((p.x - slider_track.left()) / slider_track.width()).clamp(0.0, 1.0);
+                let new_ppf = slider_t_to_ppf(t);
+                let center = (lanes.left() + (st.frame as f32 - st.timeline.scroll_x) * st.timeline.px_per_frame).clamp(lanes.left(), lanes.right());
+                let anchor = ((center - lanes.left()) / st.timeline.px_per_frame + st.timeline.scroll_x).max(0.0);
+                st.timeline.px_per_frame = new_ppf;
+                st.timeline.scroll_x = (anchor - (center - lanes.left()) / new_ppf).max(0.0);
+                Some(TimelineDrag::ZoomSlider)
+            } else if h_scrollbar.contains(p) {
                 if thumb_rect.contains(p) {
                     Some(TimelineDrag::ScrollbarThumb { grab_rel: (p.x - thumb_left) / thumb_w.max(1.0) })
                 } else if p.x < thumb_left {
@@ -232,6 +332,21 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     }
     if let Some(drag_mode) = st.timeline.drag {
         match drag_mode {
+            TimelineDrag::ZoomSlider => {
+                if ui.input(|i| i.pointer.primary_down()) {
+                    if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                        let t = ((p.x - slider_track.left()) / slider_track.width()).clamp(0.0, 1.0);
+                        let new_ppf = slider_t_to_ppf(t);
+                        let center = (lanes.left() + (st.frame as f32 - st.timeline.scroll_x) * st.timeline.px_per_frame).clamp(lanes.left(), lanes.right());
+                        let anchor = ((center - lanes.left()) / st.timeline.px_per_frame + st.timeline.scroll_x).max(0.0);
+                        st.timeline.px_per_frame = new_ppf;
+                        st.timeline.scroll_x = (anchor - (center - lanes.left()) / new_ppf).max(0.0);
+                        ui.ctx().request_repaint();
+                    }
+                } else {
+                    st.timeline.drag = None;
+                }
+            }
             TimelineDrag::Pan { start_scroll_x, start_scroll_y, start_pos } => {
                 if middle_down || alt_down {
                     if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
@@ -674,6 +789,77 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     };
     painter.rect_filled(thumb_rect, 3.0, thumb_bg);
     painter.rect_stroke(thumb_rect, 3.0, Stroke::new(1.0_f32, Color32::from_white_alpha(45)));
+
+    // 右下ズームツールバー
+    painter.rect_filled(zoom_bar, 0.0, Color32::from_rgb(24, 26, 32));
+    painter.line_segment([zoom_bar.left_top(), zoom_bar.right_top()], Stroke::new(1.0_f32, Color32::from_gray(40)));
+    painter.line_segment([zoom_bar.left_top(), zoom_bar.left_bottom()], Stroke::new(1.0_f32, Color32::from_gray(40)));
+
+    // [⊡ 全体] ボタン (Fit)
+    let fit_hovered = hover_pos.is_some_and(|p| btn_fit.contains(p));
+    let fit_bg = if fit_hovered { Color32::from_gray(56) } else { Color32::from_gray(38) };
+    painter.rect_filled(btn_fit, 3.0, fit_bg);
+    painter.rect_stroke(btn_fit, 3.0, Stroke::new(1.0_f32, if fit_hovered { Color32::from_gray(90) } else { Color32::from_gray(50) }));
+    painter.text(
+        btn_fit.center(),
+        Align2::CENTER_CENTER,
+        "⊡ 全体",
+        FontId::proportional(10.0),
+        if fit_hovered { Color32::WHITE } else { Color32::from_gray(210) },
+    );
+
+    // [-] ボタン
+    let minus_hovered = hover_pos.is_some_and(|p| btn_minus.contains(p));
+    let minus_bg = if minus_hovered { Color32::from_gray(56) } else { Color32::from_gray(38) };
+    painter.rect_filled(btn_minus, 3.0, minus_bg);
+    painter.rect_stroke(btn_minus, 3.0, Stroke::new(1.0_f32, if minus_hovered { Color32::from_gray(90) } else { Color32::from_gray(50) }));
+    painter.text(
+        btn_minus.center(),
+        Align2::CENTER_CENTER,
+        "−",
+        FontId::proportional(11.0),
+        if minus_hovered { Color32::WHITE } else { Color32::from_gray(210) },
+    );
+
+    // スライダートラック (溝)
+    painter.rect_filled(slider_track, 2.0, Color32::from_gray(18));
+    painter.rect_stroke(slider_track, 2.0, Stroke::new(1.0_f32, Color32::from_gray(42)));
+
+    // スライダーつまみ (Knob)
+    let is_zoom_dragging = matches!(st.timeline.drag, Some(TimelineDrag::ZoomSlider));
+    let knob_hovered = hover_pos.is_some_and(|p| knob_rect.contains(p)) || is_zoom_dragging;
+    let knob_bg = if is_zoom_dragging {
+        Color32::from_rgb(59, 130, 246)
+    } else if knob_hovered {
+        Color32::from_gray(150)
+    } else {
+        Color32::from_gray(100)
+    };
+    painter.rect_filled(knob_rect, 2.5, knob_bg);
+    painter.rect_stroke(knob_rect, 2.5, Stroke::new(1.0_f32, Color32::from_white_alpha(50)));
+
+    // [+] ボタン
+    let plus_hovered = hover_pos.is_some_and(|p| btn_plus.contains(p));
+    let plus_bg = if plus_hovered { Color32::from_gray(56) } else { Color32::from_gray(38) };
+    painter.rect_filled(btn_plus, 3.0, plus_bg);
+    painter.rect_stroke(btn_plus, 3.0, Stroke::new(1.0_f32, if plus_hovered { Color32::from_gray(90) } else { Color32::from_gray(50) }));
+    painter.text(
+        btn_plus.center(),
+        Align2::CENTER_CENTER,
+        "+",
+        FontId::proportional(11.0),
+        if plus_hovered { Color32::WHITE } else { Color32::from_gray(210) },
+    );
+
+    // 倍率テキスト (例: 100%)
+    let zoom_pct = (ppf * 100.0).round() as i64;
+    painter.text(
+        pos2(lbl_percent.right() - 2.0, lbl_percent.center().y),
+        Align2::RIGHT_CENTER,
+        format!("{}%", zoom_pct),
+        FontId::monospace(9.5),
+        Color32::from_gray(185),
+    );
 
     // 左下角
     painter.rect_filled(corner_bl, 0.0, Color32::from_rgb(24, 26, 32));
@@ -1198,5 +1384,34 @@ fn parse_hex_rgb(hex: &str, alpha_mul: f32) -> Color32 {
         Color32::from_rgba_unmultiplied(r, g, b, (255.0 * alpha_mul) as u8)
     } else {
         Color32::from_white_alpha((255.0 * alpha_mul) as u8)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_zoom_mapping_and_bounds() {
+        assert!((ppf_to_slider_t(MIN_PPF) - 0.0).abs() < 1e-5);
+        assert!((ppf_to_slider_t(MAX_PPF) - 1.0).abs() < 1e-5);
+        assert!((slider_t_to_ppf(0.0) - MIN_PPF).abs() < 1e-5);
+        assert!((slider_t_to_ppf(1.0) - MAX_PPF).abs() < 1e-3);
+
+        let mid_t = 0.5;
+        let mid_ppf = slider_t_to_ppf(mid_t);
+        assert!(mid_ppf > MIN_PPF && mid_ppf < MAX_PPF);
+        assert!((ppf_to_slider_t(mid_ppf) - mid_t).abs() < 1e-5);
+
+        let mut v = crate::state::TimelineView::default();
+        v.px_per_frame = 1.0;
+        v.scroll_x = 100.0;
+        let lane_left = 100.0;
+        let mouse_x = 200.0; // lane_left + 100px -> frame 200
+        zoom_at(&mut v, lane_left, mouse_x, 2.0);
+        assert_eq!(v.px_per_frame, 2.0);
+        // After 2x zoom, mouse_x should still point to frame 200
+        let frame_under_mouse = (mouse_x - lane_left) / v.px_per_frame + v.scroll_x;
+        assert!((frame_under_mouse - 200.0).abs() < 1e-4);
     }
 }

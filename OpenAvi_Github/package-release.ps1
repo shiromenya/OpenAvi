@@ -100,7 +100,8 @@ Write-Host "Created portable release archive: $zipPath"
 # 4. Install to %LOCALAPPDATA%\Programs\OpenAvi and create Desktop + Start Menu shortcuts
 $installDir = Join-Path $env:LOCALAPPDATA "Programs\OpenAvi"
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
-& robocopy $stage $installDir /MIR /R:1 /W:1 | Out-Null
+Copy-Item -Path (Join-Path $stage "*") -Destination $installDir -Recurse -Force
+Write-Host "Installed files to: $installDir"
 
 $desktopDir = Join-Path $env:USERPROFILE "Desktop"
 if (-not (Test-Path $desktopDir)) {
@@ -126,8 +127,19 @@ foreach ($folder in @($desktopDir, $startPrograms)) {
     }
 }
 
-# 5. Sync Desktop ZIP and OpenAvi_Github folder
+# 5. Sync Desktop ZIP, Desktop folder, and OpenAvi_Github folder
 Copy-Item -Force $zipPath (Join-Path $desktopDir "OpenAvi-windows-x64.zip")
+
+$desktopExtract = Join-Path $desktopDir "OpenAvi-windows-x64"
+if (Test-Path $desktopExtract) {
+    Copy-Item -Path (Join-Path $stage "*") -Destination $desktopExtract -Recurse -Force
+    Write-Host "Updated desktop folder: $desktopExtract"
+}
+
+if (Test-Path "target\debug\openavi.exe") {
+    Copy-Item (Join-Path $stage "openavi.exe") "target\debug\openavi.exe" -Force
+}
+
 $githubDir = Join-Path $desktopDir "OpenAvi_Github"
 if (Test-Path $githubDir) {
     & robocopy $PSScriptRoot $githubDir /MIR /XD target dist .git /XF *.pdb | Out-Null

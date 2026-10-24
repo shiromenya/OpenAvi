@@ -115,9 +115,8 @@ impl OpenAviApp {
         log::info!("GPU: {gpu_info}");
 
         let mut st = EditorState::default();
-        match initial {
-            Some(path) => st.load_path(&path),
-            None => st.load_exo(SAMPLE_EXO, None),
+        if let Some(path) = initial {
+            st.load_path(&path);
         }
         Self {
             dock: default_dock(),

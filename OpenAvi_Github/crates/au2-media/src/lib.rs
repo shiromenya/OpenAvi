@@ -25,6 +25,8 @@ use image::AnimationDecoder;
 pub struct RgbaFrame {
     pub width: u32,
     pub height: u32,
+    pub original_width: u32,
+    pub original_height: u32,
     pub pixels: Vec<u8>,
 }
 
@@ -282,8 +284,16 @@ impl MediaCache {
             return CachedAsset::Failed;
         };
         let meta = self.get_metadata(path);
-        let width = meta.width.max(2);
-        let height = meta.height.max(2);
+        let orig_w = meta.width.max(2);
+        let orig_h = meta.height.max(2);
+
+        // デコード解像度: プレビューの滑らかさとパフォーマンスを考慮し、最大 1920px にクランプ（4K等も軽快再生）
+        let (decode_w, decode_h) = if orig_w > 1920 {
+            let sc_h = (orig_h as f64 * 1920.0 / orig_w as f64).round() as u32;
+            (1920, ((sc_h.max(2)) / 2) * 2)
+        } else {
+            ((orig_w / 2) * 2, (orig_h / 2) * 2)
+        };
 
         let shared = Arc::new((
             Mutex::new(VideoStreamShared {
@@ -304,7 +314,15 @@ impl MediaCache {
                 path.file_name().map(|s| s.to_string_lossy()).unwrap_or_default()
             ))
             .spawn(move || {
-                video_stream_worker(ffmpeg, video_path, width, height, shared_clone);
+                video_stream_worker(
+                    ffmpeg,
+                    video_path,
+                    orig_w,
+                    orig_h,
+                    decode_w,
+                    decode_h,
+                    shared_clone,
+                );
             })
             .ok();
 
@@ -330,11 +348,13 @@ impl MediaCache {
 fn video_stream_worker(
     ffmpeg: PathBuf,
     video_path: PathBuf,
-    width: u32,
-    height: u32,
+    orig_w: u32,
+    orig_h: u32,
+    decode_w: u32,
+    decode_h: u32,
     shared: Arc<(Mutex<VideoStreamShared>, Condvar)>,
 ) {
-    let frame_bytes = (width * height * 4) as usize;
+    let frame_bytes = (decode_w * decode_h * 4) as usize;
     let (lock, cvar) = &*shared;
 
     let mut child_opt: Option<Child> = None;
@@ -399,7 +419,7 @@ fn video_stream_worker(
                 .arg(&video_path)
                 .args([
                     "-vf",
-                    &format!("fps=30,scale={width}:{height}:flags=fast_bilinear"),
+                    &format!("fps=30,scale={decode_w}:{decode_h}:flags=fast_bilinear"),
                     "-f",
                     "rawvideo",
                     "-pix_fmt",
@@ -435,8 +455,10 @@ fn video_stream_worker(
                 match read_exact_or_eof(stdout, &mut buf) {
                     Ok(true) => {
                         let frame_arc = Arc::new(RgbaFrame {
-                            width,
-                            height,
+                            width: decode_w,
+                            height: decode_h,
+                            original_width: orig_w,
+                            original_height: orig_h,
                             pixels: buf,
                         });
                         if let Ok(mut st) = lock.lock() {
@@ -491,9 +513,13 @@ fn load_static_image(path: &Path) -> CachedAsset {
     match image::open(path) {
         Ok(img) => {
             let rgba = img.to_rgba8();
+            let w = rgba.width();
+            let h = rgba.height();
             CachedAsset::Static(Arc::new(RgbaFrame {
-                width: rgba.width(),
-                height: rgba.height(),
+                width: w,
+                height: h,
+                original_width: w,
+                original_height: h,
                 pixels: rgba.into_raw(),
             }))
         }
@@ -513,9 +539,13 @@ fn load_gif_or_static(path: &Path) -> CachedAsset {
                     .into_iter()
                     .map(|f| {
                         let buf = f.into_buffer();
+                        let w = buf.width();
+                        let h = buf.height();
                         Arc::new(RgbaFrame {
-                            width: buf.width(),
-                            height: buf.height(),
+                            width: w,
+                            height: h,
+                            original_width: w,
+                            original_height: h,
                             pixels: buf.into_raw(),
                         })
                     })
@@ -646,13 +676,6 @@ fn probe_media_metadata(ffprobe: &Path, path: &Path) -> Option<MediaMetadata> {
                 _ => {}
             }
         }
-    }
-
-    // プレビュー再生の軽快さと高画質を両立するため長辺 640px に最適化
-    if width > 640 {
-        let scaled_h = (height as f64 * 640.0 / width as f64).round() as u32;
-        width = 640;
-        height = (scaled_h.max(2) / 2) * 2;
     }
 
     Some(MediaMetadata {

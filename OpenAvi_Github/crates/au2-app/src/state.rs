@@ -58,6 +58,8 @@ pub enum TimelineDrag {
     Pan { start_scroll_x: f32, start_scroll_y: f32, start_pos: egui::Pos2 },
     /// 下部横スクロールバーのドラッグ
     ScrollbarThumb { grab_rel: f32 },
+    /// 右下タイムライン横縮尺（ズーム）スライダーのドラッグ
+    ZoomSlider,
 }
 
 impl Default for TimelineView {
@@ -408,16 +410,17 @@ impl EditorState {
                 return Some((handle.id(), *size));
             }
             let rgba = self.media.get_frame_arc(&path, 0, 0.0)?;
-            let size = [rgba.width as usize, rgba.height as usize];
-            let color_img = ColorImage::from_rgba_unmultiplied(size, &rgba.pixels);
+            let tex_size = [rgba.width as usize, rgba.height as usize];
+            let display_size = [rgba.original_width as usize, rgba.original_height as usize];
+            let color_img = ColorImage::from_rgba_unmultiplied(tex_size, &rgba.pixels);
             let handle = ctx.load_texture(
                 format!("media_static:{}", path.display()),
                 color_img,
                 TextureOptions::LINEAR,
             );
             let id = handle.id();
-            self.static_textures.insert(path, (handle, size));
-            return Some((id, size));
+            self.static_textures.insert(path, (handle, display_size));
+            return Some((id, display_size));
         }
 
         // 2. 動画再生フレーム (frame > 0) はファイルごとに 1 つの TextureHandle を In-Place 更新して再利用
@@ -428,14 +431,15 @@ impl EditorState {
         }
 
         let rgba = self.media.get_frame_arc(&path, key_frame, time_sec)?;
-        let size = [rgba.width as usize, rgba.height as usize];
-        let color_img = ColorImage::from_rgba_unmultiplied(size, &rgba.pixels);
+        let tex_size = [rgba.width as usize, rgba.height as usize];
+        let display_size = [rgba.original_width as usize, rgba.original_height as usize];
+        let color_img = ColorImage::from_rgba_unmultiplied(tex_size, &rgba.pixels);
 
         if let Some((handle, last_frame, prev_size)) = self.stream_textures.get_mut(&path) {
             handle.set(color_img, TextureOptions::LINEAR);
             *last_frame = key_frame;
-            *prev_size = size;
-            return Some((handle.id(), size));
+            *prev_size = display_size;
+            return Some((handle.id(), display_size));
         }
 
         let handle = ctx.load_texture(
@@ -444,8 +448,8 @@ impl EditorState {
             TextureOptions::LINEAR,
         );
         let id = handle.id();
-        self.stream_textures.insert(path, (handle, key_frame, size));
-        Some((id, size))
+        self.stream_textures.insert(path, (handle, key_frame, display_size));
+        Some((id, display_size))
     }
 
     /// タイムラインにオブジェクトを追加し、選択状態にします。
@@ -463,6 +467,20 @@ impl EditorState {
     /// メディアファイル（画像・動画・音声）をソースパネルに登録しつつ指定レイヤー・指定フレームに追加します。
     pub fn add_media_file(&mut self, path: &Path, preferred_layer: usize, start_frame: Frame) {
         let _ = self.register_source(path);
+        let meta = self.media.get_metadata(path);
+
+        // 新規プロジェクト（未保存でメディアがまだ無い状態）の場合、
+        // プロジェクト解像度をメディア本来の解像度に自動同期（AviUtl 互換スマート解像度合わせ）
+        if self.file_path.is_none() && (self.scene.object_count() == 0 || (self.scene.object_count() <= 1 && !self.dirty)) {
+            if meta.width >= 16 && meta.height >= 16 {
+                self.scene.settings.width = meta.width;
+                self.scene.settings.height = meta.height;
+                if meta.fps >= 1.0 {
+                    self.scene.settings.frame_rate = au2_core::Rational::new(meta.fps.round() as u32, 1);
+                }
+            }
+        }
+
         let fps = self.scene.settings.frame_rate.as_f64();
         // メディアファイル（動画・音声・画像）の本来の長さ（フレーム数）を取得（5秒制限を解消）
         let media_len = self.media.get_duration_frames(path, fps).max(1);
@@ -484,7 +502,6 @@ impl EditorState {
 
         // 動画ファイルで音声ストリームが含まれている場合、AviUtl と同様にペアとなる音声オブジェクトを自動追加
         if matches!(MediaKind::from_path(path), Some(MediaKind::Video)) {
-            let meta = self.media.get_metadata(path);
             let _ = self.media.get_frame_arc(path, 0, 0.0);
             if meta.has_audio {
                 let _ = self.media.get_audio_pcm(path);

@@ -273,6 +273,28 @@ fn scene_settings_ui(ui: &mut egui::Ui, st: &mut EditorState) {
                     ui.label("×");
                     ui.add(DragValue::new(&mut s.height).range(1..=8192));
                     ui.label(RichText::new("px").weak());
+                    ui.menu_button("プリセット", |ui| {
+                        if ui.button("1920×1080 (FHD 16:9)").clicked() {
+                            s.width = 1920;
+                            s.height = 1080;
+                            ui.close_menu();
+                        }
+                        if ui.button("1280×720 (HD 16:9)").clicked() {
+                            s.width = 1280;
+                            s.height = 720;
+                            ui.close_menu();
+                        }
+                        if ui.button("3840×2160 (4K 16:9)").clicked() {
+                            s.width = 3840;
+                            s.height = 2160;
+                            ui.close_menu();
+                        }
+                        if ui.button("1080×1920 (縦動画 9:16)").clicked() {
+                            s.width = 1080;
+                            s.height = 1920;
+                            ui.close_menu();
+                        }
+                    });
                 });
                 ui.end_row();
 
@@ -302,7 +324,7 @@ fn scene_settings_ui(ui: &mut egui::Ui, st: &mut EditorState) {
                 ui.end_row();
 
                 ui.label(RichText::new("プロジェクトファイル").strong());
-                ui.label(st.file_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "未保存 (サンプル)".into()));
+                ui.label(st.file_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "未保存 (新規プロジェクト)".into()));
                 ui.end_row();
 
                 ui.label(RichText::new("テキスト文字コード").strong());
