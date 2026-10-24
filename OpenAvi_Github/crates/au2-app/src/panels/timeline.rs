@@ -131,12 +131,44 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     let xf = |x: f32| ((x - lanes.left()) / ppf + scroll_x).max(0.0) as Frame;
     let y_layer = |y: f32| (((y - lanes.top() + scroll_y) / layer_h).floor().max(0.0) as usize).min(MAX_LAYERS - 1);
 
-    let hit = |st: &EditorState, p: egui::Pos2| -> Option<(ObjectId, Frame)> {
+    enum HitKind {
+        Body(ObjectId, Frame),
+        LeftEdge(ObjectId),
+        RightEdge(ObjectId),
+    }
+
+    let hit_detail = |st: &EditorState, p: egui::Pos2| -> Option<HitKind> {
         if !lanes.contains(p) {
             return None;
         }
         let f = xf(p.x);
-        st.scene.layers.get(y_layer(p.y))?.objects.iter().find(|o| o.contains(f)).map(|o| (o.id, o.frame_start))
+        let layer = st.scene.layers.get(y_layer(p.y))?;
+        for o in &layer.objects {
+            if o.contains(f) {
+                let x0 = fx(o.frame_start as f32);
+                let x1 = fx(o.frame_end as f32 + 1.0);
+                let edge_threshold = 8.0f32;
+                if (p.x - x0).abs() <= edge_threshold && x1 - x0 > edge_threshold * 2.0 {
+                    return Some(HitKind::LeftEdge(o.id));
+                } else if (p.x - x1).abs() <= edge_threshold && x1 - x0 > edge_threshold * 2.0 {
+                    return Some(HitKind::RightEdge(o.id));
+                } else {
+                    return Some(HitKind::Body(o.id, o.frame_start));
+                }
+            }
+        }
+        None
+    };
+
+    let hit = |st: &EditorState, p: egui::Pos2| -> Option<(ObjectId, Frame)> {
+        match hit_detail(st, p) {
+            Some(HitKind::Body(id, s)) => Some((id, s)),
+            Some(HitKind::LeftEdge(id)) | Some(HitKind::RightEdge(id)) => {
+                let s = st.scene.find(id).map(|(_, o)| o.frame_start).unwrap_or(0);
+                Some((id, s))
+            }
+            None => None,
+        }
     };
 
     // ---- 右クリック位置の記録 ----
@@ -176,9 +208,21 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                 }
             } else if ruler.contains(p) {
                 Some(TimelineDrag::Scrub)
-            } else if let Some((id, start)) = hit(st, p) {
-                st.selected = Some(id);
-                Some(TimelineDrag::Move { id, grab_offset: xf(p.x) as i64 - start as i64 })
+            } else if let Some(hk) = hit_detail(st, p) {
+                match hk {
+                    HitKind::LeftEdge(id) => {
+                        st.selected = Some(id);
+                        Some(TimelineDrag::ResizeLeft { id })
+                    }
+                    HitKind::RightEdge(id) => {
+                        st.selected = Some(id);
+                        Some(TimelineDrag::ResizeRight { id })
+                    }
+                    HitKind::Body(id, start) => {
+                        st.selected = Some(id);
+                        Some(TimelineDrag::Move { id, grab_offset: xf(p.x) as i64 - start as i64 })
+                    }
+                }
             } else if lanes.contains(p) {
                 Some(TimelineDrag::Scrub)
             } else {
@@ -250,12 +294,39 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                     }
                 }
             }
+            TimelineDrag::ResizeLeft { id } => {
+                if let Some(p) = resp.interact_pointer_pos() {
+                    let new_start = xf(p.x);
+                    if let Some((_, obj)) = st.scene.find_mut(id) {
+                        if new_start <= obj.frame_end {
+                            obj.frame_start = new_start;
+                            st.dirty = true;
+                        }
+                    }
+                }
+            }
+            TimelineDrag::ResizeRight { id } => {
+                if let Some(p) = resp.interact_pointer_pos() {
+                    let new_end = xf(p.x);
+                    let mut updated_end = None;
+                    if let Some((_, obj)) = st.scene.find_mut(id) {
+                        if new_end >= obj.frame_start {
+                            obj.frame_end = new_end;
+                            updated_end = Some(new_end);
+                            st.dirty = true;
+                        }
+                    }
+                    if let Some(end) = updated_end {
+                        if end + 1 > st.scene.settings.length {
+                            st.scene.settings.length = end + 30;
+                        }
+                    }
+                }
+            }
         }
     }
     if resp.drag_stopped() {
-        if matches!(st.timeline.drag, Some(TimelineDrag::Scrub | TimelineDrag::Move { .. } | TimelineDrag::ScrollbarThumb { .. })) {
-            st.timeline.drag = None;
-        }
+        st.timeline.drag = None;
     }
     if resp.clicked() {
         if let Some(p) = resp.interact_pointer_pos() {
@@ -360,6 +431,10 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
             if let Some(hp) = hover_pos {
                 if lanes.contains(hp) && r.contains(hp) {
                     hovered_clip = Some((li, obj.id));
+                    let edge_t = 8.0f32;
+                    if (hp.x - x0).abs() <= edge_t || (hp.x - x1).abs() <= edge_t {
+                        ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::ResizeHorizontal);
+                    }
                 }
             }
 

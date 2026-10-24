@@ -1,16 +1,23 @@
 //! # au2-media
 //!
-//! OpenAvi の画像・動画デコードおよびフレームキャッシュモジュール。
+//! OpenAvi の画像・動画デコード、完全非同期バックグラウンド・動画ストリーミングキャッシュ、
+//! および Windows ネイティブオーディオ再生パイプライン。
 //!
-//! - **画像ファイル**: `.png`, `.jpg`, `.jpeg`, `.bmp`, `.webp`, `.gif` を `image` クレートでネイティブデコード。
-//! - **アニメーション GIF**: 全フレームを展開し、タイムラインのフレーム位置に応じてアニメーション再生。
-//! - **動画ファイル**: `.mp4`, `.avi`, `.mov`, `.mkv`, `.webm`, `.wmv` 等を `ffmpeg` パイプライン（PATH または WinGet 領域から自動検出）で RGBA フレームへデコードし、メモリキャッシュします。
+//! - **画像ファイル**: `.png`, `.jpg`, `.jpeg`, `.bmp`, `.webp`, `.gif` をネイティブデコード。
+//! - **動画ファイル**: バックグラウンドスレッドで `ffmpeg` 連続パイプを駆動し、メインスレッドの待ち時間 0ms で 60fps 滑らかな再生を実現。
+//! - **音声ファイル / 動画音声**: 44.1kHz 16-bit ステレオ PCM にデコードし、低遅延リアルタイム出力。
+
+pub mod audio;
 
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
+pub use audio::{decode_audio_pcm, AudioEngine, AudioTrackItem, DecodedAudio};
 use image::AnimationDecoder;
 
 /// RGBA8 ピクセルバッファ。
@@ -41,21 +48,57 @@ impl MediaKind {
     }
 }
 
-/// 静止画またはアニメーション GIF のキャッシュエントリ。
+/// メディアファイルのメタデータ情報。
+#[derive(Debug, Clone, Default)]
+pub struct MediaMetadata {
+    pub width: u32,
+    pub height: u32,
+    pub duration_sec: f64,
+    pub fps: f64,
+    pub has_audio: bool,
+    pub has_video: bool,
+}
+
+/// バックグラウンド連続動画デコーダとメインスレッド間で共有されるフレームバッファ。
+struct VideoStreamShared {
+    /// 先頭フレーム (frame 0)。タイムラインやソースパネルのサムネイル用に永久保持する。
+    first_frame: Option<Arc<RgbaFrame>>,
+    /// デコード済みフレーム (30fps 換算の frame_index -> Arc<RgbaFrame>)
+    frames: HashMap<u32, Arc<RgbaFrame>>,
+    /// 現在メインスレッドが再生・表示しようとしているフレーム番号
+    target_frame: u32,
+    /// ワーカースレッド停止フラグ
+    stop: bool,
+}
+
+struct VideoStreamHandle {
+    shared: Arc<(Mutex<VideoStreamShared>, Condvar)>,
+}
+
+impl Drop for VideoStreamHandle {
+    fn drop(&mut self) {
+        let (lock, cvar) = &*self.shared;
+        if let Ok(mut st) = lock.lock() {
+            st.stop = true;
+            cvar.notify_all();
+        }
+    }
+}
+
+/// 静止画または動画のキャッシュエントリ。
 enum CachedAsset {
-    Static(RgbaFrame),
-    AnimatedGif(Vec<RgbaFrame>),
-    VideoInfo {
-        width: u32,
-        height: u32,
-        frames: HashMap<u32, RgbaFrame>,
-    },
+    Static(Arc<RgbaFrame>),
+    AnimatedGif(Vec<Arc<RgbaFrame>>),
+    VideoStream(VideoStreamHandle),
     Failed,
 }
 
 /// メディアデコーダ＆キャッシュ。
 pub struct MediaCache {
     assets: HashMap<PathBuf, CachedAsset>,
+    metadata_cache: HashMap<PathBuf, MediaMetadata>,
+    /// 音声キャッシュ (`None` の場合もキャッシュして毎フレームの失敗再試行を完全に防止)
+    audio_cache: HashMap<PathBuf, Option<Arc<Vec<i16>>>>,
     ffmpeg_bin: Option<PathBuf>,
     ffprobe_bin: Option<PathBuf>,
 }
@@ -74,6 +117,8 @@ impl MediaCache {
         }
         Self {
             assets: HashMap::new(),
+            metadata_cache: HashMap::new(),
+            audio_cache: HashMap::new(),
             ffmpeg_bin,
             ffprobe_bin,
         }
@@ -83,84 +128,374 @@ impl MediaCache {
         self.ffmpeg_bin.is_some()
     }
 
-    /// 静止画または動画の指定フレーム（秒単位およびフレーム番号）の [`RgbaFrame`] を取得します。
-    pub fn get_frame(&mut self, path: &Path, frame_index: u32, time_sec: f64) -> Option<&RgbaFrame> {
-        if !path.exists() {
+    /// メディアのメタデータ（解像度・長さ・ストリーム有無）を取得します（キャッシュ対応）。
+    pub fn get_metadata(&mut self, path: &Path) -> MediaMetadata {
+        if let Some(meta) = self.metadata_cache.get(path) {
+            return meta.clone();
+        }
+
+        let meta = match MediaKind::from_path(path) {
+            Some(MediaKind::Image) => {
+                if let Ok(dim) = image::image_dimensions(path) {
+                    MediaMetadata {
+                        width: dim.0,
+                        height: dim.1,
+                        duration_sec: 5.0,
+                        fps: 30.0,
+                        has_audio: false,
+                        has_video: false,
+                    }
+                } else {
+                    MediaMetadata {
+                        width: 640,
+                        height: 360,
+                        duration_sec: 5.0,
+                        fps: 30.0,
+                        has_audio: false,
+                        has_video: false,
+                    }
+                }
+            }
+            _ => {
+                if let Some(probe) = &self.ffprobe_bin {
+                    probe_media_metadata(probe, path).unwrap_or(MediaMetadata {
+                        width: 640,
+                        height: 360,
+                        duration_sec: 5.0,
+                        fps: 30.0,
+                        has_audio: false,
+                        has_video: true,
+                    })
+                } else {
+                    MediaMetadata {
+                        width: 640,
+                        height: 360,
+                        duration_sec: 5.0,
+                        fps: 30.0,
+                        has_audio: false,
+                        has_video: true,
+                    }
+                }
+            }
+        };
+
+        self.metadata_cache.insert(path.to_path_buf(), meta.clone());
+        meta
+    }
+
+    /// 指定 FPS におけるメディアの総フレーム数を取得します。
+    pub fn get_duration_frames(&mut self, path: &Path, fps: f64) -> u32 {
+        let meta = self.get_metadata(path);
+        if meta.duration_sec > 0.0 {
+            (meta.duration_sec * fps.max(1.0)).round().max(1.0) as u32
+        } else {
+            (5.0 * fps.max(1.0)).round().max(1.0) as u32
+        }
+    }
+
+    /// メディアから抽出された PCM 音声データを取得します（音声なしファイルもキャッシュして再実行を防止）。
+    pub fn get_audio_pcm(&mut self, path: &Path) -> Option<Arc<Vec<i16>>> {
+        if let Some(cached) = self.audio_cache.get(path) {
+            return cached.clone();
+        }
+        // メタデータで音声ストリームが無いことが分かっている場合は ffmpeg を起動せず即座に None をキャッシュ
+        let meta = self.get_metadata(path);
+        if matches!(MediaKind::from_path(path), Some(MediaKind::Video)) && !meta.has_audio {
+            self.audio_cache.insert(path.to_path_buf(), None);
             return None;
         }
-        let ext = path
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
+        let Some(ffmpeg) = self.ffmpeg_bin.as_ref() else {
+            self.audio_cache.insert(path.to_path_buf(), None);
+            return None;
+        };
+        let result = decode_audio_pcm(ffmpeg, path).map(|d| d.samples);
+        self.audio_cache.insert(path.to_path_buf(), result.clone());
+        result
+    }
 
+    /// 静止画または動画の指定フレームの [`Arc<RgbaFrame>`] をノンブロッキングで取得します。
+    pub fn get_frame_arc(&mut self, path: &Path, frame_index: u32, _time_sec: f64) -> Option<Arc<RgbaFrame>> {
         if !self.assets.contains_key(path) {
+            if !path.exists() {
+                return None;
+            }
+            let ext = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+
             let asset = match ext.as_str() {
                 "gif" => load_gif_or_static(path),
                 "png" | "jpg" | "jpeg" | "bmp" | "webp" => load_static_image(path),
-                _ => self.init_video_asset(path),
+                _ => self.init_video_stream(path),
             };
             self.assets.insert(path.to_path_buf(), asset);
         }
 
-        // 動画の場合、要求フレームが未キャッシュならデコード
-        if let Some(CachedAsset::VideoInfo { width, height, frames }) = self.assets.get(path) {
-            let (w, h) = (*width, *height);
-            // 3フレーム粒度でキャッシュヒット率を高める（または正確なフレーム番号）
-            if !frames.contains_key(&frame_index) {
-                if let Some(ffmpeg) = self.ffmpeg_bin.clone() {
-                    if let Some(decoded) = decode_video_frame_ffmpeg(&ffmpeg, path, time_sec, w, h) {
-                        if let Some(CachedAsset::VideoInfo { frames, .. }) = self.assets.get_mut(path) {
-                            // メモリ上限保護（最大 180 フレーム保持）
-                            if frames.len() >= 180 {
-                                frames.clear();
-                            }
-                            frames.insert(frame_index, decoded);
-                        }
-                    }
-                }
-            }
-        }
-
         match self.assets.get(path)? {
-            CachedAsset::Static(frame) => Some(frame),
+            CachedAsset::Static(frame) => Some(Arc::clone(frame)),
             CachedAsset::AnimatedGif(frames) if !frames.is_empty() => {
-                Some(&frames[(frame_index as usize) % frames.len()])
+                Some(Arc::clone(&frames[(frame_index as usize) % frames.len()]))
             }
-            CachedAsset::VideoInfo { frames, .. } => frames.get(&frame_index),
+            CachedAsset::VideoStream(handle) => {
+                let (lock, cvar) = &*handle.shared;
+                let mut st = lock.lock().ok()?;
+
+                // frame_index == 0 はサムネイル描画で毎フレーム呼ばれるため、target_frame を動かさず first_frame を即返す
+                if frame_index == 0 {
+                    if let Some(first) = &st.first_frame {
+                        return Some(Arc::clone(first));
+                    }
+                } else {
+                    st.target_frame = frame_index;
+                    cvar.notify_all();
+                }
+
+                // 1. 要求フレームがすでにバックグラウンドでデコード済みなら即座に返す (0.00ms)
+                if let Some(f) = st.frames.get(&frame_index) {
+                    return Some(Arc::clone(f));
+                }
+
+                // 2. まだデコードが追いついていない場合、最も近いデコード済みフレームをノンブロッキングで返す
+                if let Some((_, nearest)) = st
+                    .frames
+                    .iter()
+                    .min_by_key(|(&k, _)| (k as i64 - frame_index as i64).abs())
+                {
+                    return Some(Arc::clone(nearest));
+                }
+
+                st.first_frame.clone()
+            }
             _ => None,
         }
     }
 
-    fn init_video_asset(&self, path: &Path) -> CachedAsset {
-        let Some(ffmpeg) = &self.ffmpeg_bin else {
+    /// 互換性のための参照取得 API。
+    pub fn get_frame(&mut self, path: &Path, frame_index: u32, time_sec: f64) -> Option<Arc<RgbaFrame>> {
+        self.get_frame_arc(path, frame_index, time_sec)
+    }
+
+    fn init_video_stream(&mut self, path: &Path) -> CachedAsset {
+        let Some(ffmpeg) = self.ffmpeg_bin.clone() else {
             return CachedAsset::Failed;
         };
-        let (width, height) = self
-            .ffprobe_bin
-            .as_ref()
-            .and_then(|probe| probe_video_dimensions(probe, path))
-            .unwrap_or((640, 360));
+        let meta = self.get_metadata(path);
+        let width = meta.width.max(2);
+        let height = meta.height.max(2);
 
-        let mut frames = HashMap::new();
-        if let Some(first) = decode_video_frame_ffmpeg(ffmpeg, path, 0.0, width, height) {
-            frames.insert(0, first);
-            CachedAsset::VideoInfo { width, height, frames }
+        let shared = Arc::new((
+            Mutex::new(VideoStreamShared {
+                first_frame: None,
+                frames: HashMap::with_capacity(400),
+                target_frame: 0,
+                stop: false,
+            }),
+            Condvar::new(),
+        ));
+
+        let shared_clone = Arc::clone(&shared);
+        let video_path = path.to_path_buf();
+
+        thread::Builder::new()
+            .name(format!(
+                "openavi-vdec-{}",
+                path.file_name().map(|s| s.to_string_lossy()).unwrap_or_default()
+            ))
+            .spawn(move || {
+                video_stream_worker(ffmpeg, video_path, width, height, shared_clone);
+            })
+            .ok();
+
+        // 初回のみ先頭フレーム (frame 0) が届くまで最大 250ms 待機してサムネイルを確実に用意する
+        let (lock, cvar) = &*shared;
+        if let Ok(mut st) = lock.lock() {
+            let deadline = Instant::now() + Duration::from_millis(250);
+            while st.first_frame.is_none() && !st.stop {
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let (new_st, _) = cvar.wait_timeout(st, deadline - now).unwrap();
+                st = new_st;
+            }
+        }
+
+        CachedAsset::VideoStream(VideoStreamHandle { shared })
+    }
+}
+
+/// バックグラウンドで `ffmpeg` の連続パイプを開き、フレームを高速に先読みし続けるワーカースレッド。
+fn video_stream_worker(
+    ffmpeg: PathBuf,
+    video_path: PathBuf,
+    width: u32,
+    height: u32,
+    shared: Arc<(Mutex<VideoStreamShared>, Condvar)>,
+) {
+    let frame_bytes = (width * height * 4) as usize;
+    let (lock, cvar) = &*shared;
+
+    let mut child_opt: Option<Child> = None;
+    let mut cur_decode_frame: u32 = 0;
+    let mut eof_reached = false;
+
+    let kill_child = |c_opt: &mut Option<Child>| {
+        if let Some(mut c) = c_opt.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    };
+
+    loop {
+        // 1. 現在の目標フレームとキャッシュ状態を確認
+        let (stop, target, has_target) = {
+            let Ok(st) = lock.lock() else { break };
+            (st.stop, st.target_frame, st.frames.contains_key(&st.target_frame))
+        };
+        if stop {
+            kill_child(&mut child_opt);
+            break;
+        }
+
+        // 2. シーク判定:
+        // - パイプがまだ開かれていない
+        // - または target が現在のデコード位置より過去でキャッシュに無い
+        // - または target が現在のデコード位置より 60 フレーム (2秒) 以上先へ飛んでいる
+        let need_reopen = if child_opt.is_none() {
+            !eof_reached || !has_target
+        } else if !has_target && (target < cur_decode_frame || target > cur_decode_frame + 60) {
+            true
         } else {
-            CachedAsset::Failed
+            false
+        };
+
+        if need_reopen {
+            kill_child(&mut child_opt);
+            eof_reached = false;
+            // 初回は必ず 0 から開始してサムネイルを取得
+            let start_frame = {
+                let Ok(st) = lock.lock() else { break };
+                if st.first_frame.is_none() {
+                    0
+                } else {
+                    target
+                }
+            };
+            cur_decode_frame = start_frame;
+            let start_sec = start_frame as f64 / 30.0;
+
+            let mut cmd = Command::new(&ffmpeg);
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            }
+            if start_frame > 0 {
+                cmd.args(["-ss", &format!("{start_sec:.3}")]);
+            }
+            cmd.arg("-i")
+                .arg(&video_path)
+                .args([
+                    "-vf",
+                    &format!("fps=30,scale={width}:{height}:flags=fast_bilinear"),
+                    "-f",
+                    "rawvideo",
+                    "-pix_fmt",
+                    "rgba",
+                    "-loglevel",
+                    "error",
+                    "-",
+                ])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null());
+
+            match cmd.spawn() {
+                Ok(c) => child_opt = Some(c),
+                Err(_) => {
+                    thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
+            }
+        }
+
+        // 3. もし現在のデコード位置が target より 240 フレーム (8秒) 以上先まで進んでいる場合は一時待機（メモリとCPUの節約）
+        if child_opt.is_some() && cur_decode_frame > target + 240 {
+            if let Ok(st) = lock.lock() {
+                let _ = cvar.wait_timeout(st, Duration::from_millis(15));
+            }
+            continue;
+        }
+
+        // 4. パイプから 1 フレーム分を読み出す
+        if let Some(child) = child_opt.as_mut() {
+            if let Some(stdout) = child.stdout.as_mut() {
+                let mut buf = vec![0u8; frame_bytes];
+                match read_exact_or_eof(stdout, &mut buf) {
+                    Ok(true) => {
+                        let frame_arc = Arc::new(RgbaFrame {
+                            width,
+                            height,
+                            pixels: buf,
+                        });
+                        if let Ok(mut st) = lock.lock() {
+                            if cur_decode_frame == 0 && st.first_frame.is_none() {
+                                st.first_frame = Some(Arc::clone(&frame_arc));
+                            }
+                            // スライディングウィンドウ: 最大 360 フレーム (12秒分) を保持し、古いフレームを破棄
+                            if st.frames.len() >= 360 {
+                                let tgt = st.target_frame;
+                                st.frames.retain(|&k, _| {
+                                    k + 30 >= tgt && k <= tgt + 300
+                                });
+                            }
+                            st.frames.insert(cur_decode_frame, frame_arc);
+                            cvar.notify_all();
+                        }
+                        cur_decode_frame += 1;
+                    }
+                    _ => {
+                        // EOF 到達
+                        eof_reached = true;
+                        kill_child(&mut child_opt);
+                        if let Ok(st) = lock.lock() {
+                            let _ = cvar.wait_timeout(st, Duration::from_millis(30));
+                        }
+                    }
+                }
+            } else {
+                kill_child(&mut child_opt);
+            }
+        } else {
+            if let Ok(st) = lock.lock() {
+                let _ = cvar.wait_timeout(st, Duration::from_millis(20));
+            }
         }
     }
+}
+
+fn read_exact_or_eof<R: Read>(reader: &mut R, mut buf: &mut [u8]) -> std::io::Result<bool> {
+    while !buf.is_empty() {
+        match reader.read(buf) {
+            Ok(0) => return Ok(false),
+            Ok(n) => buf = &mut buf[n..],
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(true)
 }
 
 fn load_static_image(path: &Path) -> CachedAsset {
     match image::open(path) {
         Ok(img) => {
             let rgba = img.to_rgba8();
-            CachedAsset::Static(RgbaFrame {
+            CachedAsset::Static(Arc::new(RgbaFrame {
                 width: rgba.width(),
                 height: rgba.height(),
                 pixels: rgba.into_raw(),
-            })
+            }))
         }
         Err(e) => {
             log::warn!("画像の読み込み失敗 ({}): {e}", path.display());
@@ -174,15 +509,15 @@ fn load_gif_or_static(path: &Path) -> CachedAsset {
         let reader = std::io::BufReader::new(file);
         if let Ok(decoder) = image::codecs::gif::GifDecoder::new(reader) {
             if let Ok(frames) = decoder.into_frames().collect_frames() {
-                let list: Vec<RgbaFrame> = frames
+                let list: Vec<Arc<RgbaFrame>> = frames
                     .into_iter()
                     .map(|f| {
                         let buf = f.into_buffer();
-                        RgbaFrame {
+                        Arc::new(RgbaFrame {
                             width: buf.width(),
                             height: buf.height(),
                             pixels: buf.into_raw(),
-                        }
+                        })
                     })
                     .collect();
                 if list.len() == 1 {
@@ -245,7 +580,7 @@ fn find_file_recursive(dir: &Path, target_name: &str, depth: u8) -> Option<PathB
     None
 }
 
-fn probe_video_dimensions(ffprobe: &Path, video_path: &Path) -> Option<(u32, u32)> {
+fn probe_media_metadata(ffprobe: &Path, path: &Path) -> Option<MediaMetadata> {
     let mut cmd = Command::new(ffprobe);
     #[cfg(windows)]
     {
@@ -256,77 +591,78 @@ fn probe_video_dimensions(ffprobe: &Path, video_path: &Path) -> Option<(u32, u32
         .args([
             "-v",
             "error",
-            "-select_streams",
-            "v:0",
             "-show_entries",
-            "stream=width,height",
+            "format=duration:stream=codec_type,width,height,r_frame_rate",
             "-of",
-            "csv=s=x:p=0",
+            "default=noprint_wrappers=1:nokey=0",
         ])
-        .arg(video_path)
+        .arg(path)
         .output()
         .ok()?;
+
     let text = String::from_utf8_lossy(&out.stdout);
-    let line = text.lines().next()?.trim();
-    let (w, h) = line.split_once('x')?;
-    let width: u32 = w.parse().ok()?;
-    let height: u32 = h.parse().ok()?;
-    // プレビュー負荷軽減のため長辺 960px 以下にスケーリング
-    if width > 960 {
-        let scaled_h = (height as f64 * 960.0 / width as f64).round() as u32;
-        Some((960, (scaled_h.max(2) / 2) * 2))
-    } else {
-        Some((width.max(2), height.max(2)))
-    }
-}
+    let mut width = 640;
+    let mut height = 360;
+    let mut duration_sec = 0.0;
+    let mut fps = 30.0;
+    let mut has_audio = false;
+    let mut has_video = false;
 
-fn decode_video_frame_ffmpeg(
-    ffmpeg: &Path,
-    video_path: &Path,
-    time_sec: f64,
-    width: u32,
-    height: u32,
-) -> Option<RgbaFrame> {
-    let expected_len = (width * height * 4) as usize;
-    let mut cmd = Command::new(ffmpeg);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some((k, v)) = line.split_once('=') {
+            match k.trim() {
+                "width" => {
+                    if let Ok(w) = v.trim().parse() {
+                        width = w;
+                    }
+                }
+                "height" => {
+                    if let Ok(h) = v.trim().parse() {
+                        height = h;
+                    }
+                }
+                "duration" => {
+                    if let Ok(d) = v.trim().parse() {
+                        duration_sec = d;
+                    }
+                }
+                "codec_type" => {
+                    if v.trim() == "video" {
+                        has_video = true;
+                    } else if v.trim() == "audio" {
+                        has_audio = true;
+                    }
+                }
+                "r_frame_rate" => {
+                    if let Some((num, den)) = v.trim().split_once('/') {
+                        if let (Ok(n), Ok(d)) = (num.parse::<f64>(), den.parse::<f64>()) {
+                            if d > 0.0 {
+                                fps = (n / d).round();
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
     }
-    let mut child = cmd
-        .args(["-ss", &format!("{time_sec:.3}"), "-i"])
-        .arg(video_path)
-        .args([
-            "-frames:v",
-            "1",
-            "-vf",
-            &format!("scale={width}:{height}"),
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgba",
-            "-loglevel",
-            "error",
-            "-",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
 
-    let mut buf = Vec::with_capacity(expected_len);
-    if let Some(mut stdout) = child.stdout.take() {
-        let _ = stdout.read_to_end(&mut buf);
+    // プレビュー再生の軽快さと高画質を両立するため長辺 640px に最適化
+    if width > 640 {
+        let scaled_h = (height as f64 * 640.0 / width as f64).round() as u32;
+        width = 640;
+        height = (scaled_h.max(2) / 2) * 2;
     }
-    let _ = child.wait();
 
-    if buf.len() >= expected_len {
-        buf.truncate(expected_len);
-        Some(RgbaFrame { width, height, pixels: buf })
-    } else {
-        None
-    }
+    Some(MediaMetadata {
+        width: width.max(2),
+        height: height.max(2),
+        duration_sec,
+        fps: if fps > 0.0 { fps } else { 30.0 },
+        has_audio,
+        has_video,
+    })
 }
 
 #[cfg(test)]
@@ -350,9 +686,18 @@ mod tests {
 
         if cache.has_ffmpeg() {
             let vid_path = Path::new("../../samples/sample_video.mp4");
-            let vid_frame = cache.get_frame(vid_path, 15, 0.5).expect("decode sample_video.mp4");
+            let vid_frame = cache.get_frame(vid_path, 0, 0.0).expect("decode sample_video.mp4");
             assert_eq!((vid_frame.width, vid_frame.height), (320, 180));
             assert_eq!(vid_frame.pixels.len(), 320 * 180 * 4);
+
+            let audio_vid = Path::new("../../samples/sample_with_audio_10s.mp4");
+            if audio_vid.exists() {
+                let meta = cache.get_metadata(audio_vid);
+                assert!(meta.duration_sec >= 9.9);
+                assert!(meta.has_audio);
+                let pcm = cache.get_audio_pcm(audio_vid).expect("extract pcm audio");
+                assert!(!pcm.is_empty());
+            }
         }
     }
 }

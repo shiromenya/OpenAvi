@@ -110,6 +110,13 @@ impl Effect {
         }
     }
 
+    pub fn track_mut(&mut self, key: &str) -> Option<&mut Track> {
+        match self.param_mut(key)? {
+            ParamValue::Track(t) => Some(t),
+            ParamValue::Text(_) => None,
+        }
+    }
+
     pub fn text(&self, key: &str) -> Option<&str> {
         match self.param(key)? {
             ParamValue::Text(s) => Some(s),

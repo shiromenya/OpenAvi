@@ -78,3 +78,70 @@ fn main() -> eframe::Result<()> {
         Box::new(move |cc| Ok(Box::new(app::OpenAviApp::new(cc, initial)))),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_video_longer_than_5s_and_audio_integration() {
+        let mut st = state::EditorState::default();
+        let video_path = Path::new("samples/sample_with_audio_10s.mp4");
+        if !video_path.exists() {
+            return;
+        }
+
+        // 1. 動画をレイヤー0 に配置
+        st.add_media_file(video_path, 0, 0);
+
+        // 動画の長さが 5秒 (150フレーム) ではなく、実際の 10秒 (300フレーム) になっているか検証
+        let layer0 = &st.scene.layers[0];
+        assert!(!layer0.objects.is_empty(), "レイヤー0に動画オブジェクトが追加されていること");
+        let video_obj = &layer0.objects[0];
+        let video_len = video_obj.length();
+        assert!(video_len >= 290, "10秒動画が150フレーム(5秒)で切られず、本来の長さ(約300フレーム)になっていること");
+
+        // 2. 音声オブジェクトがペアで追加されているか検証
+        let layer1 = &st.scene.layers[1];
+        assert!(!layer1.objects.is_empty(), "音声付き動画の場合、ペアの音声オブジェクトが自動配置されること");
+        let audio_obj = &layer1.objects[0];
+        assert_eq!(audio_obj.category(), au2_core::ObjectCategory::Audio);
+        assert_eq!(audio_obj.length(), video_len, "音声オブジェクトの長さが動画オブジェクトと一致していること");
+
+        // 3. 5秒以降 (例えば frame 210 = 7.0秒) のフレームが正常に取得できるか検証
+        let ctx = eframe::egui::Context::default();
+        let path_str = video_path.to_string_lossy().to_string();
+        let tex_result = st.get_media_texture(&ctx, &path_str, 210, 7.0);
+        assert!(tex_result.is_some(), "5秒以降(7.0秒)の動画フレームが正常にデコードされてテクスチャ取得できること");
+        let (_, size) = tex_result.unwrap();
+        assert_eq!(size, [320, 180]);
+
+        // 4. 音声 PCM データが正常に抽出できるか検証
+        let pcm = st.media.get_audio_pcm(video_path);
+        assert!(pcm.is_some(), "動画から PCM 音声データが取得できること");
+        let pcm_data = pcm.unwrap();
+        assert!(pcm_data.len() >= 800000, "10秒分のステレオPCMサンプルが含まれていること");
+
+        // 5. 再生パフォーマンス検証: 300フレーム連続で再生ループを回した際、メインスレッドが一切ブロックされないこと
+        st.playing = true;
+        let bench_start = std::time::Instant::now();
+        for f in 0..300 {
+            st.frame = f;
+            st.sync_audio_playback();
+            // プレビュー描画のテクスチャ取得
+            let _ = st.get_media_texture(&ctx, &path_str, f, f as f64 / 30.0);
+            // タイムラインのサムネイル取得 (frame 0)
+            let _ = st.get_media_texture(&ctx, &path_str, 0, 0.0);
+        }
+        let elapsed_ms = bench_start.elapsed().as_secs_f64() * 1000.0;
+        let avg_ms_per_frame = elapsed_ms / 300.0;
+        println!("300フレーム再生ループ合計: {elapsed_ms:.2} ms (1フレーム平均: {avg_ms_per_frame:.3} ms)");
+        assert!(
+            avg_ms_per_frame < 2.0,
+            "1フレームあたりのメインスレッド処理時間が 2.0ms 未満 (60fps=16.6ms に対して十分な余裕) であること: 実測 {avg_ms_per_frame:.3} ms"
+        );
+        st.playing = false;
+        st.audio.stop();
+    }
+}

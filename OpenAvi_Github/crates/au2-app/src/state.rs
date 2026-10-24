@@ -4,9 +4,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use au2_core::{Frame, ObjectId, Scene, SceneSettings, TimelineObject};
+use au2_core::{EffectKind, Frame, ObjectId, Scene, SceneSettings, TimelineObject, Track};
 use au2_exo::TextEncoding;
-use au2_media::{MediaCache, MediaKind};
+use au2_media::{AudioEngine, AudioTrackItem, MediaCache, MediaKind};
 use au2_plugin::PluginRegistry;
 use eframe::egui::{self, ColorImage, TextureHandle, TextureOptions};
 
@@ -50,6 +50,10 @@ pub enum TimelineDrag {
     Scrub,
     /// オブジェクト移動。`grab_offset` は掴んだ位置とオブジェクト先頭の差（フレーム）
     Move { id: ObjectId, grab_offset: i64 },
+    /// オブジェクト左端ドラッグ（開始フレームの伸縮）
+    ResizeLeft { id: ObjectId },
+    /// オブジェクト右端ドラッグ（終了フレームの伸縮・長さ変更）
+    ResizeRight { id: ObjectId },
     /// 中クリックやドラッグによるタイムライン自由パン（縦横スクロール）
     Pan { start_scroll_x: f32, start_scroll_y: f32, start_pos: egui::Pos2 },
     /// 下部横スクロールバーのドラッグ
@@ -88,13 +92,16 @@ pub struct EditorState {
     pub timeline: TimelineView,
     pub plugins: PluginRegistry,
     pub media: MediaCache,
+    /// リアルタイムオーディオ出力エンジン（winmm による低遅延再生）
+    pub audio: AudioEngine,
     /// ソースパネルに登録されたメディア素材一覧
     pub sources: Vec<SourceMediaItem>,
     /// ソースパネルで現在プレビュー選択中の素材インデックス
     pub selected_source: Option<usize>,
-    /// デコード済み RGBA フレームの GPU テクスチャキャッシュ (キー -> (ハンドル, 解像度, 最終アクセスTick))
-    textures: HashMap<(PathBuf, u32), (TextureHandle, [usize; 2], u64)>,
-    texture_counter: u64,
+    /// 静止画および動画サムネイル (frame 0) 用の永続 GPU テクスチャキャッシュ
+    static_textures: HashMap<PathBuf, (TextureHandle, [usize; 2])>,
+    /// 動画再生フレーム用の In-Place 更新 GPU テクスチャキャッシュ (Path -> (Handle, 現在フレーム番号, 解像度))
+    stream_textures: HashMap<PathBuf, (TextureHandle, u32, [usize; 2])>,
     /// ファイルパス解決のキャッシュ（毎フレームの OS ディスク IO / exists 呼び出しを削減）
     resolved_paths: HashMap<String, Option<PathBuf>>,
     pub dirty: bool,
@@ -155,10 +162,11 @@ impl Default for EditorState {
             timeline: TimelineView::default(),
             plugins: PluginRegistry::new(default_plugin_dir()),
             media: MediaCache::new(),
+            audio: AudioEngine::new(),
             sources: initial_sources(),
             selected_source: None,
-            textures: HashMap::new(),
-            texture_counter: 0,
+            static_textures: HashMap::new(),
+            stream_textures: HashMap::new(),
             resolved_paths: HashMap::new(),
             dirty: false,
         }
@@ -178,6 +186,8 @@ impl EditorState {
         self.frame = frame;
         if self.playing {
             self.play_origin = Some((Instant::now(), self.frame));
+        } else {
+            self.audio.stop();
         }
     }
 
@@ -189,18 +199,138 @@ impl EditorState {
     pub fn toggle_play(&mut self) {
         self.playing = !self.playing;
         self.play_origin = self.playing.then(|| (Instant::now(), self.frame));
+        if !self.playing {
+            self.audio.stop();
+        }
     }
 
-    /// 再生中なら経過時間からフレームを進めます（末尾でループ）。
+    /// 再生中なら経過時間からフレームを進め、音声を完全同期再生します（末尾でループ）。
     pub fn tick(&mut self) {
-        let Some((origin, start)) = self.play_origin.filter(|_| self.playing) else { return };
-        let fps = self.scene.settings.frame_rate;
-        let mut f = start + fps.seconds_to_frame(origin.elapsed().as_secs_f64());
-        if f > self.last_frame() {
-            f = 0;
-            self.play_origin = Some((Instant::now(), 0));
+        if self.playing {
+            if let Some((origin, start)) = self.play_origin {
+                let fps = self.scene.settings.frame_rate;
+                let mut f = start + fps.seconds_to_frame(origin.elapsed().as_secs_f64());
+                if f > self.last_frame() {
+                    f = 0;
+                    self.play_origin = Some((Instant::now(), 0));
+                }
+                self.frame = f;
+            }
+            self.sync_audio_playback();
+        } else {
+            self.audio.stop();
         }
-        self.frame = f;
+    }
+
+    /// パス解決をメモリキャッシュ経由で行い、毎フレームの OS ファイルシステム I/O を排除します。
+    pub fn resolve_cached_path(&mut self, path_str: &str) -> Option<PathBuf> {
+        let trimmed = path_str.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if let Some(cached) = self.resolved_paths.get(trimmed) {
+            return cached.clone();
+        }
+        let mut p = PathBuf::from(trimmed);
+        if !p.exists() {
+            if let Some(resolved) = resolve_app_path(trimmed) {
+                p = resolved;
+            } else if trimmed.ends_with("sample.mp4") {
+                if let Some(sample_vid) = resolve_app_path("samples/sample_video.mp4") {
+                    p = sample_vid;
+                } else {
+                    self.resolved_paths.insert(trimmed.to_string(), None);
+                    return None;
+                }
+            } else {
+                self.resolved_paths.insert(trimmed.to_string(), None);
+                return None;
+            }
+        }
+        self.resolved_paths.insert(trimmed.to_string(), Some(p.clone()));
+        Some(p)
+    }
+
+    /// 現在のタイムライン上の音声トラックをオーディオエンジンに同期供給します。
+    pub fn sync_audio_playback(&mut self) {
+        let fps = self.scene.settings.frame_rate.as_f64();
+        let cur_frame = self.frame;
+
+        // 1. 再生対象の候補を収集
+        struct Candidate {
+            is_audio_obj: bool,
+            file_str: String,
+            frame_start: Frame,
+            frame_end: Frame,
+            start_pos: f64,
+            volume: f32,
+        }
+        let mut candidates = Vec::new();
+
+        for layer in &self.scene.layers {
+            if !layer.visible {
+                continue;
+            }
+            for obj in &layer.objects {
+                let Some(src) = obj.source().filter(|s| s.enabled) else {
+                    continue;
+                };
+                if !matches!(src.kind, EffectKind::AudioFile | EffectKind::VideoFile) {
+                    continue;
+                }
+                let Some(file_str) = src.text("file").filter(|s| !s.trim().is_empty()) else {
+                    continue;
+                };
+                let rel = (cur_frame as i64 - obj.frame_start as i64).max(0) as u32;
+                let start_pos = if src.kind == EffectKind::AudioFile {
+                    src.eval("再生位置", rel, 0.0).max(0.0)
+                } else {
+                    ((src.eval("再生位置", rel, 1.0) - 1.0) / fps.max(1.0)).max(0.0)
+                };
+                let volume = (obj
+                    .effect(&EffectKind::StandardPlayback)
+                    .map(|e| e.eval("音量", rel, 100.0))
+                    .unwrap_or(100.0)
+                    / 100.0) as f32;
+
+                candidates.push(Candidate {
+                    is_audio_obj: src.kind == EffectKind::AudioFile,
+                    file_str: file_str.to_string(),
+                    frame_start: obj.frame_start,
+                    frame_end: obj.frame_end,
+                    start_pos,
+                    volume,
+                });
+            }
+        }
+
+        let mut active_tracks = Vec::new();
+        let mut registered_keys: std::collections::HashSet<(PathBuf, Frame)> = std::collections::HashSet::new();
+
+        // AudioFile オブジェクトを優先登録し、ペアの VideoFile との2重再生を防止
+        candidates.sort_by_key(|c| !c.is_audio_obj);
+
+        for c in candidates {
+            let Some(path) = self.resolve_cached_path(&c.file_str) else {
+                continue;
+            };
+            if !registered_keys.insert((path.clone(), c.frame_start)) {
+                continue;
+            }
+            let Some(pcm) = self.media.get_audio_pcm(&path) else {
+                continue;
+            };
+            active_tracks.push(AudioTrackItem {
+                audio: pcm,
+                start_frame: c.frame_start,
+                end_frame: c.frame_end,
+                offset_sec: c.start_pos,
+                volume: c.volume,
+            });
+        }
+
+        self.audio.set_active_tracks(active_tracks);
+        self.audio.sync_playback(self.playing, self.frame, fps);
     }
 
     pub fn new_scene(&mut self) {
@@ -256,7 +386,7 @@ impl EditorState {
         }
     }
 
-    /// 画像または動画の指定フレームを GPU テクスチャとして取得します。
+    /// 画像または動画の指定フレームを GPU テクスチャとしてノンブロッキングで取得します。
     pub fn get_media_texture(
         &mut self,
         ctx: &egui::Context,
@@ -264,71 +394,57 @@ impl EditorState {
         frame_index: u32,
         time_sec: f64,
     ) -> Option<(egui::TextureId, [usize; 2])> {
-        let trimmed = path_str.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-
-        // パス解決をキャッシュ（毎フレームの OS ディスク IO / exists 呼び出しを削減）
-        let path = if let Some(cached) = self.resolved_paths.get(trimmed) {
-            match cached {
-                Some(p) => p.clone(),
-                None => return None,
-            }
-        } else {
-            let mut p = PathBuf::from(trimmed);
-            if !p.exists() {
-                if let Some(resolved) = resolve_app_path(trimmed) {
-                    p = resolved;
-                } else if trimmed.ends_with("sample.mp4") {
-                    if let Some(sample_vid) = resolve_app_path("samples/sample_video.mp4") {
-                        p = sample_vid;
-                    } else {
-                        self.resolved_paths.insert(trimmed.to_string(), None);
-                        return None;
-                    }
-                } else {
-                    self.resolved_paths.insert(trimmed.to_string(), None);
-                    return None;
-                }
-            }
-            self.resolved_paths.insert(trimmed.to_string(), Some(p.clone()));
-            p
-        };
+        let path = self.resolve_cached_path(path_str)?;
 
         // 静止画の場合は frame_index = 0 で共通化
         let key_frame = match MediaKind::from_path(&path) {
             Some(MediaKind::Image) => 0,
             _ => frame_index,
         };
-        let key = (path.clone(), key_frame);
-        self.texture_counter = self.texture_counter.wrapping_add(1);
-        let cur_tick = self.texture_counter;
 
-        if let Some(entry) = self.textures.get_mut(&key) {
-            entry.2 = cur_tick;
-            return Some((entry.0.id(), entry.1));
+        // 1. 静止画または動画の先頭サムネイル (frame 0) は static_textures に永続キャッシュ
+        if key_frame == 0 {
+            if let Some((handle, size)) = self.static_textures.get(&path) {
+                return Some((handle.id(), *size));
+            }
+            let rgba = self.media.get_frame_arc(&path, 0, 0.0)?;
+            let size = [rgba.width as usize, rgba.height as usize];
+            let color_img = ColorImage::from_rgba_unmultiplied(size, &rgba.pixels);
+            let handle = ctx.load_texture(
+                format!("media_static:{}", path.display()),
+                color_img,
+                TextureOptions::LINEAR,
+            );
+            let id = handle.id();
+            self.static_textures.insert(path, (handle, size));
+            return Some((id, size));
         }
 
-        let rgba = self.media.get_frame(&path, key_frame, time_sec)?;
+        // 2. 動画再生フレーム (frame > 0) はファイルごとに 1 つの TextureHandle を In-Place 更新して再利用
+        if let Some((handle, last_frame, size)) = self.stream_textures.get(&path) {
+            if *last_frame == key_frame {
+                return Some((handle.id(), *size));
+            }
+        }
+
+        let rgba = self.media.get_frame_arc(&path, key_frame, time_sec)?;
         let size = [rgba.width as usize, rgba.height as usize];
         let color_img = ColorImage::from_rgba_unmultiplied(size, &rgba.pixels);
 
-        // キャッシュ上限 (256) に達した場合は全消去ではなく、アクセスの古い半分のみを破棄
-        if self.textures.len() >= 256 {
-            let mut ticks: Vec<u64> = self.textures.values().map(|v| v.2).collect();
-            ticks.sort_unstable();
-            let threshold = ticks.get(ticks.len() / 2).copied().unwrap_or(0);
-            self.textures.retain(|_, v| v.2 >= threshold);
+        if let Some((handle, last_frame, prev_size)) = self.stream_textures.get_mut(&path) {
+            handle.set(color_img, TextureOptions::LINEAR);
+            *last_frame = key_frame;
+            *prev_size = size;
+            return Some((handle.id(), size));
         }
 
         let handle = ctx.load_texture(
-            format!("media:{}:{key_frame}", path.display()),
+            format!("media_stream:{}", path.display()),
             color_img,
             TextureOptions::LINEAR,
         );
         let id = handle.id();
-        self.textures.insert(key, (handle, size, cur_tick));
+        self.stream_textures.insert(path, (handle, key_frame, size));
         Some((id, size))
     }
 
@@ -347,22 +463,43 @@ impl EditorState {
     /// メディアファイル（画像・動画・音声）をソースパネルに登録しつつ指定レイヤー・指定フレームに追加します。
     pub fn add_media_file(&mut self, path: &Path, preferred_layer: usize, start_frame: Frame) {
         let _ = self.register_source(path);
-        let default_len = 150;
-        let end_frame = start_frame + default_len - 1;
+        let fps = self.scene.settings.frame_rate.as_f64();
+        // メディアファイル（動画・音声・画像）の本来の長さ（フレーム数）を取得（5秒制限を解消）
+        let media_len = self.media.get_duration_frames(path, fps).max(1);
+        let end_frame = start_frame + media_len - 1;
         if end_frame + 1 > self.scene.settings.length {
-            self.scene.settings.length = end_frame + 1;
+            self.scene.settings.length = end_frame + 30;
         }
         let path_str = path.to_string_lossy().into_owned();
         let obj = match MediaKind::from_path(path) {
-            Some(MediaKind::Image) => TimelineObject::new_image(start_frame, end_frame, path_str),
-            Some(MediaKind::Video) => TimelineObject::new_video(start_frame, end_frame, path_str),
-            Some(MediaKind::Audio) => TimelineObject::new_audio(start_frame, end_frame, path_str),
+            Some(MediaKind::Image) => TimelineObject::new_image(start_frame, end_frame, path_str.clone()),
+            Some(MediaKind::Video) => TimelineObject::new_video(start_frame, end_frame, path_str.clone()),
+            Some(MediaKind::Audio) => TimelineObject::new_audio(start_frame, end_frame, path_str.clone()),
             None => {
                 self.status = format!("未対応のメディアファイル形式です: {}", path.display());
                 return;
             }
         };
         self.add_object_at(preferred_layer, obj);
+
+        // 動画ファイルで音声ストリームが含まれている場合、AviUtl と同様にペアとなる音声オブジェクトを自動追加
+        if matches!(MediaKind::from_path(path), Some(MediaKind::Video)) {
+            let meta = self.media.get_metadata(path);
+            let _ = self.media.get_frame_arc(path, 0, 0.0);
+            if meta.has_audio {
+                let _ = self.media.get_audio_pcm(path);
+                let mut audio_obj = TimelineObject::new_audio(start_frame, end_frame, path_str);
+                if let Some(src) = audio_obj.source_mut() {
+                    if let Some(trk) = src.track_mut("動画ファイルと連携") {
+                        *trk = Track::constant(1.0, 0);
+                    }
+                }
+                let audio_layer = preferred_layer + 1;
+                let _ = self.scene.insert_object_at_free_layer(audio_layer, audio_obj);
+            }
+        } else if matches!(MediaKind::from_path(path), Some(MediaKind::Audio)) {
+            let _ = self.media.get_audio_pcm(path);
+        }
     }
 
     /// メディアファイルを複数選択してタイムライン＆ソースパネルに追加するダイアログ。

@@ -286,8 +286,16 @@ impl TimelineObject {
         self.effects.first()
     }
 
+    pub fn source_mut(&mut self) -> Option<&mut Effect> {
+        self.effects.first_mut()
+    }
+
     pub fn effect(&self, kind: &EffectKind) -> Option<&Effect> {
         self.effects.iter().find(|e| &e.kind == kind)
+    }
+
+    pub fn effect_mut(&mut self, kind: &EffectKind) -> Option<&mut Effect> {
+        self.effects.iter_mut().find(|e| &e.kind == kind)
     }
 
     pub fn category(&self) -> ObjectCategory {
