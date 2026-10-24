@@ -359,6 +359,7 @@ impl<'a> PeView<'a> {
                 dialogs: Vec::new(),
                 has_dialog: false,
                 script_body: String::new(),
+                compiled_ast: Vec::new(),
             },
             info,
         ))
@@ -449,6 +450,7 @@ impl<'a> PeView<'a> {
                 dialogs: Vec::new(),
                 has_dialog: false,
                 script_body: String::new(),
+                compiled_ast: Vec::new(),
             },
             info,
         ))
@@ -639,6 +641,7 @@ pub fn inspect_native_pe_plugin(stem: &str, kind: PluginKind, bytes: &[u8]) -> N
             dialogs: Vec::new(),
             has_dialog: false,
             script_body: String::new(),
+            compiled_ast: Vec::new(),
         });
     }
 

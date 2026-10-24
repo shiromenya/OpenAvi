@@ -292,8 +292,14 @@ fn draw_object(ctx: &DrawCtx, layer_idx: usize, obj: &TimelineObject, rel: Frame
             continue;
         }
 
-        // 1) プラグインレジストリ内の Lua スクリプト (.anm/.obj/.cam/.scn) を実行
-        let ran_lua = ctx.plugins.execute_effect(eff, rel, &mut lua_st);
+        // 1) プラグインレジストリ内の Lua スクリプト (.anm/.obj/.cam/.scn) または外部プラグインを実行
+        // （内蔵標準フィルタの場合は無駄なスクリプト探索をスキップして高速化）
+        let is_builtin_filter = matches!(eff.name.as_str(), "フェード" | "振動" | "縁取り" | "シャドー" | "ドロップシャドウ" | "単色化") && eff.text("name").is_none();
+        let ran_lua = if is_builtin_filter {
+            false
+        } else {
+            ctx.plugins.execute_effect(eff, rel, &mut lua_st)
+        };
 
         // 2) 内蔵フィルタおよび .auf (32bit / 64bit) フィルタプラグインの視覚効果評価
         if eff.name == "フェード" {

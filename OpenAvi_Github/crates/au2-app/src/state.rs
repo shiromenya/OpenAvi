@@ -92,8 +92,11 @@ pub struct EditorState {
     pub sources: Vec<SourceMediaItem>,
     /// ソースパネルで現在プレビュー選択中の素材インデックス
     pub selected_source: Option<usize>,
-    /// デコード済み RGBA フレームの GPU テクスチャキャッシュ
-    textures: HashMap<(PathBuf, u32), (TextureHandle, [usize; 2])>,
+    /// デコード済み RGBA フレームの GPU テクスチャキャッシュ (キー -> (ハンドル, 解像度, 最終アクセスTick))
+    textures: HashMap<(PathBuf, u32), (TextureHandle, [usize; 2], u64)>,
+    texture_counter: u64,
+    /// ファイルパス解決のキャッシュ（毎フレームの OS ディスク IO / exists 呼び出しを削減）
+    resolved_paths: HashMap<String, Option<PathBuf>>,
     pub dirty: bool,
 }
 
@@ -155,6 +158,8 @@ impl Default for EditorState {
             sources: initial_sources(),
             selected_source: None,
             textures: HashMap::new(),
+            texture_counter: 0,
+            resolved_paths: HashMap::new(),
             dirty: false,
         }
     }
@@ -259,40 +264,71 @@ impl EditorState {
         frame_index: u32,
         time_sec: f64,
     ) -> Option<(egui::TextureId, [usize; 2])> {
-        let mut path = PathBuf::from(path_str);
-        if !path.exists() {
-            if let Some(resolved) = resolve_app_path(path_str) {
-                path = resolved;
-            } else if path_str.ends_with("sample.mp4") {
-                if let Some(sample_vid) = resolve_app_path("samples/sample_video.mp4") {
-                    path = sample_vid;
+        let trimmed = path_str.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        // パス解決をキャッシュ（毎フレームの OS ディスク IO / exists 呼び出しを削減）
+        let path = if let Some(cached) = self.resolved_paths.get(trimmed) {
+            match cached {
+                Some(p) => p.clone(),
+                None => return None,
+            }
+        } else {
+            let mut p = PathBuf::from(trimmed);
+            if !p.exists() {
+                if let Some(resolved) = resolve_app_path(trimmed) {
+                    p = resolved;
+                } else if trimmed.ends_with("sample.mp4") {
+                    if let Some(sample_vid) = resolve_app_path("samples/sample_video.mp4") {
+                        p = sample_vid;
+                    } else {
+                        self.resolved_paths.insert(trimmed.to_string(), None);
+                        return None;
+                    }
+                } else {
+                    self.resolved_paths.insert(trimmed.to_string(), None);
+                    return None;
                 }
             }
-        }
+            self.resolved_paths.insert(trimmed.to_string(), Some(p.clone()));
+            p
+        };
+
         // 静止画の場合は frame_index = 0 で共通化
         let key_frame = match MediaKind::from_path(&path) {
             Some(MediaKind::Image) => 0,
             _ => frame_index,
         };
         let key = (path.clone(), key_frame);
-        if let Some((tex, size)) = self.textures.get(&key) {
-            return Some((tex.id(), *size));
+        self.texture_counter = self.texture_counter.wrapping_add(1);
+        let cur_tick = self.texture_counter;
+
+        if let Some(entry) = self.textures.get_mut(&key) {
+            entry.2 = cur_tick;
+            return Some((entry.0.id(), entry.1));
         }
 
         let rgba = self.media.get_frame(&path, key_frame, time_sec)?;
         let size = [rgba.width as usize, rgba.height as usize];
         let color_img = ColorImage::from_rgba_unmultiplied(size, &rgba.pixels);
 
-        if self.textures.len() >= 120 {
-            self.textures.clear();
+        // キャッシュ上限 (256) に達した場合は全消去ではなく、アクセスの古い半分のみを破棄
+        if self.textures.len() >= 256 {
+            let mut ticks: Vec<u64> = self.textures.values().map(|v| v.2).collect();
+            ticks.sort_unstable();
+            let threshold = ticks.get(ticks.len() / 2).copied().unwrap_or(0);
+            self.textures.retain(|_, v| v.2 >= threshold);
         }
+
         let handle = ctx.load_texture(
             format!("media:{}:{key_frame}", path.display()),
             color_img,
             TextureOptions::LINEAR,
         );
         let id = handle.id();
-        self.textures.insert(key, (handle, size));
+        self.textures.insert(key, (handle, size, cur_tick));
         Some((id, size))
     }
 

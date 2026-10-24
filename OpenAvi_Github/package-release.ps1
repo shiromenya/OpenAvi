@@ -3,6 +3,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 Set-Location $PSScriptRoot
 
 $env:PATH = "$env:USERPROFILE\.cargo\bin;C:\Users\user\AppData\Local\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin;$env:PATH"
@@ -90,30 +91,42 @@ Copy-Item "Launch-OpenAvi.bat" (Join-Path $stage "Launch-OpenAvi.bat") -Force
 Copy-Item "README.md" (Join-Path $stage "README.md") -Force
 Copy-Item "LICENSE" (Join-Path $stage "LICENSE") -Force
 
+Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zipPath = Join-Path $PSScriptRoot "dist\OpenAvi-windows-x64.zip"
 if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
-Compress-Archive -Path "$stage\*" -DestinationPath $zipPath -Force
+[System.IO.Compression.ZipFile]::CreateFromDirectory($stage, $zipPath)
 Write-Host "Created portable release archive: $zipPath"
 
 # 4. Install to %LOCALAPPDATA%\Programs\OpenAvi and create Desktop + Start Menu shortcuts
 $installDir = Join-Path $env:LOCALAPPDATA "Programs\OpenAvi"
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
-Copy-Item "$stage\*" $installDir -Recurse -Force
+& robocopy $stage $installDir /MIR /R:1 /W:1 | Out-Null
+
+$desktopDir = Join-Path $env:USERPROFILE "Desktop"
+if (-not (Test-Path $desktopDir)) {
+    $desktopDir = [Environment]::GetFolderPath("Desktop")
+}
+$startPrograms = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs"
 
 $ws = New-Object -ComObject WScript.Shell
-foreach ($folder in @([Environment]::GetFolderPath("Desktop"), [Environment]::GetFolderPath("Programs"))) {
-    $lnkPath = Join-Path $folder "OpenAvi.lnk"
-    $lnk = $ws.CreateShortcut($lnkPath)
-    $lnk.TargetPath = Join-Path $installDir "openavi.exe"
-    $lnk.WorkingDirectory = $installDir
-    $lnk.Description = "OpenAvi - AviUtl2 (.aup2 / .exo) 互換 64bit オープンソース動画編集ソフト"
-    $lnk.IconLocation = Join-Path $installDir "assets\openavi.ico"
-    $lnk.Save()
-    Write-Host "Created shortcut: $lnkPath"
+foreach ($folder in @($desktopDir, $startPrograms)) {
+    if ($folder -and (Test-Path $folder)) {
+        try {
+            $lnkPath = Join-Path $folder "OpenAvi.lnk"
+            $lnk = $ws.CreateShortcut($lnkPath)
+            $lnk.TargetPath = Join-Path $installDir "openavi.exe"
+            $lnk.WorkingDirectory = $installDir
+            $lnk.Description = "OpenAvi - AviUtl2 (.aup2 / .exo) 互換 64bit オープンソース動画編集ソフト"
+            $lnk.IconLocation = Join-Path $installDir "assets\openavi.ico"
+            $lnk.Save()
+            Write-Host "Created shortcut: $lnkPath"
+        } catch {
+            Write-Warning ("Failed to create shortcut in " + $folder)
+        }
+    }
 }
 
 # 5. Sync Desktop ZIP and OpenAvi_Github folder
-$desktopDir = [Environment]::GetFolderPath("Desktop")
 Copy-Item -Force $zipPath (Join-Path $desktopDir "OpenAvi-windows-x64.zip")
 $githubDir = Join-Path $desktopDir "OpenAvi_Github"
 if (Test-Path $githubDir) {

@@ -2042,17 +2042,28 @@ fn vals_equal(a: &LuaVal, b: &LuaVal) -> bool {
     }
 }
 
-/// Lua スクリプトのソースコードを `LuaObjState` に対して実行します。
-pub fn execute_lua_script(source: &str, state: &mut LuaObjState) {
+/// Lua スクリプトを事前コンパイル（Tokenize + Parse）して構文木 (AST) を返します。
+pub fn compile_lua_script(source: &str) -> Vec<Stmt> {
     let tokens = tokenize(source);
     let mut parser = Parser::new(tokens);
-    let stmts = parser.parse_block();
+    parser.parse_block()
+}
+
+/// コンパイル済み構文木 (AST) を `LuaObjState` に対して直接実行します。
+/// 毎フレームの字句解析・パース・ヒープ確保を完全にスキップするため極めて高速です。
+pub fn execute_compiled_script(stmts: &[Stmt], state: &mut LuaObjState) {
     let mut vm = Vm::new(state);
-    if let Flow::Return(vals) = vm.exec_block(&stmts) {
+    if let Flow::Return(vals) = vm.exec_block(stmts) {
         if let Some(first) = vals.first() {
             state.return_value = Some(first.as_num());
         }
     }
+}
+
+/// Lua スクリプトのソースコードを `LuaObjState` に対して実行します。
+pub fn execute_lua_script(source: &str, state: &mut LuaObjState) {
+    let stmts = compile_lua_script(source);
+    execute_compiled_script(&stmts, state);
 }
 
 #[cfg(test)]

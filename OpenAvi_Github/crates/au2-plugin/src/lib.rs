@@ -181,6 +181,8 @@ pub struct ScriptEntry {
     pub has_dialog: bool,
     /// 実行対象の Lua スクリプト本体コード
     pub script_body: String,
+    /// 事前コンパイル済みの AST（毎フレームの Tokenize / Parse を回避し超高速に実行）
+    pub compiled_ast: Vec<lua_vm::Stmt>,
 }
 
 impl ScriptEntry {
@@ -291,6 +293,7 @@ fn new_empty_entry(display_name: String, section_name: String) -> ScriptEntry {
         dialogs: Vec::new(),
         has_dialog: false,
         script_body: String::new(),
+        compiled_ast: Vec::new(),
     }
 }
 
@@ -362,6 +365,14 @@ pub fn parse_script_entries(stem: &str, text: &str) -> Vec<ScriptEntry> {
     if entries.is_empty() {
         entries.push(new_empty_entry(stem.to_string(), stem.to_string()));
     }
+
+    // 読み込み時に一度だけ構文木 (AST) を事前コンパイルし、毎フレームのパース負荷をゼロにする
+    for entry in &mut entries {
+        if !entry.script_body.trim().is_empty() {
+            entry.compiled_ast = lua_vm::compile_lua_script(&entry.script_body);
+        }
+    }
+
     entries
 }
 
@@ -490,6 +501,8 @@ pub fn inspect_plugin_file(path: &Path) -> Option<PluginDescriptor> {
 pub struct PluginRegistry {
     pub plugin_dir: PathBuf,
     pub plugins: Vec<PluginDescriptor>,
+    /// 高速 O(1) 検索用インデックス (名前 -> (プラグインIndex, エントリIndex))
+    pub index_map: std::collections::HashMap<String, (usize, usize)>,
 }
 
 impl PluginRegistry {
@@ -497,6 +510,7 @@ impl PluginRegistry {
         let mut reg = Self {
             plugin_dir: plugin_dir.into(),
             plugins: Vec::new(),
+            index_map: std::collections::HashMap::new(),
         };
         reg.ensure_sample_plugins();
         reg.reload();
@@ -535,6 +549,7 @@ impl PluginRegistry {
     /// ディレクトリを再スキャンします（サブフォルダ 1 階層も検索）。
     pub fn reload(&mut self) {
         self.plugins.clear();
+        self.index_map.clear();
         let Ok(read_dir) = fs::read_dir(&self.plugin_dir) else {
             return;
         };
@@ -559,6 +574,16 @@ impl PluginRegistry {
                 self.plugins.push(desc);
             }
         }
+
+        // 高速検索インデックスを構築
+        for (p_idx, p) in self.plugins.iter().enumerate() {
+            for (e_idx, e) in p.entries.iter().enumerate() {
+                self.index_map.entry(e.display_name.clone()).or_insert((p_idx, e_idx));
+                self.index_map.entry(e.section_name.clone()).or_insert((p_idx, e_idx));
+                let sec_only = e.section_name.split('@').next().unwrap_or(&e.section_name);
+                self.index_map.entry(sec_only.to_string()).or_insert((p_idx, e_idx));
+            }
+        }
     }
 
     /// 外部のプラグイン／スクリプトファイルを `plugin_dir` にコピーしてインストールします。
@@ -575,9 +600,15 @@ impl PluginRegistry {
         Ok(file_name.to_string_lossy().into_owned())
     }
 
-    /// 表示名またはセクション名から該当する [`ScriptEntry`] を検索します。
+    /// 表示名またはセクション名から該当する [`ScriptEntry`] を高速 O(1) 検索します。
     pub fn find_entry(&self, name: &str) -> Option<(PluginKind, &ScriptEntry)> {
+        if let Some(&(p_idx, e_idx)) = self.index_map.get(name) {
+            return Some((self.plugins[p_idx].kind, &self.plugins[p_idx].entries[e_idx]));
+        }
         let sec_only = name.split('@').next().unwrap_or(name);
+        if let Some(&(p_idx, e_idx)) = self.index_map.get(sec_only) {
+            return Some((self.plugins[p_idx].kind, &self.plugins[p_idx].entries[e_idx]));
+        }
         for p in &self.plugins {
             for e in &p.entries {
                 if e.display_name == name || e.section_name == name || e.section_name == sec_only {
@@ -589,7 +620,7 @@ impl PluginRegistry {
     }
 
     /// エフェクト（アニメーション効果・カスタムオブジェクト・カメラ効果・シーンチェンジ）に対応する
-    /// Lua スクリプトを検索し、`LuaObjState` に対して実行します。
+    /// Lua スクリプトを検索し、事前コンパイルされた AST を用いて高速実行します。
     pub fn execute_effect(&self, eff: &Effect, rel: Frame, state: &mut LuaObjState) -> bool {
         let script_name = eff
             .text("name")
@@ -647,7 +678,11 @@ impl PluginRegistry {
             }
         }
 
-        execute_lua_script(&entry.script_body, state);
+        if !entry.compiled_ast.is_empty() {
+            lua_vm::execute_compiled_script(&entry.compiled_ast, state);
+        } else {
+            execute_lua_script(&entry.script_body, state);
+        }
         true
     }
 }
