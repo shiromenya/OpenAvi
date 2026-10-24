@@ -530,18 +530,6 @@ impl PluginRegistry {
         if !cam_path.exists() {
             let _ = fs::write(&cam_path, DEFAULT_CAM_SCRIPT);
         }
-
-        // 5. 初代 AviUtl 32-bit フィルタプラグイン (.auf)
-        let auf32_path = self.plugin_dir.join("sample_glow32.auf");
-        if !auf32_path.exists() {
-            let _ = fs::write(&auf32_path, build_sample_32bit_auf_bytes());
-        }
-
-        // 6. AviUtl2 64-bit フィルタプラグイン (.auf)
-        let auf64_path = self.plugin_dir.join("sample_chroma64.auf");
-        if !auf64_path.exists() {
-            let _ = fs::write(&auf64_path, build_sample_64bit_auf_bytes());
-        }
     }
 
     /// ディレクトリを再スキャンします（サブフォルダ 1 階層も検索）。
@@ -832,11 +820,74 @@ if flag then obj.oy = obj.oy + amp end
     fn seed_workspace_plugins_and_execute() {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../plugins");
         let reg = PluginRegistry::new(&dir);
-        assert!(reg.plugins.len() >= 6);
+        assert!(reg.plugins.len() >= 4);
         let (kind, entry) = reg.find_entry("円形複製リング@openavi_effects").expect("ring entry");
         let eff = entry.to_effect(kind);
         let mut st = LuaObjState::default();
         assert!(reg.execute_effect(&eff, 15, &mut st));
         assert_eq!(st.draw_calls.len(), 8);
+    }
+
+    #[test]
+    fn test_legacy_aviutl_compatibility() {
+        // 1. 初代 32-bit .auf (FILTER_DLL) の検証
+        let auf32 = build_sample_32bit_auf_bytes();
+        let info = inspect_native_pe_plugin("legacy_filter", PluginKind::FilterDll, &auf32);
+        assert_eq!(info.arch, BinaryArch::X86_32);
+        assert!(!info.entries.is_empty());
+        let entry = &info.entries[0];
+        assert_eq!(entry.display_name, "拡散グロー(32bit)");
+        assert_eq!(entry.tracks.len(), 3);
+        assert_eq!(entry.checks.len(), 1);
+
+        // 2. 初代拡張編集 Lua スクリプト (.anm, .obj, .scn, .cam, .tra) の検証
+        // 初代特有のダイアログマクロ (--dialog:色/col,local col=0xff0000;)、obj.ox, obj.draw
+        let legacy_anm = "\
+@初代アニメ効果
+--track0:移動量,0,1000,100,1
+--check0:反転,0
+--dialog:色/col,local col=0x00ff00;
+if (obj.check0) then
+    obj.ox = obj.ox - obj.track0
+else
+    obj.ox = obj.ox + obj.track0
+end
+";
+        let entries = parse_script_entries("test_legacy", legacy_anm);
+        assert_eq!(entries.len(), 1);
+        let mut st = LuaObjState {
+            tracks: [150.0, 0.0, 0.0, 0.0],
+            check0: false,
+            ..Default::default()
+        };
+        let eff = entries[0].to_effect(PluginKind::AnmScript);
+        let mut reg = PluginRegistry::default();
+        reg.plugins.push(PluginDescriptor {
+            file_name: "test_legacy.anm".into(),
+            path: PathBuf::from("test_legacy.anm"),
+            kind: PluginKind::AnmScript,
+            arch: BinaryArch::Script,
+            status: SupportStatus::Supported,
+            description: "Legacy Script".into(),
+            exports: Vec::new(),
+            entries: entries.clone(),
+        });
+        assert!(reg.execute_effect(&eff, 0, &mut st));
+        assert_eq!(st.ox, 100.0); // 初期値100が反映されて加算される
+
+        // 3. 初代カスタムオブジェクト (.obj) の検証
+        let legacy_obj = "\
+@サンプル図形
+--track0:サイズ,10,500,80,1
+obj.load('figure', '四角形', 0xffffff, obj.track0)
+obj.draw(50, 50, 0)
+";
+        let obj_entries = parse_script_entries("test_obj", legacy_obj);
+        assert_eq!(obj_entries.len(), 1);
+        let mut obj_st = LuaObjState::default();
+        execute_lua_script(&obj_entries[0].script_body, &mut obj_st);
+        assert_eq!(obj_st.draw_calls.len(), 1);
+        assert_eq!(obj_st.draw_calls[0].ox, 50.0);
+        assert_eq!(obj_st.draw_calls[0].oy, 50.0);
     }
 }

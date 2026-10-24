@@ -1,33 +1,35 @@
 # OpenAvi
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![CI](https://github.com/openavi/openavi/actions/workflows/ci.yml/badge.svg)](https://github.com/openavi/openavi/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/Rust-2021_Edition-orange.svg)](https://www.rust-lang.org/)
 
-**OpenAvi** は、既存の「AviUtl（および拡張編集プラグイン）」が持つ軽快な操作性と豊富なユーザーメイド・エコシステムを引き継ぎつつ、現代のハードウェア環境に最適化した **64bit ネイティブ・オープンソース動画編集ソフトウェア** です。
+**OpenAvi** は、既存の「AviUtl」および「AviUtl2（拡張編集）」が持つ軽快な操作感と豊富なユーザーメイド・エコシステムを引き継ぎつつ、現代のハードウェア環境に最適化した **64bit ネイティブ・オープンソース動画編集ソフトウェア** です。
 
 ---
 
 ## 主な特徴
 
-- **完全 64bit 化 & マルチスレッド設計**: 従来の 4GB メモリ制限を撤廃し、Rust によるメモリ安全性とマルチコア CPU 性能を活かしたコア設計。
-- **GPU アクセラレーション (`wgpu`)**: DirectX 12 / Vulkan / Metal バックエンド上で動作する低遅延な UI・プレビュー基盤。
-- **画像・動画・音声ファイルの読み込み & プレビュー描画 (`au2-media`)**:
-  - **画像ファイル**: `.png`, `.jpg`, `.jpeg`, `.bmp`, `.webp`, `.gif`（アニメーション GIF 含む）のネイティブデコード＆ GPU テクスチャ描画。
-  - **動画ファイル**: `.mp4`, `.avi`, `.mov`, `.mkv`, `.webm`, `.wmv` 等のフレームデコード＆キャッシュ描画（再生位置・再生速度・X/Y 座標・拡大率・回転・透明度・フェード反映）。
-  - ウィンドウへのドラッグ＆ドロップ、またはタイムラインの右クリックメニューから直接配置可能。
-- **`.aup` (AviUtl プロジェクトファイル) & `.exo` (拡張編集オブジェクトファイル) 対応**:
-  - `.aup` バイナリプロジェクトの読み込み・保存（`AviUtl ProjectFile version 0.18` ヘッダ検証、OpenAvi 拡張編集チャンク保存、レガシー `.aup` からのメディア参照抽出）。
-  - `.exo` の Shift_JIS (CP932) / UTF-8 自動判別、`text=` (UTF-16LE 16進ダンプ) 変換、`chain=1` 中間点オブジェクトの統合・再出力（ラウンドトリップ保証）。
-- **AviUtl 流のタイムライン操作 & 右クリックメニュー**:
-  - **レイヤー右クリックメニュー**:
-    - メディアオブジェクトの追加（動画・画像・音声・テキスト・図形・フレームバッファ・グループ制御・カメラ制御）
-    - フィルタオブジェクトの追加（色調補正）
-    - オブジェクト操作（**中間点を追加**、**ここで分割**、**削除**）
-    - レイヤー表示 / 非表示・ロック切替
-  - モダンな **シングルウィンドウ（ドッキング）モード** と、AviUtl 伝統の **マルチウィンドウ（分離）モード** をメニューから即座に切り替え可能。
-- **プラグイン・スクリプト管理機能 (`au2-plugin`)**:
-  - `plugins/` フォルダ内の `.anm`, `.obj`, `.cam`, `.scn`, `.tra` スクリプトおよび `.auf`, `.aui`, `.auo`, `.auc` プラグインを自動スキャン。
+- **完全 64bit 化 & マルチコア最適化**:
+  - 初代 32bit AviUtl の 4GB メモリ制限を撤廃。Rust によるメモリ安全性とマルチスレッド設計により、高解像度編集でも安定して動作します。
+- **GPU アクセラレーション (`wgpu`)**:
+  - DirectX 12 / Vulkan / Metal バックエンド上で動作する低遅延な UI・プレビュー基盤。
+- **画像・動画・音声ファイルのネイティブ読み込み & プレビュー描画 (`au2-media`)**:
+  - **画像**: `.png`, `.jpg`, `.jpeg`, `.bmp`, `.webp`, `.gif`（アニメーション GIF 含む）
+  - **動画**: `.mp4`, `.avi`, `.mov`, `.mkv`, `.webm`, `.wmv` 等
+  - **音声**: `.wav`, `.mp3`, `.ogg`, `.flac`
+  - 入力プラグインの追加設定不要で、ドラッグ＆ドロップまたはタイムライン配置で即座に高速デコード・描画されます。
+- **初代 AviUtl (`.aup`) & AviUtl2 (`.aup2`) & 拡張編集 (`.exo`) の完全互換**:
+  - **`.aup2`**: AviUtl2 新プロジェクト形式の読み込み・保存に完全対応。
+  - **`.aup`**: 初代 AviUtl 0.18 バイナリプロジェクトの相互読み込み・保存。
+  - **`.exo`**: 拡張編集オブジェクトファイルの Shift_JIS (CP932) / UTF-8 自動判別、中間点・トラックバー・エフェクトのラウンドトリップ保存。
+- **初代 32-bit / AviUtl2 64-bit プラグイン・スクリプト両対応 (`au2-plugin`)**:
+  - **拡張編集スクリプト**: `.anm`, `.obj`, `.cam`, `.scn`, `.tra`（および `.anm2`, `.obj2`, `.cam2`, `.scn2`, `.tra2`）の Lua 5.1 / ExEdit スクリプト実行エンジンを内蔵。`obj.ox`, `obj.draw()`, `obj.load()`, `obj.mes()`, `obj.effect()` 等の演出をそのままプレビューに反映。
+  - **ネイティブ DLL プラグイン**: 32-bit x86 および 64-bit x64 の `.auf`, `.aui`, `.auo`, `.auc` の PE バイナリ解析ブリッジを搭載。`FILTER_DLL` 構造体からトラックバー・チェックボックスを抽出し、タイムライン・設定ダイアログ・プレビュー描画で動作します。
+- **AviUtl 流の操作感 & モダンな UI**:
+  - レイヤー右クリックからのオブジェクト追加（テキスト、図形、フレームバッファ、色調補正、グループ制御、カメラ制御、カスタムオブジェクト）。
+  - 中間点追加・分割・削除、Shift+ホイール横スクロール、オートスクラブ。
+  - 未保存の変更がある状態でソフトを終了しようとした際の**保存確認ダイアログ**。
+  - シングルウィンドウ（ドッキング）と、AviUtl 伝統のマルチウィンドウ（分離）の即時切替。
 
 ---
 
@@ -35,52 +37,67 @@
 
 ```text
 openavi/
-├── .github/workflows/ci.yml  # GitHub Actions (Windows / Linux / macOS 自動ビルド・テスト)
 ├── Cargo.toml                # Cargo Workspace 定義
 ├── LICENSE                   # MIT License
 ├── CONTRIBUTING.md           # コントリビューションガイド
-├── plugins/
-│   └── openavi_effects.anm   # 同梱アニメーション効果スクリプト (@揺れ, @点滅, @回転)
+├── package-release.ps1       # リリースビルド & パッケージングスクリプト
+├── assets/
+│   └── openavi.ico           # アプリアイコン
+├── plugins/                  # プラグイン・スクリプト配置フォルダ
+│   ├── openavi_effects.anm   # サンプルアニメーション効果スクリプト (揺れ, 点滅, 回転, バウンス, 円形複製)
+│   ├── openavi_custom.obj    # サンプルカスタムオブジェクトスクリプト (リングパーティクル, デジタルタイマー等)
+│   ├── openavi_transitions.scn # サンプルシーンチェンジスクリプト (クロスフェード, 回転ズームアウト)
+│   └── openavi_camera.cam    # サンプルカメラ効果スクリプト (手ブレカメラ)
 ├── samples/
 │   ├── sample.exo            # 動作確認用 Shift_JIS サンプルオブジェクトファイル
 │   ├── sample_image.png      # 動作確認用サンプル画像
 │   └── sample_video.mp4      # 動作確認用サンプル動画
 └── crates/
     ├── au2-core/             # コアデータモデル (Project / Scene / Layer / Object / Track / Keyframe)
-    ├── au2-aup/              # AviUtl プロジェクトファイル (.aup) バイナリパーサー & ライター
+    ├── au2-aup/              # AviUtl / AviUtl2 プロジェクトファイル (.aup / .aup2) パーサー & ライター
     ├── au2-exo/              # 拡張編集オブジェクトファイル (.exo) パーサー & シリアライザ
-    ├── au2-media/            # 画像・動画デコーダ & フレームキャッシュ
-    ├── au2-plugin/           # スクリプト (.anm/.obj等) & DLLプラグイン (.auf/.aui等) ローダー・検査器
-    └── au2-app/              # デスクトップ GUI アプリケーション (バイナリ名: openavi)
+    ├── au2-media/            # 画像・動画・音声デコーダ & GPU フレームキャッシュ
+    ├── au2-plugin/           # Lua スクリプト実行エンジン & 32bit/64bit PE プラグインブリッジ
+    └── au2-app/              # デスクトップ GUI アプリケーション本体 (openavi)
 ```
+
+---
+
+## プラグインのご利用と再配布に関する方針
+
+> [!IMPORTANT]
+> **他者製プラグインの無断再配布は行いません**
+> OpenAvi は、各プラグイン・スクリプト開発者様の著作権および利用規約を尊重するため、L-SMASH Works、patch.aul、x264guiEx 等を含む**他者製のプラグイン・バイナリ・スクリプトを本体に同梱・再配布していません**。
+>
+> 初代 AviUtl（32-bit）および AviUtl2（64-bit）向けに公開されている各種プラグインやスクリプトをご利用になる場合は、**各開発者様の正規配布ページより入手いただき、本ソフトの `plugins/` フォルダに配置するか、ウィンドウ上にドラッグ＆ドロップしてインストール**してください。OpenAvi のハイブリッド互換エンジンを通じて自動的に認識・実行されます。
 
 ---
 
 ## ダウンロード＆ワンクリック起動（一般ユーザー向け）
 
-1. GitHub の **Releases** ページから最新の **`OpenAvi-windows-x64.zip`** をダウンロードして解凍します。
-2. 解凍したフォルダ内の **`install.bat`** をダブルクリックすると：
-   - `%LOCALAPPDATA%\Programs\OpenAvi` にアプリ本体・サンプル・プラグインがインストールされます。
-   - **デスクトップ** と **スタートメニュー** に **「OpenAvi」アイコン** が自動作成されます。
-3. 以降はデスクトップの **「OpenAvi」アイコンをワンクリック（ダブルクリック）するだけ** で即座に起動できます（ポータブル版としてフォルダ内の `openavi.exe` または `Launch-OpenAvi.bat` を直接クリックして起動することも可能です）。
+1. 配布パッケージ **`OpenAvi-windows-x64.zip`** を解凍します。
+2. フォルダ内の **`install.bat`** を実行すると：
+   - `%LOCALAPPDATA%\Programs\OpenAvi` にアプリ本体がインストールされます。
+   - **デスクトップ** と **スタートメニュー** に **「OpenAvi」ショートカット** が自動作成されます。
+3. デスクトップの **「OpenAvi」アイコンをダブルクリックするだけ** で起動できます（フォルダ内の `openavi.exe` または `Launch-OpenAvi.bat` から直接ポータブル起動することも可能です）。
 
 ---
 
-## 開発者向けビルド・パッケージ作成方法
+## 開発者向けビルド・テスト手順
 
 ```bash
 # 全クレートの単体・結合テスト実行
 cargo test --workspace
 
-# OpenAvi の起動
+# OpenAvi の開発起動
 cargo run --release -p au2-app
 
-# 配布用 ZIP パッケージ (dist/OpenAvi-windows-x64.zip) の生成 & デスクトップショートカット作成
-powershell -ExecutionPolicy Bypass -File .\package-release.ps1
+# 配布用 ZIP パッケージ (dist/OpenAvi-windows-x64.zip) の生成
+powershell -ExecutionPolicy Bypass -File .\package-release.ps1 -SkipBuild
 ```
 
 ---
 
 ## ライセンス
 
-本プロジェクトは [MIT License](LICENSE) の下で公開されています。
+本ソフトウェアは [MIT License](LICENSE) の下で公開されています。
