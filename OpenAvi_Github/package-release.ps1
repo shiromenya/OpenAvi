@@ -73,6 +73,12 @@ $exeSrc = if (Test-Path "target\release\openavi.exe") {
     "target\debug\openavi.exe"
 }
 
+# 古いバイナリを誤って配布しないよう、ソースより exe が古い場合は警告して中断する
+$newestSrc = Get-ChildItem -Path "crates" -Recurse -Include *.rs,Cargo.toml | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if ($newestSrc -and (Get-Item $exeSrc).LastWriteTime -lt $newestSrc.LastWriteTime) {
+    throw "Binary '$exeSrc' is older than source '$($newestSrc.FullName)'. Run 'cargo build --release -p au2-app' first."
+}
+
 # 3. Create portable package in dist/OpenAvi and dist/OpenAvi-windows-x64.zip
 $stage = Join-Path $PSScriptRoot "dist\OpenAvi"
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
@@ -100,7 +106,7 @@ Write-Host "Created portable release archive: $zipPath"
 # 4. Install to %LOCALAPPDATA%\Programs\OpenAvi and create Desktop + Start Menu shortcuts
 $installDir = Join-Path $env:LOCALAPPDATA "Programs\OpenAvi"
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
-Copy-Item -Path (Join-Path $stage "*") -Destination $installDir -Recurse -Force
+& robocopy $stage $installDir /E /R:1 /W:1 | Out-Null
 Write-Host "Installed files to: $installDir"
 
 $desktopDir = Join-Path $env:USERPROFILE "Desktop"
@@ -132,7 +138,7 @@ Copy-Item -Force $zipPath (Join-Path $desktopDir "OpenAvi-windows-x64.zip")
 
 $desktopExtract = Join-Path $desktopDir "OpenAvi-windows-x64"
 if (Test-Path $desktopExtract) {
-    Copy-Item -Path (Join-Path $stage "*") -Destination $desktopExtract -Recurse -Force
+    & robocopy $stage $desktopExtract /E /R:1 /W:1 | Out-Null
     Write-Host "Updated desktop folder: $desktopExtract"
 }
 

@@ -468,6 +468,7 @@ fn draw_object(ctx: &DrawCtx, layer_idx: usize, obj: &TimelineObject, rel: Frame
                 inst_alpha,
                 prim,
                 &fx,
+                selected,
             );
         }
         if selected {
@@ -490,6 +491,7 @@ fn draw_object(ctx: &DrawCtx, layer_idx: usize, obj: &TimelineObject, rel: Frame
         alpha,
         lua_st.loaded_primitive.as_ref(),
         &fx,
+        selected,
     );
 
     if selected {
@@ -512,6 +514,7 @@ fn draw_single_instance(
     alpha: f32,
     loaded_prim: Option<&LuaLoadedPrimitive>,
     fx: &FilterVisuals,
+    selected: bool,
 ) -> Option<Rect> {
     let center = ctx.canvas.center() + vec2(x, y) * ctx.scale;
     let k = ctx.scale * zoom;
@@ -611,18 +614,41 @@ fn draw_single_instance(
             }
             match ty {
                 0 => {
-                    ctx.painter.rect_filled(ctx.canvas, 0.0, color);
-                    None
+                    // 背景: プロジェクト解像度の矩形を中心座標(X, Y)・拡大率・回転・透明度を適用して描画
+                    let bg_w = ctx.screen_w as f32 * k;
+                    let bg_h = ctx.screen_h as f32 * k;
+                    let r = Rect::from_center_size(center, vec2(bg_w, bg_h));
+                    let corners = rotated_rect(r, angle);
+                    fan(ctx.painter, center, &corners, color);
+                    Some(r)
                 }
                 1 => {
+                    // 円
                     ctx.painter.circle_filled(center, size / 2.0, color);
                     Some(Rect::from_center_size(center, vec2(size, size)))
                 }
                 2 => {
+                    // 四角形
                     fan(ctx.painter, center, &polygon(center, size * std::f32::consts::FRAC_1_SQRT_2, 4, angle + PI / 4.0), color);
                     Some(Rect::from_center_size(center, vec2(size, size)))
                 }
+                3 => {
+                    // 三角形
+                    fan(ctx.painter, center, &polygon(center, size / 2.0, 3, angle), color);
+                    Some(Rect::from_center_size(center, vec2(size, size)))
+                }
+                4 => {
+                    // 五角形
+                    fan(ctx.painter, center, &polygon(center, size / 2.0, 5, angle), color);
+                    Some(Rect::from_center_size(center, vec2(size, size)))
+                }
+                5 => {
+                    // 六角形
+                    fan(ctx.painter, center, &polygon(center, size / 2.0, 6, angle), color);
+                    Some(Rect::from_center_size(center, vec2(size, size)))
+                }
                 6 => {
+                    // 星型
                     fan(ctx.painter, center, &star(center, size / 2.0, angle), color);
                     Some(Rect::from_center_size(center, vec2(size, size)))
                 }
@@ -682,29 +708,39 @@ fn draw_single_instance(
                 let size = vec2(ctx.canvas.width(), ctx.canvas.height()) * zoom;
                 let r = Rect::from_center_size(center, size);
                 let corners = rotated_rect(r, angle);
-                fan(ctx.painter, center, &corners, apply_tint(Color32::from_rgb(60, 70, 90)));
-                ctx.painter.text(
-                    center,
-                    Align2::CENTER_CENTER,
-                    format!("{}\n{}", src.name, obj.display_name()),
-                    FontId::proportional((14.0 * zoom.max(0.5)).min(28.0)),
-                    apply_tint(Color32::LIGHT_GRAY),
-                );
+                let placeholder_col = apply_tint(Color32::from_rgba_unmultiplied(40, 50, 70, 35));
+                fan(ctx.painter, center, &corners, placeholder_col);
+                if selected {
+                    ctx.painter.text(
+                        center,
+                        Align2::CENTER_CENTER,
+                        format!("{}\n{}", src.name, obj.display_name()),
+                        FontId::proportional((14.0 * zoom.max(0.5)).min(28.0)),
+                        apply_tint(Color32::LIGHT_GRAY),
+                    );
+                }
                 Some(r)
             }
         }
         _ => {
-            let size = vec2(ctx.canvas.width(), ctx.canvas.height()) * zoom;
-            let r = Rect::from_center_size(center, size);
+            let sz = (src.eval("サイズ", rel, 100.0) as f32 * k).clamp(16.0 * ctx.scale, ctx.canvas.width());
+            let r = Rect::from_center_size(center, vec2(sz, sz));
             let corners = rotated_rect(r, angle);
-            fan(ctx.painter, center, &corners, apply_tint(Color32::from_rgb(60, 70, 90)));
-            ctx.painter.text(
-                center,
-                Align2::CENTER_CENTER,
-                format!("{}\n{}", src.name, obj.display_name()),
-                FontId::proportional((14.0 * zoom.max(0.5)).min(28.0)),
-                apply_tint(Color32::LIGHT_GRAY),
+            let col = apply_tint(
+                src.text("color")
+                    .and_then(parse_color)
+                    .unwrap_or(Color32::from_rgba_unmultiplied(100, 130, 180, 70)),
             );
+            fan(ctx.painter, center, &corners, col);
+            if selected {
+                ctx.painter.text(
+                    center,
+                    Align2::CENTER_CENTER,
+                    format!("{}\n{}", src.name, obj.display_name()),
+                    FontId::proportional((13.0 * zoom.max(0.5)).min(24.0)),
+                    apply_tint(Color32::WHITE),
+                );
+            }
             Some(r)
         }
     }

@@ -31,6 +31,8 @@ use thiserror::Error;
 pub const AUP_HEADER_018: &[u8; 32] = b"AviUtl ProjectFile version 0.18\0";
 pub const AUP_HEADER_PREFIX: &[u8] = b"AviUtl ProjectFile version ";
 
+pub mod legacy_aup;
+
 /// AviUtl2 (ExEdit2) `.aup2` の既定バージョン番号
 pub const AUP2_DEFAULT_VERSION: u32 = 2011400;
 
@@ -1330,6 +1332,13 @@ pub fn parse_aup_bytes(bytes: &[u8]) -> Result<AupDocument, AupError> {
         }
     }
 
+    // 初代 AviUtl (.aup) の拡張編集バイナリおよび本体データを純粋 Rust で高精度パース
+    if let Ok(doc) = legacy_aup::parse_legacy_aup(bytes) {
+        if doc.scene.object_count() > 0 {
+            return Ok(doc);
+        }
+    }
+
     let mut warnings = Vec::new();
     let settings = extract_legacy_settings(bytes, &mut warnings);
     let mut scene = Scene::new("Root", settings);
@@ -1587,5 +1596,27 @@ Y=20.00
         assert_eq!(doc.scene.object_count(), 2);
         assert_eq!(doc.scene.layers[0].objects[0].display_name(), "test_clip.mp4");
         assert_eq!(doc.scene.layers[1].objects[0].display_name(), "logo.png");
+    }
+
+    #[test]
+    fn parse_real_goot_time_pf_aup_if_present() {
+        let candidates = [
+            r"C:\Users\user\Desktop\goot time pf.aup",
+            r"c:\Users\user\AppData\Local\Temp\goot time pf.aup",
+        ];
+        for candidate in candidates {
+            let path = std::path::Path::new(candidate);
+            if path.exists() {
+                let bytes = std::fs::read(path).expect("read real aup");
+                let doc = parse_aup_bytes(&bytes).expect("parse real aup");
+                assert_eq!(doc.scene.settings.width, 1280);
+                assert_eq!(doc.scene.settings.height, 720);
+                assert_eq!(doc.scene.settings.frame_rate.num, 30);
+                assert_eq!(doc.scene.settings.frame_rate.den, 1);
+                assert!(doc.scene.object_count() >= 3000);
+                assert!(doc.scene.layers.len() >= 90);
+                break;
+            }
+        }
     }
 }

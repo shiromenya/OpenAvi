@@ -84,6 +84,31 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    /// 実 .aup をヘッドレス egui でプレビュー描画し、各フレームで描画プリミティブが出力されるか調べる。
+    #[test]
+    fn preview_renders_real_aup_frames() {
+        let path = Path::new(r"C:\Users\user\Desktop\goot time pf.aup");
+        if !path.exists() {
+            return;
+        }
+        let mut st = state::EditorState::default();
+        st.load_path(path);
+        let ctx = egui::Context::default();
+        for f in [0u32, 100, 300, 500, 800, 1000, 1500, 2000] {
+            st.frame = f;
+            let out = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| panels::preview::ui(ui, &mut st));
+            });
+            let mut meshes = 0usize;
+            for cs in &out.shapes {
+                if let egui::epaint::Shape::Mesh(_) = &cs.shape {
+                    meshes += 1;
+                }
+            }
+            assert!(meshes > 0, "frame {f}: プレビューに描画プリミティブが出力されていること");
+        }
+    }
+
     #[test]
     fn test_video_longer_than_5s_and_audio_integration() {
         let mut st = state::EditorState::default();
