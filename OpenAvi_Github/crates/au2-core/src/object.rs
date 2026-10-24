@@ -317,7 +317,16 @@ impl TimelineObject {
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
                 .unwrap_or_else(|| src.name.clone()),
-            _ => src.name.clone(),
+            EffectKind::CustomObject => src
+                .text("name")
+                .filter(|s| !s.is_empty())
+                .map(|n| format!("カスタム ({n})"))
+                .unwrap_or_else(|| src.name.clone()),
+            _ => src
+                .text("name")
+                .filter(|s| !s.is_empty() && src.kind != EffectKind::Shape)
+                .map(|n| format!("{} ({n})", src.name))
+                .unwrap_or_else(|| src.name.clone()),
         }
     }
 }

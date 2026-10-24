@@ -1,0 +1,11 @@
+@クロスフェード
+--track0:強さ,0,100,100,1
+local p = obj.getvalue("scenechange")
+obj.alpha = obj.alpha * (1.0 - p * (obj.track0 / 100))
+
+@回転ズームアウト
+--track0:回転数,1,10,2,0.5
+local p = obj.getvalue("scenechange")
+obj.zoom = obj.zoom * (1.0 - p)
+obj.rz = obj.rz + p * 360 * obj.track0
+obj.alpha = obj.alpha * (1.0 - p)

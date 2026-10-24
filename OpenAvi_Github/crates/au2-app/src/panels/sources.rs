@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use au2_core::{EffectKind, TimelineObject};
 use au2_media::MediaKind;
-use au2_plugin::{PluginKind, SupportStatus};
+use au2_plugin::SupportStatus;
 use eframe::egui::{self, vec2, CollapsingHeader, Color32, RichText, ScrollArea};
 
 use crate::state::EditorState;
@@ -166,34 +166,44 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
 
         ui.add_space(4.0);
 
-        // ---- 5. プラグイン & スクリプト一覧 ----
+        // ---- 5. プラグイン & スクリプト一覧 (初代 32-bit / AviUtl2 64-bit 両対応) ----
         CollapsingHeader::new(
             RichText::new(format!("🧩 プラグイン・スクリプト ({})", st.plugins.plugins.len())).strong(),
         )
         .default_open(true)
         .show(ui, |ui| {
             let mut apply_effect = None;
+            let mut place_object = None;
             for p in &st.plugins.plugins {
                 let badge_color = match p.status {
                     SupportStatus::Supported => Color32::from_rgb(100, 220, 120),
                     SupportStatus::PartialScript => Color32::from_rgb(240, 200, 90),
                     _ => Color32::from_rgb(170, 170, 185),
                 };
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.monospace(&p.file_name);
-                    ui.colored_label(badge_color, format!("[{}]", p.kind.label()));
+                    ui.colored_label(badge_color, format!("[{}]", p.arch.label()));
                 });
                 for entry in &p.entries {
-                    ui.horizontal(|ui| {
-                        ui.add_space(12.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.add_space(10.0);
                         ui.label(format!("・{}", entry.display_name));
-                        if matches!(p.kind, PluginKind::AnmScript) && st.selected.is_some() {
+                        if p.kind.can_apply_to_object() && st.selected.is_some() {
                             if ui
-                                .small_button("＋選択オブジェクトに適用")
-                                .on_hover_text("現在選択中のタイムラインオブジェクトにこのスクリプト効果を追加します")
+                                .small_button("＋選択に適用")
+                                .on_hover_text("現在選択中のタイムラインオブジェクトにこの効果を追加します")
                                 .clicked()
                             {
                                 apply_effect = Some((p.kind, entry.clone()));
+                            }
+                        }
+                        if p.kind.can_place_as_object() {
+                            if ui
+                                .small_button("＋TL配置")
+                                .on_hover_text("このカスタムオブジェクト / フィルタを単体オブジェクトとしてタイムラインに配置します")
+                                .clicked()
+                            {
+                                place_object = Some((p.kind, entry.clone()));
                             }
                         }
                     });
@@ -219,6 +229,13 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                         st.status = format!("「{}」を選択オブジェクトに適用しました", entry.display_name);
                     }
                 }
+            }
+            if let Some((kind, entry)) = place_object {
+                let layer = st.timeline.context_target.layer;
+                let start = st.frame;
+                let end = start + 149;
+                let obj = entry.to_timeline_object(kind, start, end);
+                st.add_object_at(layer, obj);
             }
         });
     });

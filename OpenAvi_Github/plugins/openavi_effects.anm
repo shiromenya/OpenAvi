@@ -18,3 +18,25 @@ obj.alpha = obj.alpha * (1 - (obj.track1 / 100) * w)
 @回転
 --track0:角速度,-720,720,90,0.1
 obj.rz = obj.rz + obj.time * obj.track0
+
+@バウンス弾み
+--track0:高さ,0,500,80,1
+--track1:速さ,0.5,20,3.0,0.1
+--track2:伸縮量,0,50,15,1
+local s = math.abs(math.sin(obj.time * obj.track1 * math.pi))
+obj.oy = obj.oy - s * obj.track0
+obj.zoom = obj.zoom * (1 + (0.5 - s) * (obj.track2 / 100))
+
+@円形複製リング
+--track0:個数,2,24,8,1
+--track1:半径,10,600,160,1
+--track2:回転速度,-360,360,45,1
+--track3:縮小率,10,200,70,1
+local n = math.floor(obj.track0)
+local r = obj.track1
+local base_deg = obj.time * obj.track2
+local zm = obj.track3 / 100
+for i = 1, n do
+    local rad = (base_deg + (i - 1) * 360 / n) * math.pi / 180
+    obj.draw(math.cos(rad) * r, math.sin(rad) * r, 0, zm, 0.9, 0, 0, base_deg + (i - 1) * 360 / n)
+end

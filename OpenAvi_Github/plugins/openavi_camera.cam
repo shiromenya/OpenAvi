@@ -1,0 +1,9 @@
+@手ブレカメラ
+--track0:X揺れ,0,200,15,0.5
+--track1:Y揺れ,0,200,10,0.5
+--track2:回転揺れ,0,45,2,0.1
+--track3:速さ,0.5,20,4,0.1
+local t = obj.time * obj.track3
+obj.ox = obj.ox + math.sin(t * 2.1) * obj.track0 * 0.6 + math.cos(t * 3.7) * obj.track0 * 0.4
+obj.oy = obj.oy + math.cos(t * 1.7) * obj.track1 * 0.6 + math.sin(t * 4.3) * obj.track1 * 0.4
+obj.rz = obj.rz + math.sin(t * 2.9) * obj.track2

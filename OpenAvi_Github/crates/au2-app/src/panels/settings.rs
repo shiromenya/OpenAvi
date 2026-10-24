@@ -17,12 +17,12 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     };
     let frame = st.frame;
 
-    // プラグイン一覧から追加可能なスクリプト効果を収集
+    // プラグイン一覧から追加可能なスクリプト効果・フィルタプラグイン (32bit/64bit .auf) を収集
     let available_scripts: Vec<(PluginKind, au2_plugin::ScriptEntry)> = st
         .plugins
         .plugins
         .iter()
-        .filter(|p| matches!(p.kind, PluginKind::AnmScript))
+        .filter(|p| p.kind.can_apply_to_object())
         .flat_map(|p| p.entries.iter().cloned().map(move |e| (p.kind, e)))
         .collect();
 
@@ -47,16 +47,60 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                 ui.heading(RichText::new(obj.display_name()).strong().size(15.0));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.menu_button("＋ フィルタ効果を追加", |ui| {
-                        if ui.button("フェード (内蔵)").clicked() {
+                        ui.label(RichText::new("標準内蔵フィルタ").weak().small());
+                        if ui.button("フェード").clicked() {
                             let mut eff = Effect::new("フェード");
                             eff.push_track("イン", Track::constant(0.50, 2));
                             eff.push_track("アウト", Track::constant(0.50, 2));
                             pending_effect = Some(eff);
                             ui.close_menu();
                         }
+                        if ui.button("縁取り").clicked() {
+                            let mut eff = Effect::new("縁取り");
+                            eff.push_track("サイズ", Track::constant(4.0, 0));
+                            eff.push_text("color", "ffffff");
+                            pending_effect = Some(eff);
+                            ui.close_menu();
+                        }
+                        if ui.button("ドロップシャドウ").clicked() {
+                            let mut eff = Effect::new("ドロップシャドウ");
+                            eff.push_track("X", Track::constant(8.0, 0));
+                            eff.push_track("Y", Track::constant(8.0, 0));
+                            eff.push_track("濃さ", Track::constant(60.0, 1));
+                            pending_effect = Some(eff);
+                            ui.close_menu();
+                        }
+                        if ui.button("グロー (発光)").clicked() {
+                            let mut eff = Effect::new("グロー");
+                            eff.push_track("強さ", Track::constant(60.0, 1));
+                            pending_effect = Some(eff);
+                            ui.close_menu();
+                        }
+                        if ui.button("色ズレ (色収差)").clicked() {
+                            let mut eff = Effect::new("色ズレ");
+                            eff.push_track("ズレ幅", Track::constant(8.0, 1));
+                            eff.push_track("角度", Track::constant(0.0, 1));
+                            pending_effect = Some(eff);
+                            ui.close_menu();
+                        }
+                        if ui.button("単色化").clicked() {
+                            let mut eff = Effect::new("単色化");
+                            eff.push_track("強さ", Track::constant(80.0, 1));
+                            eff.push_text("color", "ffcc66");
+                            pending_effect = Some(eff);
+                            ui.close_menu();
+                        }
+                        if ui.button("振動").clicked() {
+                            let mut eff = Effect::new("振動");
+                            eff.push_track("X", Track::constant(15.0, 1));
+                            eff.push_track("Y", Track::constant(15.0, 1));
+                            eff.push_track("周期", Track::constant(1.0, 1));
+                            pending_effect = Some(eff);
+                            ui.close_menu();
+                        }
                         if !available_scripts.is_empty() {
                             ui.separator();
-                            ui.label(RichText::new("スクリプト (.anm)").weak().small());
+                            ui.label(RichText::new("スクリプト & .auf プラグイン (32bit/64bit)").weak().small());
                             for (kind, entry) in &available_scripts {
                                 if ui.button(&entry.display_name).clicked() {
                                     pending_effect = Some(entry.to_effect(*kind));

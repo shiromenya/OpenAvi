@@ -518,7 +518,8 @@ impl EditorState {
                 &[
                     "aup2", "aup", "exo", "mp4", "avi", "mov", "mkv", "webm", "wmv", "png", "jpg",
                     "jpeg", "bmp", "webp", "gif", "wav", "mp3", "ogg", "flac", "anm", "obj", "cam",
-                    "scn", "tra", "auf", "aui", "auo", "auc",
+                    "scn", "tra", "auf", "aui", "auo", "auc", "anm2", "obj2", "cam2", "scn2",
+                    "tra2", "auf2", "aui2", "auo2", "auc2",
                 ],
             )
             .add_filter("プロジェクト / オブジェクト (.aup2, .aup, .exo)", &["aup2", "aup", "exo"])
@@ -530,8 +531,11 @@ impl EditorState {
                 ],
             )
             .add_filter(
-                "AviUtl プラグイン / スクリプト (.anm, .obj, .auf 等)",
-                &["anm", "obj", "cam", "scn", "tra", "auf", "aui", "auo", "auc"],
+                "初代AviUtl / AviUtl2 プラグイン・スクリプト (.anm, .obj, .auf, .anm2, .auf2 等)",
+                &[
+                    "anm", "obj", "cam", "scn", "tra", "auf", "aui", "auo", "auc", "anm2", "obj2",
+                    "cam2", "scn2", "tra2", "auf2", "aui2", "auo2", "auc2",
+                ],
             )
             .add_filter("すべてのファイル", &["*"])
             .pick_files()
@@ -657,10 +661,13 @@ impl EditorState {
     /// プラグイン・スクリプトを複数選択して一括インストールするダイアログ。
     pub fn install_plugin_dialog(&mut self) {
         if let Some(paths) = rfd::FileDialog::new()
-            .set_title("プラグイン・スクリプトをインストール")
+            .set_title("プラグイン・スクリプトをインストール (初代AviUtl 32bit / AviUtl2 64bit 両対応)")
             .add_filter(
-                "AviUtl スクリプト / プラグイン",
-                &["anm", "obj", "cam", "scn", "tra", "auf", "aui", "auo", "auc"],
+                "初代AviUtl / AviUtl2 スクリプト・プラグイン",
+                &[
+                    "anm", "obj", "cam", "scn", "tra", "auf", "aui", "auo", "auc", "anm2", "obj2",
+                    "cam2", "scn2", "tra2", "auf2", "aui2", "auo2", "auc2",
+                ],
             )
             .add_filter("すべてのファイル", &["*"])
             .pick_files()

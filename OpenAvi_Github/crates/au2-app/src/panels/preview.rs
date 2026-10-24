@@ -1,12 +1,13 @@
 //! プレビュー画面。
 //!
-//! - 図形・テキスト・画像ファイル・動画ファイル・フィルタオブジェクトを合成描画します。
-//! - 画像ファイル（`.png`, `.jpg`, `.bmp`, `.webp`, `.gif`）および動画ファイル（`.mp4`, `.avi`, `.mov`, `.mkv` 等）は
-//!   [`au2_media::MediaCache`] を通じてデコードされ、GPU テクスチャとして回転・拡大率・透明度付きで描画されます。
+//! - 図形・テキスト・画像ファイル・動画ファイル・カスタムオブジェクト・フィルタオブジェクトを合成描画します。
+//! - 初代 AviUtl (32-bit) および AviUtl2 (64-bit) の拡張編集 Lua スクリプト（`.anm`, `.obj`, `.cam`, `.scn`）と
+//!   ネイティブフィルタプラグイン（`.auf` 32bit/64bit）をリアルタイム評価してプレビューに反映します。
 
 use std::f32::consts::{PI, TAU};
 
 use au2_core::{EffectKind, Frame, ObjectCategory, ObjectId, TimelineObject};
+use au2_plugin::{LuaLoadedPrimitive, LuaObjState, PluginRegistry};
 use eframe::egui::{self, emath::Rot2, pos2, vec2, Align2, Color32, FontId, Mesh, Pos2, Rect, Sense, Shape, Stroke};
 
 use super::parse_color;
@@ -68,13 +69,16 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
         canvas,
         scale,
         fps,
+        screen_w: sw as f64,
+        screen_h: sh as f64,
         textures: &resolved_textures,
+        plugins: &st.plugins,
     };
     for (li, obj) in st.scene.objects_at(frame) {
         if !st.scene.layers[li].visible {
             continue;
         }
-        draw_object(&ctx, obj, frame - obj.frame_start, st.selected == Some(obj.id));
+        draw_object(&ctx, li, obj, frame - obj.frame_start, st.selected == Some(obj.id));
     }
 
     painter.text(
@@ -118,7 +122,6 @@ fn bottom_transport_bar(ui: &mut egui::Ui, st: &mut EditorState) {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
 
-                // 左側：タイムコードバッジ [TC] + タイムコード (ベースライン・高さを完璧に統一)
                 let rate = st.scene.settings.frame_rate;
                 let tc = rate.timecode(st.frame);
 
@@ -151,7 +154,6 @@ fn bottom_transport_bar(ui: &mut egui::Ui, st: &mut EditorState) {
 
                 ui.separator();
 
-                // 中央：再生・コマ送りボタン群（すべて高さ 24px で統一）
                 let nav_btn = |ui: &mut egui::Ui, text: &'static str, tip: &'static str| -> egui::Response {
                     ui.add(
                         egui::Button::new(egui::RichText::new(text).size(12.0).color(Color32::from_gray(225)))
@@ -167,7 +169,6 @@ fn bottom_transport_bar(ui: &mut egui::Ui, st: &mut EditorState) {
                     st.step(-1);
                 }
 
-                // 再生 / 一時停止ボタン（アクティブ時は鮮やかなブルーで強調、高さ 24px）
                 let (play_label, play_color) = if st.playing {
                     ("⏸ 一時停止", Color32::from_rgb(220, 38, 38))
                 } else {
@@ -187,7 +188,6 @@ fn bottom_transport_bar(ui: &mut egui::Ui, st: &mut EditorState) {
                     st.set_frame(last);
                 }
 
-                // 右側：解像度とフレームレート情報
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let s = &st.scene.settings;
                     ui.label(
@@ -205,10 +205,32 @@ struct DrawCtx<'a> {
     canvas: Rect,
     scale: f32,
     fps: f64,
+    screen_w: f64,
+    screen_h: f64,
     textures: &'a std::collections::HashMap<ObjectId, (egui::TextureId, [usize; 2])>,
+    plugins: &'a PluginRegistry,
 }
 
-fn draw_object(ctx: &DrawCtx, obj: &TimelineObject, rel: Frame, selected: bool) {
+#[derive(Default, Clone, Copy)]
+struct FilterVisuals {
+    glow_strength: f32,
+    chroma_shift: f32,
+    chroma_angle: f32,
+    border_width: f32,
+    border_color: Option<Color32>,
+    shadow_offset: Option<egui::Vec2>,
+    shadow_alpha: f32,
+    tint_color: Option<(Color32, f32)>,
+}
+
+fn u32_to_color32(rgb: u32) -> Color32 {
+    let r = ((rgb >> 16) & 0xFF) as u8;
+    let g = ((rgb >> 8) & 0xFF) as u8;
+    let b = (rgb & 0xFF) as u8;
+    Color32::from_rgb(r, g, b)
+}
+
+fn draw_object(ctx: &DrawCtx, layer_idx: usize, obj: &TimelineObject, rel: Frame, selected: bool) {
     let Some(src) = obj.source() else { return };
     if !src.enabled {
         return;
@@ -222,71 +244,334 @@ fn draw_object(ctx: &DrawCtx, obj: &TimelineObject, rel: Frame, selected: bool) 
         _ => return,
     }
 
-    // 標準描画パラメータ
-    let draw = obj.effect(&EffectKind::StandardDraw);
+    // 標準描画 / 拡張描画パラメータ
+    let draw = obj
+        .effect(&EffectKind::StandardDraw)
+        .or_else(|| obj.effect(&EffectKind::ExtendedDraw));
     let ev = |key: &str, default: f64| draw.map(|d| d.eval(key, rel, default)).unwrap_or(default);
-    let (mut x, mut y) = (ev("X", 0.0) as f32, ev("Y", 0.0) as f32);
-    let zoom = (ev("拡大率", 100.0) / 100.0) as f32;
-    let mut angle = (ev("回転", 0.0) as f32).to_radians();
-    let mut alpha = (1.0 - ev("透明度", 0.0) / 100.0).clamp(0.0, 1.0) as f32;
+    let base_x = ev("X", 0.0);
+    let base_y = ev("Y", 0.0);
+    let base_z = ev("Z", 0.0);
+    let base_zoom = ev("拡大率", 100.0) / 100.0;
+    let base_rot = ev("回転", 0.0);
+    let base_alpha = (1.0 - ev("透明度", 0.0) / 100.0).clamp(0.0, 1.0);
 
     let time_sec = rel as f64 / ctx.fps.max(1.0);
+    let total_sec = obj.length() as f64 / ctx.fps.max(1.0);
 
-    // フィルタ効果・アニメーション効果スクリプトの評価
+    // Lua スクリプト実行ステートの初期化
+    let mut lua_st = LuaObjState {
+        x: base_x,
+        y: base_y,
+        z: base_z,
+        rz: base_rot,
+        zoom: 1.0,
+        alpha: base_alpha,
+        time: time_sec,
+        totaltime: total_sec,
+        frame: rel as i64,
+        totalframe: obj.length() as i64,
+        layer: (layer_idx + 1) as i64,
+        screen_w: ctx.screen_w,
+        screen_h: ctx.screen_h,
+        framerate: ctx.fps,
+        ..Default::default()
+    };
+
+    let mut fx = FilterVisuals::default();
+
+    // フィルタ効果・スクリプト (.anm / .obj / .cam / .scn) および .auf プラグインの評価
     for eff in &obj.effects {
         if !eff.enabled {
             continue;
         }
+        if matches!(
+            eff.kind,
+            EffectKind::StandardDraw | EffectKind::ExtendedDraw | EffectKind::StandardPlayback
+        ) {
+            continue;
+        }
+
+        // 1) プラグインレジストリ内の Lua スクリプト (.anm/.obj/.cam/.scn) を実行
+        let ran_lua = ctx.plugins.execute_effect(eff, rel, &mut lua_st);
+
+        // 2) 内蔵フィルタおよび .auf (32bit / 64bit) フィルタプラグインの視覚効果評価
         if eff.name == "フェード" {
             let fin = eff.eval("イン", rel, 0.0) * ctx.fps;
             let fout = eff.eval("アウト", rel, 0.0) * ctx.fps;
             let remain = (obj.length() - 1 - rel) as f64;
             if fin > 0.0 {
-                alpha *= (rel as f64 / fin).min(1.0) as f32;
+                lua_st.alpha *= (rel as f64 / fin).min(1.0);
             }
             if fout > 0.0 {
-                alpha *= (remain / fout).min(1.0) as f32;
+                lua_st.alpha *= (remain / fout).min(1.0);
             }
-        } else if eff.name == "アニメーション効果" {
+        } else if eff.name == "振動" {
+            let ax = eff.eval("X", rel, 15.0);
+            let ay = eff.eval("Y", rel, 15.0);
+            let period = eff.eval("周期", rel, 1.0).max(0.1);
+            let phase = (rel as f64 / period) * (TAU as f64);
+            lua_st.ox += phase.sin() * ax;
+            lua_st.oy += (phase * 1.3).cos() * ay;
+        } else if eff.name.contains("グロー") || eff.name.contains("発光") || eff.name.contains("拡散光") || eff.name.contains("閃光") {
+            let strength = eff.eval("強さ", rel, 60.0) as f32;
+            fx.glow_strength = (fx.glow_strength + strength / 100.0).min(2.5);
+        } else if eff.name.contains("色収差") || eff.name.contains("色ズレ") {
+            let shift = eff.eval("ズレ幅", rel, 8.0) as f32;
+            let ang = (eff.eval("角度", rel, 0.0) as f32).to_radians();
+            fx.chroma_shift = shift;
+            fx.chroma_angle = ang;
+        } else if eff.name == "縁取り" {
+            fx.border_width = eff.eval("サイズ", rel, 4.0) as f32;
+            fx.border_color = eff.text("color").and_then(parse_color).or(Some(Color32::WHITE));
+        } else if eff.name == "シャドー" || eff.name == "ドロップシャドウ" {
+            let dx = eff.eval("X", rel, 6.0) as f32;
+            let dy = eff.eval("Y", rel, 6.0) as f32;
+            let density = (eff.eval("濃さ", rel, 60.0) / 100.0).clamp(0.0, 1.0) as f32;
+            fx.shadow_offset = Some(vec2(dx, dy));
+            fx.shadow_alpha = density;
+        } else if eff.name == "単色化" {
+            let strength = (eff.eval("強さ", rel, 100.0) / 100.0).clamp(0.0, 1.0) as f32;
+            let col = eff.text("color").and_then(parse_color).unwrap_or(Color32::from_rgb(255, 200, 120));
+            fx.tint_color = Some((col, strength));
+        } else if !ran_lua && eff.name == "アニメーション効果" {
+            // スクリプトファイル未存在時のフォールバック評価
             let script_name = eff.text("name").unwrap_or_default();
             let sec = script_name.split('@').next().unwrap_or(script_name);
             match sec {
                 "揺れ" | "振動" => {
-                    let ax = eff.eval("X振幅", rel, 25.0) as f32;
-                    let ay = eff.eval("Y振幅", rel, 15.0) as f32;
-                    let period = eff.eval("周期", rel, 0.4).max(0.01) as f32;
-                    let phase = (time_sec as f32 / period) * TAU;
-                    x += phase.sin() * ax;
-                    y += (phase * 1.3).cos() * ay;
+                    let ax = eff.eval("X振幅", rel, 25.0);
+                    let ay = eff.eval("Y振幅", rel, 15.0);
+                    let period = eff.eval("周期", rel, 0.4).max(0.01);
+                    let phase = (time_sec / period) * (TAU as f64);
+                    lua_st.ox += phase.sin() * ax;
+                    lua_st.oy += (phase * 1.3).cos() * ay;
                 }
                 "点滅" => {
-                    let period = eff.eval("周期", rel, 0.5).max(0.01) as f32;
-                    let min_t = (eff.eval("最小透明度", rel, 60.0) / 100.0).clamp(0.0, 1.0) as f32;
-                    let w = (((time_sec as f32 / period) * TAU).sin() + 1.0) * 0.5;
-                    alpha *= 1.0 - min_t * w;
+                    let period = eff.eval("周期", rel, 0.5).max(0.01);
+                    let min_t = (eff.eval("最小透明度", rel, 60.0) / 100.0).clamp(0.0, 1.0);
+                    let w = (((time_sec / period) * (TAU as f64)).sin() + 1.0) * 0.5;
+                    lua_st.alpha *= 1.0 - min_t * w;
                 }
                 "回転" => {
-                    let deg_per_sec = eff.eval("角速度", rel, 90.0) as f32;
-                    angle += (time_sec as f32 * deg_per_sec).to_radians();
+                    let deg_per_sec = eff.eval("角速度", rel, 90.0);
+                    lua_st.rz += time_sec * deg_per_sec;
                 }
                 _ => {}
             }
         }
     }
 
-    if alpha <= 0.0 {
+    // Lua スクリプト内で `obj.effect(...)` が呼ばれた場合の反映
+    for fcall in &lua_st.filter_calls {
+        match fcall.name.as_str() {
+            "グロー" | "発光" | "拡散光" | "閃光" => {
+                let s = fcall.params.get("強さ").map(|v| v.as_num() as f32).unwrap_or(60.0);
+                fx.glow_strength = (fx.glow_strength + s / 100.0).min(2.5);
+            }
+            "縁取り" => {
+                fx.border_width = fcall.params.get("サイズ").map(|v| v.as_num() as f32).unwrap_or(4.0);
+                fx.border_color = fcall
+                    .params
+                    .get("color")
+                    .map(|v| u32_to_color32(v.as_num() as u32))
+                    .or(Some(Color32::WHITE));
+            }
+            "色ズレ" => {
+                fx.chroma_shift = fcall.params.get("ズレ幅").map(|v| v.as_num() as f32).unwrap_or(8.0);
+            }
+            _ => {}
+        }
+    }
+
+    let alpha = lua_st.alpha.clamp(0.0, 1.0) as f32;
+    if alpha <= 0.0 && lua_st.draw_calls.is_empty() && lua_st.poly_calls.is_empty() {
         return;
     }
 
+    let x = (base_x + lua_st.ox - lua_st.cx) as f32;
+    let y = (base_y + lua_st.oy - lua_st.cy) as f32;
+    let zoom = (base_zoom * lua_st.zoom).max(0.0) as f32;
+    let angle = (lua_st.rz as f32).to_radians();
+
+    // `obj.drawpoly(...)` が呼ばれている場合はポリゴン群を描画
+    for poly in &lua_st.poly_calls {
+        let pts: Vec<Pos2> = poly
+            .pts
+            .iter()
+            .map(|&(px, py, _)| ctx.canvas.center() + vec2(x + px as f32, y + py as f32) * ctx.scale)
+            .collect();
+        let col = poly.color.map(u32_to_color32).unwrap_or(Color32::WHITE).gamma_multiply(poly.alpha as f32);
+        let c = Pos2::new(
+            pts.iter().map(|p| p.x).sum::<f32>() / 4.0,
+            pts.iter().map(|p| p.y).sum::<f32>() / 4.0,
+        );
+        fan(ctx.painter, c, &pts, col);
+    }
+
+    // `obj.draw(...)` がスクリプト内で複数回呼ばれている場合（円形複製やパーティクル等）は各インスタンスを描画
+    if !lua_st.draw_calls.is_empty() {
+        let mut last_bounds = None;
+        for dc in &lua_st.draw_calls {
+            let inst_x = (base_x + dc.ox) as f32;
+            let inst_y = (base_y + dc.oy) as f32;
+            let inst_zoom = (base_zoom * dc.zoom).max(0.0) as f32;
+            let inst_angle = (dc.rz as f32).to_radians();
+            let inst_alpha = dc.alpha.clamp(0.0, 1.0) as f32;
+            let prim = dc.primitive.as_ref().or(lua_st.loaded_primitive.as_ref());
+            last_bounds = draw_single_instance(
+                ctx,
+                obj,
+                src,
+                rel,
+                inst_x,
+                inst_y,
+                inst_zoom,
+                inst_angle,
+                inst_alpha,
+                prim,
+                &fx,
+            );
+        }
+        if selected {
+            if let Some(b) = last_bounds {
+                ctx.painter.rect_stroke(b.expand(2.0), 0.0, Stroke::new(1.0_f32, Color32::from_rgb(255, 200, 0)));
+            }
+        }
+        return;
+    }
+
+    let bounds = draw_single_instance(
+        ctx,
+        obj,
+        src,
+        rel,
+        x,
+        y,
+        zoom,
+        angle,
+        alpha,
+        lua_st.loaded_primitive.as_ref(),
+        &fx,
+    );
+
+    if selected {
+        if let Some(b) = bounds {
+            ctx.painter.rect_stroke(b.expand(2.0), 0.0, Stroke::new(1.0_f32, Color32::from_rgb(255, 200, 0)));
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_single_instance(
+    ctx: &DrawCtx,
+    obj: &TimelineObject,
+    src: &au2_core::Effect,
+    rel: Frame,
+    x: f32,
+    y: f32,
+    zoom: f32,
+    angle: f32,
+    alpha: f32,
+    loaded_prim: Option<&LuaLoadedPrimitive>,
+    fx: &FilterVisuals,
+) -> Option<Rect> {
     let center = ctx.canvas.center() + vec2(x, y) * ctx.scale;
     let k = ctx.scale * zoom;
-    let with_alpha = |c: Color32| c.gamma_multiply(alpha);
+    let apply_tint = |c: Color32| -> Color32 {
+        let base = if let Some((tc, s)) = fx.tint_color {
+            let inv = 1.0 - s;
+            Color32::from_rgba_unmultiplied(
+                (c.r() as f32 * inv + tc.r() as f32 * s) as u8,
+                (c.g() as f32 * inv + tc.g() as f32 * s) as u8,
+                (c.b() as f32 * inv + tc.b() as f32 * s) as u8,
+                c.a(),
+            )
+        } else {
+            c
+        };
+        base.gamma_multiply(alpha)
+    };
 
-    let bounds = match src.kind {
+    // ドロップシャドウの背面描画
+    if let Some(sh_off) = fx.shadow_offset {
+        let sh_center = center + sh_off * ctx.scale;
+        let sh_col = Color32::from_black_alpha((fx.shadow_alpha * alpha * 180.0) as u8);
+        ctx.painter.circle_filled(sh_center, 45.0 * k, sh_col);
+    }
+
+    // グロー (32bit .auf / 内蔵グロー) の背面ハロー描画
+    if fx.glow_strength > 0.01 {
+        let glow_alpha = (fx.glow_strength * alpha * 90.0).min(180.0) as u8;
+        let glow_col = Color32::from_rgba_unmultiplied(255, 240, 180, glow_alpha);
+        ctx.painter.circle_filled(center, 85.0 * k * (1.0 + fx.glow_strength * 0.35), glow_col);
+    }
+
+    // カスタムオブジェクト (.obj) 等で `obj.load("figure", ...)` や `obj.mes(...)` が実行された場合
+    if let Some(prim) = loaded_prim {
+        match prim {
+            LuaLoadedPrimitive::Figure { fig_type, color, size, .. } => {
+                let sz = (*size as f32 * k).max(1.0);
+                let col = apply_tint(u32_to_color32(*color));
+                if fx.border_width > 0.0 {
+                    let bcol = fx.border_color.unwrap_or(Color32::WHITE).gamma_multiply(alpha);
+                    ctx.painter.circle_filled(center, sz / 2.0 + fx.border_width * ctx.scale, bcol);
+                }
+                match fig_type.as_str() {
+                    "四角形" => {
+                        fan(
+                            ctx.painter,
+                            center,
+                            &polygon(center, sz * std::f32::consts::FRAC_1_SQRT_2, 4, angle + PI / 4.0),
+                            col,
+                        );
+                    }
+                    "三角形" => {
+                        fan(ctx.painter, center, &polygon(center, sz / 2.0, 3, angle), col);
+                    }
+                    "五角形" => {
+                        fan(ctx.painter, center, &polygon(center, sz / 2.0, 5, angle), col);
+                    }
+                    "六角形" => {
+                        fan(ctx.painter, center, &polygon(center, sz / 2.0, 6, angle), col);
+                    }
+                    "星型" => {
+                        fan(ctx.painter, center, &star(center, sz / 2.0, angle), col);
+                    }
+                    _ => {
+                        ctx.painter.circle_filled(center, sz / 2.0, col);
+                    }
+                }
+                return Some(Rect::from_center_size(center, vec2(sz, sz)));
+            }
+            LuaLoadedPrimitive::Text { text, size, color, .. } => {
+                let sz = (*size as f32 * k).max(1.0);
+                let col = apply_tint(u32_to_color32(*color));
+                let galley = ctx.painter.layout(text.clone(), FontId::proportional(sz), col, f32::INFINITY);
+                let half = galley.size() / 2.0;
+                let pos = center - Rot2::from_angle(angle) * half;
+                let r = Rect::from_center_size(center, galley.size());
+                ctx.painter.add(egui::epaint::TextShape::new(pos, galley, col).with_angle(angle));
+                return Some(r);
+            }
+            LuaLoadedPrimitive::Image { .. } => {}
+        }
+    }
+
+    match src.kind {
         EffectKind::Shape => {
             let size = src.eval("サイズ", rel, 100.0) as f32 * k;
-            let color = with_alpha(src.text("color").and_then(parse_color).unwrap_or(Color32::WHITE));
+            let color = apply_tint(src.text("color").and_then(parse_color).unwrap_or(Color32::WHITE));
             let ty: u32 = src.text("type").and_then(|t| t.trim().parse().ok()).unwrap_or(1);
+            if fx.border_width > 0.0 && ty != 0 {
+                let bcol = fx.border_color.unwrap_or(Color32::WHITE).gamma_multiply(alpha);
+                ctx.painter.circle_filled(center, size / 2.0 + fx.border_width * ctx.scale, bcol);
+            }
+            if fx.chroma_shift > 0.5 && ty != 0 {
+                let shift_vec = vec2(fx.chroma_angle.cos(), fx.chroma_angle.sin()) * fx.chroma_shift * ctx.scale;
+                ctx.painter.circle_filled(center - shift_vec, size / 2.0, Color32::from_rgba_unmultiplied(255, 40, 40, (alpha * 130.0) as u8));
+                ctx.painter.circle_filled(center + shift_vec, size / 2.0, Color32::from_rgba_unmultiplied(40, 180, 255, (alpha * 130.0) as u8));
+            }
             match ty {
                 0 => {
                     ctx.painter.rect_filled(ctx.canvas, 0.0, color);
@@ -313,8 +598,19 @@ fn draw_object(ctx: &DrawCtx, obj: &TimelineObject, rel: Frame, selected: bool) 
         }
         EffectKind::Text => {
             let size = (src.eval("サイズ", rel, 34.0) as f32 * k).max(1.0);
-            let color = with_alpha(src.text("color").and_then(parse_color).unwrap_or(Color32::WHITE));
+            let color = apply_tint(src.text("color").and_then(parse_color).unwrap_or(Color32::WHITE));
             let text = src.text("text").unwrap_or_default().replace("\r\n", "\n");
+            if fx.chroma_shift > 0.5 {
+                let shift_vec = vec2(fx.chroma_angle.cos(), fx.chroma_angle.sin()) * fx.chroma_shift * ctx.scale;
+                let r_col = Color32::from_rgba_unmultiplied(255, 50, 50, (alpha * 150.0) as u8);
+                let b_col = Color32::from_rgba_unmultiplied(50, 180, 255, (alpha * 150.0) as u8);
+                let g1 = ctx.painter.layout(text.clone(), FontId::proportional(size), r_col, f32::INFINITY);
+                let g2 = ctx.painter.layout(text.clone(), FontId::proportional(size), b_col, f32::INFINITY);
+                let half = g1.size() / 2.0;
+                let pos = center - Rot2::from_angle(angle) * half;
+                ctx.painter.add(egui::epaint::TextShape::new(pos - shift_vec, g1, r_col).with_angle(angle));
+                ctx.painter.add(egui::epaint::TextShape::new(pos + shift_vec, g2, b_col).with_angle(angle));
+            }
             let galley = ctx.painter.layout(text, FontId::proportional(size), color, f32::INFINITY);
             let half = galley.size() / 2.0;
             let pos = center - Rot2::from_angle(angle) * half;
@@ -326,20 +622,36 @@ fn draw_object(ctx: &DrawCtx, obj: &TimelineObject, rel: Frame, selected: bool) 
             if let Some(&(tex_id, [tw, th])) = ctx.textures.get(&obj.id) {
                 let size = vec2(tw as f32 * k, th as f32 * k);
                 let r = Rect::from_center_size(center, size);
-                draw_textured_quad(ctx.painter, tex_id, r, angle, with_alpha(Color32::WHITE));
+                if fx.chroma_shift > 0.5 {
+                    let shift_vec = vec2(fx.chroma_angle.cos(), fx.chroma_angle.sin()) * fx.chroma_shift * ctx.scale;
+                    draw_textured_quad(
+                        ctx.painter,
+                        tex_id,
+                        r.translate(-shift_vec),
+                        angle,
+                        Color32::from_rgba_unmultiplied(255, 60, 60, (alpha * 120.0) as u8),
+                    );
+                    draw_textured_quad(
+                        ctx.painter,
+                        tex_id,
+                        r.translate(shift_vec),
+                        angle,
+                        Color32::from_rgba_unmultiplied(60, 180, 255, (alpha * 120.0) as u8),
+                    );
+                }
+                draw_textured_quad(ctx.painter, tex_id, r, angle, apply_tint(Color32::WHITE));
                 Some(r)
             } else {
-                // ファイル未指定または存在しない場合はプレースホルダを描画
                 let size = vec2(ctx.canvas.width(), ctx.canvas.height()) * zoom;
                 let r = Rect::from_center_size(center, size);
                 let corners = rotated_rect(r, angle);
-                fan(ctx.painter, center, &corners, with_alpha(Color32::from_rgb(60, 70, 90)));
+                fan(ctx.painter, center, &corners, apply_tint(Color32::from_rgb(60, 70, 90)));
                 ctx.painter.text(
                     center,
                     Align2::CENTER_CENTER,
                     format!("{}\n{}", src.name, obj.display_name()),
                     FontId::proportional((14.0 * zoom.max(0.5)).min(28.0)),
-                    with_alpha(Color32::LIGHT_GRAY),
+                    apply_tint(Color32::LIGHT_GRAY),
                 );
                 Some(r)
             }
@@ -348,21 +660,15 @@ fn draw_object(ctx: &DrawCtx, obj: &TimelineObject, rel: Frame, selected: bool) 
             let size = vec2(ctx.canvas.width(), ctx.canvas.height()) * zoom;
             let r = Rect::from_center_size(center, size);
             let corners = rotated_rect(r, angle);
-            fan(ctx.painter, center, &corners, with_alpha(Color32::from_rgb(60, 70, 90)));
+            fan(ctx.painter, center, &corners, apply_tint(Color32::from_rgb(60, 70, 90)));
             ctx.painter.text(
                 center,
                 Align2::CENTER_CENTER,
                 format!("{}\n{}", src.name, obj.display_name()),
                 FontId::proportional((14.0 * zoom.max(0.5)).min(28.0)),
-                with_alpha(Color32::LIGHT_GRAY),
+                apply_tint(Color32::LIGHT_GRAY),
             );
             Some(r)
-        }
-    };
-
-    if selected {
-        if let Some(b) = bounds {
-            ctx.painter.rect_stroke(b.expand(2.0), 0.0, Stroke::new(1.0_f32, Color32::from_rgb(255, 200, 0)));
         }
     }
 }
@@ -380,7 +686,7 @@ fn draw_textured_quad(painter: &egui::Painter, tex_id: egui::TextureId, rect: Re
     painter.add(Shape::mesh(mesh));
 }
 
-/// フィルタオブジェクトの簡易プレビュー（下位レイヤー全体に掛かる）。
+/// フィルタオブジェクトのプレビュー（下位レイヤー全体に掛かる：色調補正・32bit/64bit `.auf` フィルタ・シーンチェンジ等）。
 fn draw_filter_object(ctx: &DrawCtx, obj: &TimelineObject, rel: Frame) {
     let Some(src) = obj.source() else { return };
     if src.name == "色調補正" {
@@ -390,6 +696,20 @@ fn draw_filter_object(ctx: &DrawCtx, obj: &TimelineObject, rel: Frame) {
         } else {
             Color32::from_black_alpha((((100.0 - b) / 100.0).min(1.0) * 255.0) as u8)
         };
+        ctx.painter.rect_filled(ctx.canvas, 0.0, overlay);
+    } else if src.name.contains("グロー") || src.name.contains("発光") {
+        let strength = (src.eval("強さ", rel, 60.0) / 200.0).clamp(0.0, 1.0) as f32;
+        let overlay = Color32::from_rgba_unmultiplied(255, 245, 200, (strength * 95.0) as u8);
+        ctx.painter.rect_filled(ctx.canvas, 0.0, overlay);
+    } else if src.name.contains("色収差") || src.name.contains("色ズレ") {
+        let shift = (src.eval("ズレ幅", rel, 8.0) as f32 * ctx.scale).max(1.0);
+        let r_rect = Rect::from_min_max(ctx.canvas.left_top(), pos2(ctx.canvas.left() + shift * 2.0, ctx.canvas.bottom()));
+        let b_rect = Rect::from_min_max(pos2(ctx.canvas.right() - shift * 2.0, ctx.canvas.top()), ctx.canvas.right_bottom());
+        ctx.painter.rect_filled(r_rect, 0.0, Color32::from_rgba_unmultiplied(255, 40, 40, 90));
+        ctx.painter.rect_filled(b_rect, 0.0, Color32::from_rgba_unmultiplied(40, 180, 255, 90));
+    } else if src.name == "シーンチェンジ" {
+        let progress = (rel as f32 / (obj.length().max(1) as f32)).clamp(0.0, 1.0);
+        let overlay = Color32::from_black_alpha((progress * 220.0) as u8);
         ctx.painter.rect_filled(ctx.canvas, 0.0, overlay);
     }
 }

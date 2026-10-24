@@ -478,6 +478,15 @@ impl OpenAviApp {
                                             _ => Color32::from_rgb(180, 180, 195),
                                         };
                                         ui.label(RichText::new(p.status.summary()).color(color));
+                                        if !p.description.is_empty() {
+                                            ui.small(RichText::new(&p.description).weak());
+                                        }
+                                        if !p.exports.is_empty() {
+                                            ui.small(
+                                                RichText::new(format!("エクスポートシンボル: {}", p.exports.join(", ")))
+                                                    .color(Color32::from_rgb(147, 197, 253)),
+                                            );
+                                        }
                                         for e in &p.entries {
                                             let tracks: Vec<&str> = e.tracks.iter().map(|t| t.name.as_str()).collect();
                                             ui.small(format!(
