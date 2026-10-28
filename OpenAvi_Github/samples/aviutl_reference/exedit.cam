@@ -1,0 +1,127 @@
+@éËÇ‘ÇÍ
+--track0:êUïù,0,100,10
+--track1:äpìx,0,180,0.1,0.01
+--track2:ä‘äu,0,100,50
+cam = obj.getoption("camera_param")
+if( obj.track2 == 0 ) then
+	cam.tx = cam.tx+rand(-obj.track0,obj.track0,0)
+	cam.ty = cam.ty+rand(-obj.track0,obj.track0,1)
+	cam.tz = cam.tz+rand(-obj.track0,obj.track0,2)
+	cam.rz = cam.rz+rand(-obj.track1,obj.track1,3)
+else
+	t = obj.time*100/obj.track2
+	p = math.floor(t)
+	t = t-p
+	x0 = obj.rand(-1000,1000,0,p+0)/1000*obj.track0
+	x1 = obj.rand(-1000,1000,0,p+1)/1000*obj.track0
+	x2 = obj.rand(-1000,1000,0,p+2)/1000*obj.track0
+	x3 = obj.rand(-1000,1000,0,p+3)/1000*obj.track0
+	y0 = obj.rand(-1000,1000,1,p+0)/1000*obj.track0
+	y1 = obj.rand(-1000,1000,1,p+1)/1000*obj.track0
+	y2 = obj.rand(-1000,1000,1,p+2)/1000*obj.track0
+	y3 = obj.rand(-1000,1000,1,p+3)/1000*obj.track0
+	z0 = obj.rand(-1000,1000,2,p+0)/1000*obj.track0
+	z1 = obj.rand(-1000,1000,2,p+1)/1000*obj.track0
+	z2 = obj.rand(-1000,1000,2,p+2)/1000*obj.track0
+	z3 = obj.rand(-1000,1000,2,p+3)/1000*obj.track0
+	r0 = obj.rand(-1000,1000,3,p+0)/1000*obj.track1
+	r1 = obj.rand(-1000,1000,3,p+1)/1000*obj.track1
+	r2 = obj.rand(-1000,1000,3,p+2)/1000*obj.track1
+	r3 = obj.rand(-1000,1000,3,p+3)/1000*obj.track1
+	x,y,z = obj.interpolation(t,x0,y0,z0,x1,y1,z1,x2,y2,z2,x3,y3,z3)
+	cam.tx = cam.tx + x
+	cam.ty = cam.ty + y
+	cam.tz = cam.tz + z
+	r = obj.interpolation(t,r0,r1,r2,r3)
+	cam.rz = cam.rz + r
+end
+obj.setoption("camera_param",cam)
+
+@ñ⁄ïWíÜêSâÒì]
+--track0:êÖïΩâÒì],-3600,3600,0,0.01
+--track1:êÇíºâÒì],-3600,3600,0,0.01
+cam = obj.getoption("camera_param")
+x = cam.x-cam.tx
+y = cam.y-cam.ty
+z = cam.z-cam.tz
+-- êÖïΩâÒì]
+vx = cam.ux
+vy = cam.uy
+vz = cam.uz
+r = obj.track0*math.pi/180
+s = math.sin(r)
+c = math.cos(r)
+m00 = vx*vx*(1-c)+c
+m01 = vx*vy*(1-c)-vz*s
+m02 = vz*vx*(1-c)+vy*s
+m10 = vx*vy*(1-c)+vz*s
+m11 = vy*vy*(1-c)+c
+m12 = vy*vz*(1-c)-vx*s
+m20 = vz*vx*(1-c)-vy*s
+m21 = vy*vz*(1-c)+vx*s
+m22 = vz*vz*(1-c)+c
+x2 = m00*x+m01*y+m02*z
+y2 = m10*x+m11*y+m12*z
+z2 = m20*x+m21*y+m22*z
+-- êÇíºâÒì]
+l = math.sqrt(x2*x2+y2*y2+z2*z2)
+if( l == 0 ) then return end
+vx = x2/l
+vy = y2/l
+vz = z2/l
+x = vy*cam.uz-vz*cam.uy
+y = vz*cam.ux-vx*cam.uz
+z = vx*cam.uy-vy*cam.ux
+l = math.sqrt(x*x+y*y+z*z)
+if( l == 0 ) then return end
+vx = x/l
+vy = y/l
+vz = z/l
+r = obj.track1*math.pi/180
+s = math.sin(r)
+c = math.cos(r)
+m00 = vx*vx*(1-c)+c
+m01 = vx*vy*(1-c)-vz*s
+m02 = vz*vx*(1-c)+vy*s
+m10 = vx*vy*(1-c)+vz*s
+m11 = vy*vy*(1-c)+c
+m12 = vy*vz*(1-c)-vx*s
+m20 = vz*vx*(1-c)-vy*s
+m21 = vy*vz*(1-c)+vx*s
+m22 = vz*vz*(1-c)+c
+cam.x = cam.tx + m00*x2+m01*y2+m02*z2
+cam.y = cam.ty + m10*x2+m11*y2+m12*z2
+cam.z = cam.tz + m20*x2+m21*y2+m22*z2
+x = cam.ux
+y = cam.uy
+z = cam.uz
+cam.ux = m00*x+m01*y+m02*z
+cam.uy = m10*x+m11*y+m12*z
+cam.uz = m20*x+m21*y+m22*z
+obj.setoption("camera_param",cam)
+
+@ñ⁄ïWÉTÉCÉYå≈íËéãñÏäp
+--track0:ëùå∏íl,-120,120,0,0.01
+cam = obj.getoption("camera_param")
+x = cam.tx-cam.x
+y = cam.ty-cam.y
+z = cam.tz-cam.z
+d = cam.d;
+l = math.sqrt(x*x+y*y+z*z)
+if( l == 0 ) then return end
+x = x/l
+y = y/l
+z = z/l
+r = l/d
+p = math.atan(obj.screen_h/(d*2))*360/math.pi;-- åªç›ÇÃéãñÏäpåvéZ
+p = p + obj.track0
+if( p < 1 ) then p = 1 end
+if( p > 120 ) then p = 120 end
+d = obj.screen_h/(math.tan(p*math.pi/360)*2);
+l = r*d
+cam.x = cam.tx-l*x
+cam.y = cam.ty-l*y
+cam.z = cam.tz-l*z
+cam.d = d
+obj.setoption("camera_param",cam)
+

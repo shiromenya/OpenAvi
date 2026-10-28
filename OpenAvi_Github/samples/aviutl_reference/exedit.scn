@@ -1,0 +1,412 @@
+@発光
+--track0:明るさ,0,100,33
+t = obj.getvalue("scenechange")*2
+if( t > 1 ) then
+	t = 2-t
+	obj.load("framebuffer")
+end
+l = math.sqrt(obj.w*obj.w+obj.h*obj.h)/4
+obj.effect("色調補正","明るさ",100+obj.track0*t*t*t*t)
+obj.effect("発光","強さ",50*t*t*t*t,"拡散",l,"しきい値",0,"サイズ固定",1)
+obj.draw()
+
+@レンズブラー
+t = obj.getvalue("scenechange")*2
+if( t > 1 ) then
+	t = 2-t
+	obj.load("framebuffer")
+end
+t = t*t
+l = math.sqrt(obj.w*obj.w+obj.h*obj.h)/4
+obj.effect("レンズブラー","範囲",l*t)
+obj.draw()
+
+@ドア
+--check0:手前に開く,0
+t = obj.getvalue("scenechange")
+w = obj.w/2
+h = obj.h/2
+r = math.pi*t/2
+if( obj.check0 == false ) then
+	r = -r*1.5
+end
+x = math.cos(r)*w
+z = math.sin(r)*w
+obj.drawpoly(-w,-h,0,-w+x,-h,-z,-w+x,h,-z,-w,h,0 ,0,0,w  ,0,w  ,h+h,0,h+h)
+obj.drawpoly( w-x,-h,-z, w,-h,0, w,h,0, w-x,h,-z ,w,0,w+w,0,w+w,h+h,w,h+h)
+
+@起き上がる
+--track0:勢い,0,8,2
+obj.copybuffer("tmp","frm")
+obj.draw()
+obj.load("tempbuffer")
+t = 1-obj.getvalue("scenechange")
+if( t >= 0 ) then
+	n = obj.track0*2+1
+	if( n <= 1 ) then
+		t = t*t
+	elseif( t > 1-1/n ) then
+		t = 1-(1-t)*n
+	else
+		t = t*n/(n-1)
+		t = math.sin((t-1)*(n-1)*math.pi)*t*0.4/(1+(1-t)*3)
+	end
+	obj.rx = obj.rx - 90*t
+	obj.oy = obj.oy + obj.h*(1-math.cos(t*math.pi/2))/2
+	obj.oz = obj.oz + obj.h*math.sin(t*math.pi/2)/2
+end
+obj.draw()
+
+@リール回転
+--track0:回転数,-50,50,0,1
+--track1:ブラー,0,200,100
+--check0:横回転,0
+obj.setoption('antialias',0)
+t = obj.getvalue("scenechange")
+t = -math.cos(math.pi*t)
+b = 1-math.abs(t)
+b = 2*b*b*obj.track1/100/obj.totalframe
+if( t < 0 ) then
+	t = (t+1)*(t+1)-1
+else
+	t = 1-(1-t)*(1-t)
+end
+vx = obj.track0
+if( vx == 0 ) then
+	vx = obj.totaltime*2
+	if( obj.check0 ) then
+		vx = -vx
+	end
+end
+t = t*math.floor(math.abs(vx)+0.5)
+b = b*math.floor(math.abs(vx)+0.5)
+if( vx < 0 ) then
+	vx = -1
+else
+	vx = 1;
+end
+if( obj.check0 ) then
+	vy = 0
+else
+	vy = vx
+	vx = 0
+end
+x = math.fmod(t,1)
+if( x < 0 ) then
+	x = x+1
+end
+if( t >= 0 ) then
+	obj.load("framebuffer")
+	obj.draw(vx*x    *obj.w,vy*x    *obj.h,0)
+	obj.draw(vx*(x-1)*obj.w,vy*(x-1)*obj.h,0)
+elseif( t+1 >= 0 ) then
+	obj.copybuffer("tmp","frm")
+	obj.draw(vx*x    *obj.w,vy*x    *obj.h,0)
+	obj.load("tempbuffer")
+	obj.draw(vx*(x-1)*obj.w,vy*(x-1)*obj.h,0)
+else
+	obj.draw(vx*x    *obj.w,vy*x    *obj.h,0)
+	obj.draw(vx*(x-1)*obj.w,vy*(x-1)*obj.h,0)
+end
+if( obj.check0 ) then
+	obj.filter("ぼかし","縦横比",100,"範囲",b*obj.screen_w)
+else
+	obj.filter("ぼかし","縦横比",-100,"範囲",b*obj.screen_h)
+end
+
+@図形ワイプ
+--track0:サイズ,8,400,40,1
+--track1:方向,-360,360,-45
+--dialog:図形名/fig,fig="円";拡大率,zoom=150;角度,angle=0;回転速度,rot=0;ディレイ時間,delay=100;
+local dx={-0.30,0.30,0.33,-0.33}
+local dy={-0.33,0.33,-0.30,0.30}
+time = obj.getvalue("scenechange")
+zoom = zoom/100
+size = obj.track0
+if( size < 5 ) then
+	size = 5
+end
+obj.copybuffer("tmp","obj")
+obj.load("figure",fig,0xffffff,size)
+obj.setoption("drawtarget","tempbuffer")
+obj.setoption("blend","alpha_sub")
+w = math.ceil(obj.screen_w/size)
+h = math.ceil(obj.screen_h/size)
+a =  math.sin(math.pi*obj.track1/180)
+b = -math.cos(math.pi*obj.track1/180)
+if( math.abs(a) > math.abs(b) ) then
+	l = (w+math.abs(h*b/a))/2
+	l = math.abs(l/a)
+else
+	l = (h+math.abs(w*a/b))/2
+	l = math.abs(l/b)
+end
+for y=-h,h do
+	for x=-w,w do
+		d = (a*x+b*y)/math.sqrt(a*a+b*b)
+		t = time+(time*2+(d/l-1))*delay/100
+		if( t < 0 ) then
+			t = 0
+		elseif( t > 1 ) then
+			t = 1
+		end
+		r = angle+rot*t
+		obj.draw(x*size,y*size,0,t*zoom,1,0,0,r)
+
+	end
+end
+obj.load("tempbuffer")
+obj.setoption("drawtarget","framebuffer")
+obj.setoption("blend",0)
+obj.draw()
+
+@図形で隠す
+--track0:方向,-360,360,240
+--track1:拡大率,1,400,100
+--dialog:色/col,color=nil;図形名/fig,fig="円";角度,angle=0;回転速度,rot=0;数,num=100;拡大率,zoom=100;エッジ角度,edge_r=-45;エッジ幅,edge_w=50;エッジ高さ,edge_h=1.2;
+local dx={-0.30,0.30,0.33,-0.33}
+local dy={-0.33,0.33,-0.30,0.30}
+local ds={0,2,1,3}
+if( num < 4 ) then
+	num = 4
+end
+if( obj.track1 > 0 ) then
+	zoom = zoom*obj.track1/100
+end
+if( angle == nil ) then
+	angle = 0
+end
+if( rot == nil ) then
+	rot = 0
+end
+time = 2*obj.getvalue("scenechange")-1
+l = obj.totaltime*2
+r = math.pi*obj.track0/180
+v = math.sqrt(obj.screen_w*obj.screen_w+obj.screen_h*obj.screen_h)
+vx = v*math.sin(r)
+vy = -v*math.cos(r)
+if( time < 0 ) then
+	obj.draw()
+end
+c = color;
+if( c == nil ) then
+	c = 0xffffff
+end
+obj.load("figure",fig,c,v/4)
+obj.effect("凸エッジ","幅",v*edge_w/400,"角度",edge_r,"高さ",edge_h)
+for i=0,num do
+	c = (obj.rand(0,100,i,0)-50)/100
+	if( c < 0 ) then
+		c = math.floor(math.cos(math.pi*c)*255)*256 + math.floor(math.sin(math.pi*-c)*255)
+	else
+		c = math.floor(math.cos(math.pi*c)*255)*256 + math.floor(math.sin(math.pi*c)*255)*65536
+	end
+	if( color == nil ) then
+		obj.effect("単色化","color",c)
+	end
+	p = i/num
+	p = p*p
+	s = 1.5+p*l
+	if( i+4 > num ) then
+		z = 3*p
+		x = dx[num-i+1]*obj.screen_w
+		y = dy[num-i+1]*obj.screen_h
+		o = 0
+		s = s+ds[num-i+1]
+	else
+		z = 0.2+1.8*p*p
+		x = obj.rand(0,obj.screen_w,i,1000)-obj.screen_w/2
+		y = obj.rand(0,obj.screen_h,i,2000)-obj.screen_h/2
+		o = (obj.rand(0,100,i,3000)-50)/100
+	end
+	obj.draw(x+vx*s*(time+o),y+vy*s*(time+o),0,z*zoom/100,1,0,0,angle+rot*(time+o))
+end
+
+@図形で隠す(放射)
+--track0:拡大率,1,400,100
+--dialog:色/col,color=nil;図形名/fig,fig="円";角度,angle=0;回転速度,rot=0;数,num=100;速度,speed=100;エッジ角度,edge_r=-45;エッジ幅,edge_w=50;エッジ高さ,edge_h=1.2;
+time = obj.getvalue("scenechange")
+l = obj.totaltime
+v = math.sqrt(obj.screen_w*obj.screen_w+obj.screen_h*obj.screen_h)
+if( time < 0.5 ) then
+	obj.draw()
+end
+c = color;
+if( c == nil ) then
+	c = 0xffffff
+end
+s = speed*l/100;
+if( s < 1 ) then
+	s = 1;
+end
+num = num*l
+zoom = obj.track0/100
+obj.load("figure",fig,c,v/4)
+obj.effect("凸エッジ","幅",v*edge_w/400,"角度",edge_r,"高さ",edge_h)
+for i=0,num do
+	p = 1-i/num;
+	t = time*(s+1)-p*s
+	if( t > 0 and t < 1 ) then
+		c = (obj.rand(0,100,i,0)-50)/100
+		if( c < 0 ) then
+			c = math.floor(math.cos(math.pi*c)*255)*256 + math.floor(math.sin(math.pi*-c)*255)
+		else
+			c = math.floor(math.cos(math.pi*c)*255)*256 + math.floor(math.sin(math.pi*c)*255)*65536
+		end
+		if( color == nil ) then
+			obj.effect("単色化","color",c)
+		end
+		z = 0.4+1.1*math.sin(p*math.pi)
+		r = obj.rand(0,360,i,4000)*math.pi/180
+		vx =  v*math.sin(r)
+		vy = -v*math.cos(r)
+		obj.draw(vx*t,vy*t,0,z*zoom,1,0,0,angle+rot*t)
+	end
+end
+
+@砕け散る
+--track0:サイズ,0,200,50
+--dialog:中心X,ax=0;中心Y,ay=0;中心Z,az=0;速度,speed=100;重力,grav=100;時間差,delay=100;距離影響,impact=100;ランダム回転,spin=100;ランダム方向,diff=100;再生速度,step=1.0;
+local px={}
+local py={}
+local pz={}
+local pu={}
+local pv={}
+tm = step*1.6*obj.getvalue("scenechange")
+size = obj.track0
+size = size*obj.h/480
+grav = grav*obj.h/480
+grav = grav*6
+delay = delay*0.002
+impact = impact*0.1
+spin = math.floor(spin*10)
+diff = diff/80
+if( size < 10 ) then
+	size = 10
+end
+xl = obj.w
+yl = obj.h
+sp = speed*0.01*math.sqrt(impact)
+w = math.floor(xl/size)
+h = math.floor(yl/size)
+l = math.sqrt(xl*xl+yl*yl)
+if( w < 2 ) then
+	w = 2
+elseif( w > xl ) then
+	w = xl
+end
+if( h < 2 ) then
+	h = 2
+elseif( h > yl ) then
+	h = yl
+end
+pw = xl/w/2.3
+ph = yl/h/2.3
+for y=0,h-1 do
+	for x=0,w-1 do
+		-- 各頂点を計算
+		pu[0] = xl*x/w
+		pu[1] = xl*(x+1)/w
+		pu[2] = pu[1]
+		pu[3] = pu[0]
+		pv[0] = yl*y/h
+		pv[1] = pv[0]
+		pv[2] = yl*(y+1)/h
+		pv[3] = pv[2]
+		pu[0] = pu[0] + obj.rand(-pw,pw,x  ,y  )
+		pu[1] = pu[1] + obj.rand(-pw,pw,x+1,y  )
+		pu[2] = pu[2] + obj.rand(-pw,pw,x+1,y+1)
+		pu[3] = pu[3] + obj.rand(-pw,pw,x  ,y+1)
+		pv[0] = pv[0] + obj.rand(-ph,ph,x  ,y  +1000)
+		pv[1] = pv[1] + obj.rand(-ph,ph,x+1,y  +1000)
+		pv[2] = pv[2] + obj.rand(-ph,ph,x+1,y+1+1000)
+		pv[3] = pv[3] + obj.rand(-ph,ph,x  ,y+1+1000)
+		if( x == 0 ) then
+			pu[0] = 0
+			pu[3] = 0
+		elseif ( x == w-1 ) then
+			pu[1] = xl
+			pu[2] = xl
+		end
+		if( y == 0 ) then
+			pv[0] = 0
+			pv[1] = 0
+		elseif ( y == h-1 ) then
+			pv[2] = yl
+			pv[3] = yl
+		end
+		-- 基準の計算
+		gx = (pu[0]+pu[1]+pu[2]+pu[3])/4
+		gy = (pv[0]+pv[1]+pv[2]+pv[3])/4
+		gz = 0
+		cx = gx-xl/2
+		cy = gy-yl/2
+		cz = 0
+		vx = cx-ax
+		vy = cy-ay
+		vz = -az
+		v = math.sqrt(vx*vx+vy*vy+vz*vz)
+		-- 時間の計算
+		t = tm-v/l*delay
+		if( t < 0 ) then
+			t = 0
+			obj.setoption('antialias',0)
+		else
+			obj.setoption('antialias',1)
+		end
+		-- 回転を計算
+		xx = t*obj.rand(-spin,spin,x,y+2000)/100
+		yy = t*obj.rand(-spin,spin,x,y+3000)/100
+		zz = t*obj.rand(-spin,spin,x,y+4000)/100
+		sin_x = math.sin(xx);
+		cos_x = math.cos(xx);
+		sin_y = math.sin(yy);
+		cos_y = math.cos(yy);
+		sin_z = math.sin(zz);
+		cos_z = math.cos(zz);
+		m00 =  cos_y*cos_z
+		m01 = -cos_y*sin_z
+		m10 =  cos_x*sin_z +sin_x*cos_z*sin_y
+		m11 =  cos_x*cos_z -sin_x*sin_z*sin_y
+		m20 =  sin_x*sin_z -cos_x*cos_z*sin_y
+		m21 =  sin_x*cos_z +cos_x*sin_z*sin_y
+		for i=0,3 do
+			xx = pu[i]-gx
+			yy = pv[i]-gy
+			px[i] = m00*xx + m01*yy
+			py[i] = m10*xx + m11*yy
+			pz[i] = m20*xx + m21*yy
+		end
+		-- 表示座標を計算
+		v = 1/(1+v*v/(l*l)*impact)
+		vx = vx*v + obj.rand(-size,size,x,y+4000)*diff
+		vy = vy*v + obj.rand(-size,size,x,y+5000)*diff
+		vz = vz*v + obj.rand(-size,size,x,y+6000)*diff
+		cx = cx + t*vx*sp
+		cy = cy + t*vy*sp + t*t*grav
+		cz = cz + t*vz*sp
+		obj.drawpoly(px[0]+cx,py[0]+cy,pz[0]+cz,px[1]+cx,py[1]+cy,pz[1]+cz,px[2]+cx,py[2]+cy,pz[2]+cz,px[3]+cx,py[3]+cy,pz[3]+cz, pu[0],pv[0],pu[1],pv[1],pu[2],pv[2],pu[3],pv[3])
+	end
+end
+
+@ページめくり
+--track0:陰影,0,100,50
+--track1:奥行き,0,200,100
+t = obj.getvalue("scenechange")
+w = obj.w/2
+h = obj.h/2
+obj.copybuffer("tmp","frm")
+obj.drawpoly(0,-h,0,w,-h,0,w,h,0,0,h,0 ,w,0,w*2,0,w*2,h*2,w,h*2)
+z = math.sin(math.pi*t)*w*obj.track1/100
+x = math.cos(math.pi*t)*w
+l = 100-obj.track0*(1-math.abs(math.cos(math.pi*t)));
+if( t < 0.5 ) then
+	obj.effect("色調補正","輝度",l,"彩度",l)
+	obj.drawpoly(-x,-h,-z,0,-h,0,0,h,0,-x,h,-z ,0,0,w,0,w,h*2,0,h*2)
+else
+	obj.load("tempbuffer")
+	obj.effect("色調補正","輝度",l,"彩度",l)
+	obj.drawpoly(-x,-h,-z,0,-h,0,0,h,0,-x,h,-z ,w*2,0,w,0,w,h*2,w*2,h*2)
+end
+
+

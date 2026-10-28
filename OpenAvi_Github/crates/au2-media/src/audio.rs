@@ -210,10 +210,10 @@ impl AudioEngine {
             } else if !playing && st.playing {
                 st.seek_instant = None;
             } else if playing {
-                // 再生中に大きくシークまたはループバックした場合のみ再シーク
+                // 再生中に大きくシークまたはループバックした場合のみ再シーク（許容差を1.0秒に設定し、描画負荷によるwaveOutReset誤爆を防止）
                 if let Some(inst) = st.seek_instant {
                     let expected_sec = st.seek_start_sec + inst.elapsed().as_secs_f64();
-                    if (cur_sec - expected_sec).abs() > 0.25 {
+                    if (cur_sec - expected_sec).abs() > 1.0 {
                         st.seek_generation = st.seek_generation.wrapping_add(1);
                         st.seek_start_sec = cur_sec;
                         st.seek_instant = Some(Instant::now());
@@ -267,14 +267,15 @@ impl AudioEngine {
             return;
         }
 
-        // 1チャンク = 1024 サンプルフレーム (約 23.2ms) × 4 バッファ = 約 93ms の連続リングキュー
-        const CHUNK_FRAMES: usize = 1024;
-        const BUFFER_COUNT: usize = 4;
+        // 1チャンク = 2048 サンプルフレーム (約 46.4ms) × 8 バッファ = 約 370ms の極めて安定したリングキュー
+        const CHUNK_FRAMES: usize = 2048;
+        const BUFFER_COUNT: usize = 8;
         let mut raw_buffers: Vec<Vec<u8>> = vec![vec![0u8; CHUNK_FRAMES * (CHANNELS as usize) * 2]; BUFFER_COUNT];
         let mut hdrs: Vec<WAVEHDR> = Vec::with_capacity(BUFFER_COUNT);
+        let mut is_prepared: Vec<bool> = vec![false; BUFFER_COUNT];
 
         for buf in &mut raw_buffers {
-            let mut hdr = WAVEHDR {
+            let hdr = WAVEHDR {
                 lpData: buf.as_mut_ptr(),
                 dwBufferLength: buf.len() as u32,
                 dwBytesRecorded: 0,
@@ -284,9 +285,6 @@ impl AudioEngine {
                 lpNext: 0,
                 reserved: 0,
             };
-            unsafe {
-                let _ = waveOutPrepareHeader(hwave, &mut hdr, std::mem::size_of::<WAVEHDR>() as u32);
-            }
             hdrs.push(hdr);
         }
 
@@ -316,6 +314,14 @@ impl AudioEngine {
                     unsafe {
                         let _ = waveOutReset(hwave);
                     }
+                    for i in 0..BUFFER_COUNT {
+                        if is_prepared[i] {
+                            unsafe {
+                                let _ = waveOutUnprepareHeader(hwave, &mut hdrs[i], std::mem::size_of::<WAVEHDR>() as u32);
+                            }
+                            is_prepared[i] = false;
+                        }
+                    }
                     last_was_playing = false;
                 }
                 thread::sleep(Duration::from_millis(10));
@@ -326,6 +332,14 @@ impl AudioEngine {
                 unsafe {
                     let _ = waveOutReset(hwave);
                 }
+                for i in 0..BUFFER_COUNT {
+                    if is_prepared[i] {
+                        unsafe {
+                            let _ = waveOutUnprepareHeader(hwave, &mut hdrs[i], std::mem::size_of::<WAVEHDR>() as u32);
+                        }
+                        is_prepared[i] = false;
+                    }
+                }
                 local_generation = gen;
                 last_was_playing = true;
                 cursor_sample_frame = (seek_sec.max(0.0) * SAMPLE_RATE as f64).round() as usize;
@@ -333,13 +347,21 @@ impl AudioEngine {
             }
 
             // 現在対象としているバッファがまだ再生キューにある場合は少し待つ
-            if (hdrs[buf_idx].dwFlags & WHDR_INQUEUE) != 0 {
+            if is_prepared[buf_idx] && (hdrs[buf_idx].dwFlags & WHDR_INQUEUE) != 0 {
                 thread::sleep(Duration::from_millis(4));
                 continue;
             }
 
+            // すでに再生が完了したバッファは一度 unprepare して再初期化（Windows waveOut 仕様完全準拠）
+            if is_prepared[buf_idx] {
+                unsafe {
+                    let _ = waveOutUnprepareHeader(hwave, &mut hdrs[buf_idx], std::mem::size_of::<WAVEHDR>() as u32);
+                }
+                is_prepared[buf_idx] = false;
+            }
+
             // `cursor_sample_frame` から正確に `CHUNK_FRAMES` 分をミックスして書き込む
-            let mut mix_buf = [0.0f32; CHUNK_FRAMES * (CHANNELS as usize)];
+            let mut mix_buf = vec![0.0f32; CHUNK_FRAMES * (CHANNELS as usize)];
             let chunk_start_sec = cursor_sample_frame as f64 / SAMPLE_RATE as f64;
             let chunk_end_sec = (cursor_sample_frame + CHUNK_FRAMES) as f64 / SAMPLE_RATE as f64;
 
@@ -378,8 +400,22 @@ impl AudioEngine {
             }
 
             let hdr = &mut hdrs[buf_idx];
+            hdr.lpData = target_buf.as_mut_ptr();
+            hdr.dwBufferLength = target_buf.len() as u32;
+            hdr.dwBytesRecorded = 0;
+            hdr.dwFlags = 0;
+
             unsafe {
-                let _ = waveOutWrite(hwave, hdr, std::mem::size_of::<WAVEHDR>() as u32);
+                let prep_res = waveOutPrepareHeader(hwave, hdr, std::mem::size_of::<WAVEHDR>() as u32);
+                if prep_res == 0 {
+                    is_prepared[buf_idx] = true;
+                    let write_res = waveOutWrite(hwave, hdr, std::mem::size_of::<WAVEHDR>() as u32);
+                    if write_res != 0 {
+                        log::warn!("waveOutWrite error: {write_res}");
+                    }
+                } else {
+                    log::warn!("waveOutPrepareHeader error: {prep_res}");
+                }
             }
 
             cursor_sample_frame += CHUNK_FRAMES;
@@ -388,8 +424,10 @@ impl AudioEngine {
 
         unsafe {
             let _ = waveOutReset(hwave);
-            for mut hdr in hdrs {
-                let _ = waveOutUnprepareHeader(hwave, &mut hdr, std::mem::size_of::<WAVEHDR>() as u32);
+            for (i, hdr) in hdrs.iter_mut().enumerate() {
+                if is_prepared[i] {
+                    let _ = waveOutUnprepareHeader(hwave, hdr, std::mem::size_of::<WAVEHDR>() as u32);
+                }
             }
             let _ = waveOutClose(hwave);
         }

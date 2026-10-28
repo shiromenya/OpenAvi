@@ -105,6 +105,20 @@ powershell -ExecutionPolicy Bypass -File .\package-release.ps1 -SkipBuild
 
 ---
 
+## トラブルシューティング / FAQ
+
+**Q. 動画が映らない（ファイル名しか表示されない）／MP3 などの音が出ない**
+動画・音声のデコードには FFmpeg (`bin/ffmpeg.exe`) を使用します。Releases 配布の ZIP には同梱されています。
+FFmpeg が無い場合（古い版・ソース ZIP・自前ビルドなど）は、起動後に画面上部へ表示される **「⬇ FFmpeg を自動ダウンロード」** ボタンを押すと、`%LOCALAPPDATA%\OpenAvi\bin` に自動導入されます。手動で `ffmpeg.exe` / `ffprobe.exe` を `bin/` に置くか、PATH を通しても動作します。
+
+**Q. `install.bat` でフォルダが作られない**
+ZIP を **「すべて展開」してから** 展開先フォルダ内で実行してください（ZIP 内から直接実行すると失敗します）。インストール不要で、展開フォルダの `openavi.exe` を直接起動することもできます。
+
+**Q. 配布フォルダに `crates` フォルダがない**
+正常です。`crates/` はソースコードで、ビルド済みの配布 ZIP には含まれません（実行に不要です）。
+
+---
+
 ## ライセンス
 
 本ソフトウェアは [MIT License](LICENSE) の下で公開されています。

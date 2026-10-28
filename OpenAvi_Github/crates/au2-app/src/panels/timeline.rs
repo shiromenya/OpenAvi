@@ -534,6 +534,13 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     let hover_pos = resp.hover_pos();
     let mut hovered_clip: Option<(usize, ObjectId)> = None;
 
+    // 未検出メディアを持つオブジェクトの ID セットを事前抽出
+    let missing_obj_ids: std::collections::HashSet<ObjectId> = st
+        .check_missing_media()
+        .into_iter()
+        .map(|m| m.object_id)
+        .collect();
+
     for li in visible_rows.clone() {
         let layer = &st.scene.layers[li];
         let y = row_top(li);
@@ -553,9 +560,14 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                 }
             }
 
+            let is_missing = missing_obj_ids.contains(&obj.id);
             let selected = st.selected == Some(obj.id);
             let dimmed = !layer.visible || obj.source().is_some_and(|s| !s.enabled);
-            let mut base_color = category_color(obj.category());
+            let mut base_color = if is_missing {
+                Color32::from_rgb(180, 50, 50)
+            } else {
+                category_color(obj.category())
+            };
             if selected {
                 base_color = base_color.linear_multiply(1.3);
             }
@@ -620,12 +632,22 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                         FontId::proportional(11.0),
                         Color32::WHITE,
                     );
+                    let disp_text = if is_missing {
+                        format!("⚠ 未検出: {}", obj.display_name())
+                    } else {
+                        obj.display_name().to_string()
+                    };
+                    let text_color = if is_missing {
+                        Color32::from_rgb(255, 170, 170)
+                    } else {
+                        Color32::WHITE
+                    };
                     hp.text(
                         pos2(left_x + 15.0, cy),
                         Align2::LEFT_CENTER,
-                        obj.display_name(),
+                        disp_text,
                         FontId::proportional(11.0),
-                        Color32::WHITE,
+                        text_color,
                     );
                     let extra_fx = obj.effects.iter().skip(1).filter(|e| !is_render_or_playback(&e.kind)).count();
                     if extra_fx > 0 && text_clip.width() > 54.0 {
@@ -661,12 +683,22 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                 }
                 let text_clip = r.shrink2(vec2(3.0, 0.0)).intersect(lanes);
                 if text_clip.width() > 8.0 {
+                    let disp_text = if is_missing {
+                        format!("⚠ 未検出: {}", obj.display_name())
+                    } else {
+                        obj.display_name().to_string()
+                    };
+                    let text_color = if is_missing {
+                        Color32::from_rgb(255, 170, 170)
+                    } else {
+                        Color32::WHITE
+                    };
                     painter.with_clip_rect(text_clip).text(
                         pos2(r.left().max(lanes.left()) + 5.0, r.center().y),
                         Align2::LEFT_CENTER,
-                        obj.display_name(),
+                        disp_text,
                         FontId::proportional(12.0),
-                        Color32::WHITE,
+                        text_color,
                     );
                 }
             }
@@ -882,6 +914,32 @@ fn context_menu_ui(ui: &mut egui::Ui, st: &mut EditorState) {
 
     // 1. オブジェクト上で右クリックされた場合の操作メニュー
     if let Some(obj_id) = target.object_id {
+        let raw_file_info: Option<(String, bool)> = st.scene.find(obj_id).and_then(|(_, obj)| {
+            let src = obj.source()?;
+            let f = src.text("file")?;
+            let is_audio = src.kind == au2_core::EffectKind::AudioFile;
+            Some((f.to_string(), is_audio))
+        });
+        let media_file_info = raw_file_info.map(|(f, is_audio)| {
+            let is_missing = st.resolve_cached_path(&f).is_none();
+            (f, is_audio, is_missing)
+        });
+
+        if let Some((old_file, is_audio, is_missing)) = media_file_info {
+            let label = if is_missing {
+                egui::RichText::new("⚠ 未検出ファイルを割り当て (MP3/WAV/動画)...")
+                    .color(Color32::from_rgb(255, 100, 100))
+                    .strong()
+            } else {
+                egui::RichText::new("🎵 メディアファイルを再割り当て...")
+            };
+            if ui.button(label).clicked() {
+                ui.close_menu();
+                st.relink_media_dialog(Some(obj_id), &old_file, is_audio);
+            }
+            ui.separator();
+        }
+
         if ui.button("◆ 中間点を追加").clicked() {
             if let Some((_, obj)) = st.scene.find_mut(obj_id) {
                 if obj.add_midpoint(start) {

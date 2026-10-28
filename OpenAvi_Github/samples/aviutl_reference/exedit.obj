@@ -1,0 +1,955 @@
+@集中線
+--track0:濃さ,0,100,40
+--track1:速さ,0,100,25
+--track2:中心幅,0,500,100
+--color:0xffffff
+if( obj.screen_w < obj.screen_h ) then
+	l = obj.screen_w
+else
+	l = obj.screen_h
+end
+w = obj.track2
+if( w > l/2 ) then
+	w = l/2;
+end
+w = math.floor(w/2);
+obj.load("figure","四角形",color,l)
+obj.effect("ノイズ","速度Y",-obj.track1,"周期X",20,"周期Y",0.1,"しきい値",100-obj.track0)
+if( w > 0 ) then
+	obj.effect("クリッピング","上",w,"下",w)
+	obj.effect("ぼかし","範囲",w,"縦横比",-100)
+end
+obj.effect("極座標変換","中心幅",w*2)
+l = math.sqrt(obj.screen_w*obj.screen_w+obj.screen_h*obj.screen_h)
+r = obj.w*((l-w*2)/l);
+if( l > r*obj.zoom ) then
+	obj.zoom = obj.zoom*l/r
+end
+
+@走査線
+--track0:濃さ,0,100,40
+--track1:ライン幅,1,100,2
+--track2:間隔補正,-100,100,0
+--color:0x000000
+obj.load("figure","四角形",color,2)
+obj.effect()	;--	色くらいは変えられるように
+a = obj.track0/100
+l = obj.track1
+s = obj.track2
+if( l < 1 ) then
+	l = 1
+end
+if( l+s <= 0 ) then
+	s = -l
+end
+w = math.ceil(obj.screen_w/2)
+h = math.ceil(obj.screen_h/2)
+o = math.floor((l+s)/2)
+y = 0
+while( y < h ) do
+	obj.drawpoly(-w, y+o,0,w, y+o,0,w, y+l+o,0,-w, y+l+o,0, 0,0,1,0,1,1,0,1,a)
+	y = y+l*2+s;
+	obj.drawpoly(-w,-y+o,0,w,-y+o,0,w,-y+l+o,0,-w,-y+l+o,0, 0,0,1,0,1,1,0,1,a)
+end
+
+@カウンター
+--track0:初期値,-9999,9999,0
+--track1:速度,-1000,1000,1
+--track2:サイズ,1,256,34
+--track3:表示形式,0,7,0,1
+--dialog:フォント名,font="MS UI Gothic";文字色/col,col1=0xffffff;影・縁色/col,col2=0x000000;装飾タイプ,deco=0;
+sec = obj.track0+obj.time*obj.track1
+mode = math.floor(obj.track3)
+if( mode == 1 ) then
+	str = string.format("%02d",sec)
+elseif( mode == 2 ) then
+	str = string.format("%03d",sec)
+elseif( mode == 3 ) then
+	str = string.format("%04d",sec)
+elseif( mode == 4 ) then
+	sec = sec%(6000)
+	str = string.format("%02d:%02d",sec/60,sec%60)
+elseif( mode == 5 ) then
+	sec = sec%(6000)
+	str = string.format("%02d:%02d.%02d",sec/60,sec%60,(sec*100)%100)
+elseif( mode == 6 ) then
+	sec = sec + obj.track0*9
+	if( sec < 0 ) then
+		sec = sec%(86400)
+	else
+		sec = sec%(360000)	;-- 25時を表示できるように…
+	end
+	str = string.format("%02d:%02d:%02d",sec/3600,(sec/60)%60,sec%60)
+elseif( mode == 7 ) then
+	sec = sec + obj.track0*9
+	if( sec < 0 ) then
+		sec = sec%(86400)
+	else
+		sec = sec%(360000)
+	end
+	str = string.format("%02d:%02d:%02d.%02d",sec/3600,(sec/60)%60,sec%60,(sec*100)%100)
+else
+	str = string.format("%d",sec)
+end
+obj.setfont(font,obj.track2,deco,col1,col2)
+obj.load('text',str)
+
+@レンズフレア
+--track0:方向X,-2000,2000,350
+--track1:方向Y,-2000,2000,300
+--track2:サイズ,10,1000,230
+--dialog:光芒強さ,c_alp=0.5;虹輪強さ,r_alp=0.6;光輪強さ,l_alp=0.15;光芒長さ,c_len=1.3;光芒数,c_num=30;光芒拡大率,c_zoom=1.1;光輪拡大率,l_zoom=1.0;虹輪拡大率,r_zoom=1.2;虹輪開閉率,r_open=1.1;虹輪数,r_cnt=1;光芒変化速度,speed=0.2;点滅,blink=0.2;光芒色/col,f_col=0xffffff;形状/fig,f_fig="円";形状角度,f_rot=20;光輪ｽｸﾘｰﾝ合成/chk,l_blend=0;
+if( l_zoom == nil ) then
+	l_zoom = 1
+end
+if( f_rot == nil ) then
+	f_rot = 20
+end
+if( c_len == nil ) then
+	c_len = 1
+end
+if( c_num == nil ) then
+	c_num = 30
+end
+if( f_fig == nil or f_fig == "" ) then
+	f_fig = "円"
+end
+ox = obj.track0
+oy = obj.track1
+w = obj.track2
+h = 100 ;--Z座標もどきの最大
+al = math.max( obj.getvalue("alpha")*1.5-0.5,0)
+alpha = obj.rand(0,100)/100+(1-blink)
+if( alpha > 1 ) then
+	alpha = 1
+elseif( alpha < 0 ) then
+	alpha = 0
+end
+obj.setoption("blend",1)
+-- 光芒
+r = w/5*c_zoom*al
+a = 1
+obj.load("figure","円",f_col,r)
+obj.effect("ぼかし","範囲",r/2.5)
+for i=1,5 do
+	obj.drawpoly(-r,-r,0,r,-r,0,r,r,0,-r,r,0, 0,0,obj.w,0,obj.w,obj.h,0,obj.h, a)
+	r = r*2
+	a = a/2
+end
+if( c_num > 0 ) then
+	r = w*2.0*c_zoom*c_len
+	obj.load("figure","四角形",f_col,r)
+	obj.effect("ノイズ","type",2,"周期X",50,"周期Y",0,"しきい値",100-c_num,"速度Y",-speed)
+	obj.effect("境界ぼかし","範囲",r,"縦横比",-100)
+	obj.effect("クリッピング","上",r/2.5)
+	obj.effect("極座標変換")
+	r = r*al/2.5
+	obj.drawpoly(-r,-r,0,r,-r,0,r,r,0,-r,r,0, 0,0,obj.w,0,obj.w,obj.h,0,obj.h ,alpha*c_alp)
+end
+-- 虹輪
+if( l_blend == 1 ) then
+	obj.setoption("blend",4)
+end
+p_lst = {} ;-- 位置
+for i=1,r_cnt do
+	p_lst[i] = 100*i/(r_cnt+1)
+end
+r = w*0.66
+obj.load("figure","四角形",0x20ff20,r)
+obj.effect("ノイズ","type",3,"周期X",14.48,"周期Y",0,"強さ",80)
+obj.effect("グラデーション","color",0x2020ff,"no_color2",1,"中心Y",-r/9,"幅",r/2)
+obj.effect("グラデーション","color2",0xff2020,"no_color",1,"中心Y", r/6,"幅",r/2)
+obj.effect("境界ぼかし","範囲",r/2,"縦横比",-100)
+obj.effect("ぼかし","範囲",r/24,"サイズ固定",1)
+a = r_alp*alpha
+obj.setoption("culling",1)
+for i=1,#p_lst do
+	p = p_lst[i]
+	xs = ox*p/h
+	ys = oy*p/h
+	rs = w*p/h*r_zoom
+	p = p*1.2
+	xe = ox*p/h
+	ye = oy*p/h
+	re = w*p/h*r_zoom
+	re = re*r_open
+	n = 40
+	c = math.pi*2/n;
+	for j=0,n-1 do
+		x0 = rs*math.sin(j*c)+xs
+		y0 = rs*math.cos(j*c)+ys
+		x1 = rs*math.sin((j+1)*c)+xs
+		y1 = rs*math.cos((j+1)*c)+ys
+		x2 = re*math.sin((j+1)*c)+xe
+		y2 = re*math.cos((j+1)*c)+ye
+		x3 = re*math.sin(j*c)+xe
+		y3 = re*math.cos(j*c)+ye
+		obj.drawpoly(x0,y0,0,x1,y1,0,x2,y2,0,x3,y3,0, 0,0,obj.w,0,obj.w,obj.h,0,obj.h, a)
+	end
+end
+obj.setoption("culling",0)
+-- 光輪
+p_lst={ -20,   8,  18,  29,  40,  45,  56,  66,  68,  82,  85,  97, 113, 125, 130, 148, 168, 188, 192, 212, 242} ;-- 位置
+r_lst={ 100, 150,  36,  20,  11,  16,  12,   8,  28,  10,  11,  16,   8,   6,  17,  10,   6,  12,   4,   8,   6} ;-- 大きさ
+c_lst={ 0.4, 1.7, 0.9,   0, 1.5, 0.6, 1.4, 0.4, 1.0, 1.3, 0.6, 1.2,   0, 0.8, 1.4, 1.0, 0.2, 1.4, 0.8, 0.8, 0.2} ;-- 色 0.0～2.0
+obj.load("figure",f_fig,0xffffff,w/14+1)
+for i=1,#p_lst do
+	if( f_fig == "円" ) then
+		obj.aspect = -math.min(0.5,math.sqrt(ox*ox+oy*oy)*5/(h*w))
+		f_rot = math.atan2(ox,-oy)*180/math.pi
+	end
+	p = p_lst[i]
+	x = ox*p/h
+	y = oy*p/h
+	s = math.sin(obj.rz*math.pi/180)
+	c = math.cos(obj.rz*math.pi/180)
+	x,y = c*x-s*y,s*x+c*y
+	r = r_lst[i];
+	a = (16/r)+0.2
+	if( a > 1 ) then
+		a = 1;
+	end
+	a = a*l_alp*alpha
+	r = r*l_zoom*0.145;
+
+	c = c_lst[i];
+	col = math.floor((1-math.abs(c-1))*128)*256 + 127*(1+256+65536)
+	if( c < 1 ) then
+		col = col + math.floor((1-c)*128)
+	end
+	if( c > 1 ) then
+		col = col + math.floor((c-1)*128)*65536
+	end
+	obj.effect("単色化","color",col,"輝度を保持する",0)
+	obj.draw(x,y,0,r,a,0,0,f_rot)
+end
+obj.setoption("focus_mode","fixed_size")
+
+@雲
+--track0:速度,0,50,8
+--track1:方向,-180,180,0
+--track2:濃さ,0,100,50
+--track3:傾き,0,90,0
+--dialog:色/col,col=0xffffff;空気遠近,pers=100;形状,freq=4;変化速度,trans=1;解像度,res=30;位置補正,adjust=25
+w = obj.screen_w*4
+y = -obj.screen_h
+oy = obj.screen_h*adjust/100
+res = math.min(math.max(res,10),100)
+size = obj.screen_w*res/100
+freq = freq*25/res
+r = obj.track3*math.pi/180
+sin = math.sin(r)
+cos = math.cos(r)
+sz = w*3/4-cos*w
+ez = w*3/4+cos*w
+sy = y-sin*w
+ey = y+sin*w
+by = size*(100-pers)/100
+sp_y = obj.track0
+sp_x = sp_y/4
+r = obj.track1*math.pi/180
+sin = math.sin(r)
+cos = math.cos(r)
+cl = 100-obj.track2
+obj.load("figure","四角形",col,size)
+vx = cos*-sp_x-sin*sp_y*2
+vy = sin*-sp_x+cos*sp_y*2
+obj.effect("ノイズ","速度X",vx,"速度Y",vy,"変化速度",trans*1.5,"周期X",freq*2,"周期Y",freq*0.5,"しきい値",cl)
+obj.effect("斜めクリッピング","中心Y",by,"ぼかし",size)
+obj.oy = oy
+obj.drawpoly(-w,sy,sz,w,sy,sz,w,ey,ez,-w,ey,ez, 0,0,obj.w,0,obj.w,obj.h,0,obj.h)
+obj.load("figure","四角形",col,size)
+vx = cos*sp_x-sin*sp_y*1.5
+vy = sin*sp_x+cos*sp_y*1.5
+obj.effect("ノイズ","速度X",vx,"速度Y",vy,"変化速度",trans*2,"周期X",freq*1.5,"周期Y",freq*0.75,"しきい値",cl)
+obj.effect("斜めクリッピング","中心Y",by,"ぼかし",size)
+obj.oy = oy
+obj.drawpoly(-w,sy,sz,w,sy,sz,w,ey,ez,-w,ey,ez, 0,0,obj.w,0,obj.w,obj.h,0,obj.h)
+obj.load("figure","四角形",col,size)
+vx = -sin*sp_y
+vy = cos*sp_y
+obj.effect("ノイズ","速度X",vx,"速度Y",vy,"変化速度",trans,"周期X",freq,"周期Y",freq,"しきい値",cl)
+obj.effect("斜めクリッピング","中心Y",by,"ぼかし",size)
+obj.oy = oy
+obj.drawpoly(-w,sy,sz,w,sy,sz,w,ey,ez,-w,ey,ez, 0,0,obj.w,0,obj.w,obj.h,0,obj.h)
+
+@星
+--track0:個数,1,4000,1500
+--track1:速度,-50,50,6
+--track2:広がり,0,50,12
+--track3:奥行き,0,50,20
+--dialog:サイズ,size=20;色/col,col=0xddddff;図形名/fig,name="円";フェードイン時間,f_in=0.15;フェードアウト時間,f_out=0.15;
+obj.load("figure",name,col,size)
+obj.effect("ぼかし","範囲",size/3)
+obj.effect()
+obj.setoption("billboard",3)	;-- 一応カメラ制御でも使えるように
+n = obj.track0
+s = obj.track1
+v = obj.track2
+d = obj.track3
+w = obj.screen_w/2
+h = obj.screen_h/2
+ow = obj.w/2
+oh = obj.h/2
+if( d ~= 0 ) then
+	s = s/d
+end
+if( s ~= 0 ) then
+	f_in = f_in*s
+	f_out = f_out*s
+end
+s = s*obj.time
+for i=1,n do
+	t = s+i/n
+	p = math.floor(t)
+	t = t-p
+	z = (1-t)*d*1024-512
+	x = obj.rand(-w,w,i,p)*v
+	y = obj.rand(-h,h,i,p)*v
+	a = 1
+	if( t < f_in ) then
+		a = a*t/f_in
+	end
+	if( 1-t < f_out ) then
+		a = a*(1-t)/f_out
+	end
+	obj.drawpoly(x-ow,y-oh,z,x+ow,y-oh,z,x+ow,y+oh,z,x-ow,y+oh,z, 0,0,obj.w,0,obj.w,obj.h,0,obj.h, a)
+end
+
+@雪
+--track0:個数,1,4000,1500
+--track1:速度,-50,50,8
+--track2:方向,-50,50,0
+--track3:ゆらぎ幅,0,20,2
+--dialog:サイズ,size=15;色/col,col=0xffffff;図形名/fig,name="円";ゆらぎ速度,f_speed=2;奥行き,depth=15;単一オブジェクト化/chk,collect=0
+if( collect == nil ) then
+	collect = 0
+end
+if( collect == 1 ) then
+	obj.setoption("drawtarget","tempbuffer",obj.screen_w,obj.screen_h)
+end
+obj.load("figure",name,col,size)
+obj.effect("ぼかし","範囲",size/3)
+obj.effect()
+w = obj.screen_w/2 + obj.w
+h = obj.screen_h/2 + obj.h
+n = obj.track0
+s = obj.track1/10
+sp = obj.track2*obj.w
+s = s*obj.time
+fs = f_speed*obj.time*math.pi*2/10
+fw = obj.track3*obj.w
+xs = -w
+xe = w
+if( sp < 0 ) then
+	xe = xe-sp
+else
+	xs = xs-sp
+end
+for i=1,n do
+	sc = 1/(1+depth*i/n)
+	t = s*sc+obj.rand(0,1000,i,1000)/1000
+	p = math.floor(t)
+	t = t-p
+	r = fs+math.pi*2*obj.rand(0,1000,i,1001)/1000
+	x = obj.rand(xs,xe,i,p)+(math.sin(r)*fw+t*sp)*sc
+	y = t*h*2-h
+	obj.draw(x,y,0,sc);
+end
+if( collect == 1 ) then
+	obj.load("tempbuffer")
+end
+
+@雨
+--track0:個数,1,4000,1200
+--track1:速度,-10,10,4
+--track2:方向,-100,100,40
+--track3:拡散,0,100,20
+--dialog:長さ,size=4;色/col,col=0xffffff;奥行き,depth=10;単一オブジェクト化/chk,collect=0
+if( collect == nil ) then
+	collect = 0
+end
+if( collect == 1 ) then
+	obj.setoption("drawtarget","tempbuffer",obj.screen_w,obj.screen_h)
+end
+s = obj.track1
+size = size*(obj.screen_h*math.abs(s)/obj.framerate+1)
+obj.load("figure","四角形",col,size)
+obj.effect("クリッピング","右",size-2)
+obj.effect("ぼかし","範囲",1)
+obj.effect("境界ぼかし","範囲",size/2,"縦横比",-100)
+obj.effect()
+n = obj.track0
+sp = obj.track2*obj.w
+fw = obj.track3*obj.w
+s = s*obj.time
+w = obj.screen_w/2 + obj.w + fw
+h = obj.screen_h/2 + obj.h
+xs = -w
+xe = w
+if( sp < 0 ) then
+	xe = xe-sp
+else
+	xs = xs-sp
+end
+for i=1,n do
+	sc = 1/(1+depth*i/n)
+	t = s*sc+obj.rand(0,1000,i,1000)/1000
+	p = math.floor(t)
+	t = t-p
+	l = sp+fw*obj.rand(-1000,1000,i,1001)/1000
+	x = obj.rand(xs,xe,i,p)+t*l
+	y = t*h*2-h
+	r = math.atan2(l,-h*2)*180/math.pi
+	obj.draw(x,y,0,sc,1,0,0,r);
+end
+if( collect == 1 ) then
+	obj.load("tempbuffer")
+end
+
+@ランダム小物配置(カメラ制御)
+--track0:数,1,2000,1000
+--track1:範囲,0,8000,4000
+--track2:サイズ,1,1000,20
+--track3:形状,0,6,0,1
+--dialog:色/col,color=0xffffff;回転速度,rot=50;ランダム色/chk,rc=0;
+local f_name={"三角形","四角形","星型"}
+function rndcol( index )
+	local c
+	c = (obj.rand(0,100,index,0)-50)/100
+	if( c < 0 ) then
+		c = math.floor(math.cos(math.pi*c)*255)*256 + math.floor(math.sin(math.pi*-c)*255)
+	else
+		c = math.floor(math.cos(math.pi*c)*255)*256 + math.floor(math.sin(math.pi*c)*255)*65536
+	end
+	obj.effect("単色化","color",c)
+end
+if( rot == nil ) then rot = 50 end
+mode = math.floor(obj.track3)
+rot = rot*obj.time/10000
+range = obj.track1/1000
+if( mode >=1 and mode <= 3 ) then
+	obj.load("figure",f_name[mode],color,obj.track2)
+	obj.effect()
+	for i=0,obj.track0 do
+		if( rc == 1 ) then rndcol(i) end
+		x = obj.rand(-1000,1000,i,0)
+		y = obj.rand(-1000,1000,i,1)
+		z = obj.rand(-1000,1000,i,2)
+		rx = (x+obj.rand(0,10000,i,3)*rot)%360
+		ry = (y+obj.rand(0,10000,i,4)*rot)%360
+		rz = (z+obj.rand(0,10000,i,5)*rot)%360
+		x = x*range
+		y = y*range
+		z = z*range
+		obj.draw(x,y,z,1,1,rx,ry,rz);
+	end
+elseif( mode == 4 ) then
+	obj.load("figure","四角形",color,obj.track2)
+	obj.effect()
+	w = obj.w
+	h = obj.h
+	s = obj.track1/1000
+ 	for i=0,obj.track0 do
+		if( rc == 1 ) then rndcol(i) end
+		x = obj.rand(-1000,1000,i,0)
+		y = obj.rand(-1000,1000,i,1)
+		z = obj.rand(-1000,1000,i,2)
+		obj.rx = (x+obj.rand(0,10000,i,3)*rot)%360
+		obj.ry = (y+obj.rand(0,10000,i,4)*rot)%360
+		obj.rz = (z+obj.rand(0,10000,i,5)*rot)%360
+		obj.ox = x*range
+		obj.oy = y*range
+		obj.oz = z*range
+		s0 = obj.rand(1,100,i,6)/100
+		s1 = obj.rand(1,100,i,7)/100
+		s2 = obj.rand(1,100,i,8)/100
+		s3 = obj.rand(1,100,i,9)/100
+		obj.drawpoly(-w*s0,-h*s0,0,w*s1,-h*s1,0,w*s2,h*s2,0,-w*s3,h*s3,0, 0,0,obj.w,0,obj.w,obj.h,0,obj.h);
+	end
+elseif( mode == 5 ) then
+	obj.load("figure","四角形",color,1)
+	obj.effect()
+	obj.setoption("culling",1)
+	w = obj.w
+	h = obj.h
+	r = obj.track2/2
+	s = obj.track1/1000
+ 	for i=0,obj.track0 do
+		if( rc == 1 ) then rndcol(i) end
+		x = obj.rand(-1000,1000,i,0)
+		y = obj.rand(-1000,1000,i,1)
+		z = obj.rand(-1000,1000,i,2)
+		obj.rx = (x+obj.rand(0,10000,i,3)*rot)%360
+		obj.ry = (y+obj.rand(0,10000,i,4)*rot)%360
+		obj.rz = (z+obj.rand(0,10000,i,5)*rot)%360
+		obj.ox = x*range
+		obj.oy = y*range
+		obj.oz = z*range
+		obj.drawpoly(-r,-r,-r, r,-r,-r, r, r,-r,-r, r,-r, 0,0,obj.w,0,obj.w,obj.h,0,obj.h)
+		obj.drawpoly(-r, r, r, r, r, r, r,-r, r,-r,-r, r, 0,0,obj.w,0,obj.w,obj.h,0,obj.h)
+		obj.drawpoly( r,-r,-r, r,-r, r, r, r, r, r, r,-r, 0,0,obj.w,0,obj.w,obj.h,0,obj.h)
+		obj.drawpoly(-r,-r, r,-r,-r,-r,-r, r,-r,-r, r, r, 0,0,obj.w,0,obj.w,obj.h,0,obj.h)
+		obj.drawpoly(-r,-r,-r,-r,-r, r, r,-r, r, r,-r,-r, 0,0,obj.w,0,obj.w,obj.h,0,obj.h)
+		obj.drawpoly(-r, r, r,-r, r,-r, r, r,-r, r, r, r, 0,0,obj.w,0,obj.w,obj.h,0,obj.h)
+	end
+elseif( mode == 6 ) then
+	obj.load("figure","四角形",color,1)
+	obj.effect()
+	obj.setoption("culling",1)
+	w = obj.w
+	h = obj.h
+	r = obj.track2/4
+	r2 = r*4
+	s = obj.track1/1000
+ 	for i=0,obj.track0 do
+		if( rc == 1 ) then rndcol(i) end
+		x = obj.rand(-1000,1000,i,0)
+		y = obj.rand(-1000,1000,i,1)
+		z = obj.rand(-1000,1000,i,2)
+		obj.rx = x%360
+		obj.ry = y%360
+		obj.rz = (z+obj.rand(0,10000,i,5)*rot)%360
+		obj.ox = x*range
+		obj.oy = y*range
+		obj.oz = z*range
+		obj.drawpoly( r,-r, 0,-r,-r, 0, 0,0, r2,0,0, r2, 0,0,obj.w,0,obj.w,obj.h,0,obj.h)
+		obj.drawpoly(-r, r, 0, r, r, 0, 0,0, r2,0,0, r2, 0,0,obj.w,0,obj.w,obj.h,0,obj.h)
+		obj.drawpoly(-r,-r, 0,-r, r, 0, 0,0, r2,0,0, r2, 0,0,obj.w,0,obj.w,obj.h,0,obj.h)
+		obj.drawpoly( r, r, 0, r,-r, 0, 0,0, r2,0,0, r2, 0,0,obj.w,0,obj.w,obj.h,0,obj.h)
+		obj.drawpoly(-r,-r, 0, r,-r, 0, 0,0,-r2,0,0,-r2, 0,0,obj.w,0,obj.w,obj.h,0,obj.h)
+		obj.drawpoly( r, r, 0,-r, r, 0, 0,0,-r2,0,0,-r2, 0,0,obj.w,0,obj.w,obj.h,0,obj.h)
+		obj.drawpoly(-r, r, 0,-r,-r, 0, 0,0,-r2,0,0,-r2, 0,0,obj.w,0,obj.w,obj.h,0,obj.h)
+		obj.drawpoly( r,-r, 0, r, r, 0, 0,0,-r2,0,0,-r2, 0,0,obj.w,0,obj.w,obj.h,0,obj.h)
+	end
+else
+	obj.load("figure","円",color,obj.track2)
+	obj.effect("凸エッジ","幅",obj.track2/2,"高さ",0.8)
+	obj.setoption("billboard",3)
+	obj.effect()
+	for i=0,obj.track0 do
+		if( rc == 1 ) then rndcol(i) end
+		x = obj.rand(-1000,1000,i,0)*range
+		y = obj.rand(-1000,1000,i,1)*range
+		z = obj.rand(-1000,1000,i,2)*range
+		obj.draw(x,y,z)
+	end
+end
+
+@ライン(移動軌跡)
+--track0:ライン幅,2,200,16
+--track1:先端,0,500,48
+--track2:固定速度,0,100,0,0.01
+--track3:描画間隔,0,400,10
+--dialog:色/col,col=0xffffff;先端図形/fig,fig="三角形";先端位置補正(%),f_pos=70;最小間隔(dot),min_step=2;主線描画(%),c_size=100;補助描画(%),l_size=0;
+-- ライン部分
+base_x = obj.getvalue("x")
+base_y = obj.getvalue("y")
+obj.load("figure","円",col,obj.track0)
+obj.effect()
+obj.ox = obj.ox-base_x
+obj.oy = obj.oy-base_y
+w2 = obj.w/2
+h2 = obj.h/2
+t = 0;
+f = 0;
+l = 0;
+n = 1;
+d = 0
+s = w2*obj.track3/50;
+if( s < min_step ) then
+	s = min_step
+end
+if( s < 1 ) then
+	s = 1
+end
+ex = obj.getvalue("x",0)
+ey = obj.getvalue("y",0)
+x0 = ex
+y0 = ey
+while( t < obj.time ) do
+	r = s
+	while( r > 0 ) do
+		if( l <= 0 ) then
+			if( t >= obj.time ) then
+				break
+			end
+			sx = ex
+			sy = ey
+			f = f+1
+			t = f/obj.framerate
+			ex = obj.getvalue("x",t)
+			ey = obj.getvalue("y",t)
+			l = math.sqrt((ex-sx)*(ex-sx)+(ey-sy)*(ey-sy))
+			n = l
+		end
+		if( l > r ) then
+			d = d+r
+			l = l-r
+			r = 0;
+			x1 = ex+(sx-ex)*l/n
+			y1 = ey+(sy-ey)*l/n
+		else
+			d = d+l
+			r = r-l
+			l = 0
+			x1 = ex
+			y1 = ey
+		end
+		if( obj.track2 > 0 ) then
+			if( t >= obj.totaltime ) then
+				break
+			end
+			t = d/(obj.framerate*obj.track2)
+		elseif( l > 0 ) then
+			t = (f-l/n)/obj.framerate
+		end
+	end
+	if( c_size > 0 ) then
+		lx = w2*c_size/100
+		ly = w2*c_size/100
+		obj.drawpoly(x0-lx,y0-ly,0,x0+lx,y0-ly,0,x0+lx,y0+ly,0,x0-lx,y0+ly,0, 0,0,obj.w,0,obj.w,obj.h,0,obj.h)
+	end
+	if( l_size > 0 ) then
+		r = math.atan2(y1-y0,x0-x1)
+		lx = math.sin(r)*w2*l_size/100
+		ly = math.cos(r)*w2*l_size/100
+		obj.drawpoly(x0-lx,y0-ly,0,x0+lx,y0+ly,0,x1+lx,y1+ly,0,x1-lx,y1-ly,0, 0,h2,obj.w,h2,obj.w,h2,0,h2)
+	end
+	x0 = x1
+	y0 = y1
+end
+if( obj.track2 > 0 ) then
+	t = (f-l/n)/obj.framerate
+else 
+	t = obj.time;
+	x0 = base_x
+	y0 = base_y
+end
+obj.drawpoly(x0-w2,y0-h2,0,x0+w2,y0-h2,0,x0+w2,y0+h2,0,x0-w2,y0+h2,0, 0,0,obj.w,0,obj.w,obj.h,0,obj.h)
+obj.ox = obj.ox+base_x
+obj.oy = obj.oy+base_y
+-- 先端部分
+if( obj.track1 > 0 ) then
+	obj.load("figure",fig,col,obj.track1)
+	obj.effect()
+	obj.ox = obj.ox-base_x
+	obj.oy = obj.oy-base_y
+	r = 0
+	l = 4*4
+	s = t
+	e = t
+	t = 0.5/obj.framerate
+	while( s > 0 or e < obj.totaltime ) do
+		s = s-t
+		e = e+t
+		if( s < 0 ) then
+			s = 0
+		end
+		if( e > obj.totaltime ) then
+			e = obj.totaltime
+		end
+		x = obj.getvalue("x",s)-obj.getvalue("x",e)
+		y = obj.getvalue("y",s)-obj.getvalue("y",e)
+		if( math.sqrt(x*x+y*y) >= l ) then
+			r = math.atan2(x,y)
+			break
+		end
+	end
+	x0 = x0-math.sin(r)*obj.h*(f_pos-50)/100
+	y0 = y0-math.cos(r)*obj.h*(f_pos-50)/100
+	sx = math.sin(r)*obj.w/2
+	cx = math.cos(r)*obj.w/2
+	sy = math.sin(r)*obj.h/2
+	cy = math.cos(r)*obj.h/2
+	obj.drawpoly(x0-cx-sy,y0+sx-cy,0,x0+cx-sy,y0-sx-cy,0,x0+cx+sy,y0-sx+cy,0,x0-cx+sy,y0+sx+cy,0, 0,0,obj.w,0,obj.w,obj.h,0,obj.h)
+	obj.ox = obj.ox+base_x
+	obj.oy = obj.oy+base_y
+end
+obj.setoption("focus_mode","fixed_size")
+
+@扇型
+--track0:中心角,0,360,270
+--track1:中心基準,-100,100,0
+--track2:サイズ,0,2000,100
+--track3:ライン幅,0,2000,2000
+--color:0xffffff
+l = math.floor(obj.track2/2); -- ミラーの調整が整数なので…
+r = 180-obj.track0/2
+obj.load("figure","円",color,l*2,obj.track3)
+obj.effect("斜めクリッピング","角度",r)
+obj.effect("ミラー","境目調整",-l)
+obj.rz = 90+r*obj.track1/100
+
+@多角形
+--track0:ライン幅,2,100,20,1
+--track1:頂点数,2,16,3,1
+--track2:固定ｻｲｽﾞ,0,2000,0,1
+--track3:縦横比,-100,100,0
+--dialog:色/col,col=0xffffff;座標,pos={0,-150,130,75,-130,75};繰り返し描画数,r_num=nil;繰り返し分周,r_frq=nil;簡易塗り潰し/chk,fill=0;
+if( r_num == nil ) then r_num = 1 end
+if( r_num < 1 ) then r_num = 1 end
+if( r_num > 100 ) then r_num = 100 end
+if( r_frq == nil ) then r_frq = 1 end
+if( r_frq < 1 ) then r_frq = 1 end
+
+n = obj.track1
+l = math.floor(obj.track0)/2
+if( obj.track2 > 0 ) then
+	-- 固定座標
+	w = obj.track2/2
+	for i=0,n-1 do
+		r = i*math.pi*2/n
+		if( n == 4 ) then r = r+math.pi/4 end
+		pos[i*2+1] =  math.sin(r)*w
+		pos[i*2+2] = -math.cos(r)*w
+	end
+else
+	-- 任意座標
+	obj.setanchor("pos",n,"loop");
+end
+-- 縦横比変更
+if( obj.track3 < 0 ) then
+	dy = 1+obj.track3/100
+	for i=0,n-1 do
+		pos[i*2+2] = pos[i*2+2]*dy
+	end
+elseif( obj.track3 > 0 ) then
+	dx = 1-obj.track3/100
+	for i=0,n-1 do
+		pos[i*2+1] = pos[i*2+1]*dx
+	end
+end
+-- 仮想バッファサイズ計算
+w = 0
+h = 0
+for i=0,n-1 do
+	dx = math.ceil(math.abs(pos[i*2+1])+l+1)
+	dy = math.ceil(math.abs(pos[i*2+2])+l+1)
+	if( w < dx ) then w = dx end
+	if( h < dy ) then h = dy end
+end
+obj.setoption("drawtarget","tempbuffer",w*2,h*2)
+obj.load("figure","四角形",col,1)
+-- 塗り潰し(凸多角形以外は駄目かも)
+if( fill == 1 ) then
+	obj.setoption("blend","alpha_add")
+	dx = 0
+	dy = 0
+	for i=0,n-1 do
+		dx = dx+pos[i*2+1]
+		dy = dy+pos[i*2+2]
+	end
+	dx = dx/n
+	dy = dy/n
+	x0 = pos[(n-1)*2+1]
+	y0 = pos[(n-1)*2+2]
+	for i=0,n-1 do
+		x1 = pos[i*2+1]
+		y1 = pos[i*2+2]
+		obj.drawpoly(x0,y0,0,x1,y1,0,dx,dy,0,dx,dy,0)
+		x0 = x1
+		y0 = y1
+	end
+end
+-- ライン描画
+obj.setoption("blend","alpha_mix")
+x0 = pos[(n-1)*2+1]
+y0 = pos[(n-1)*2+2]
+for i=0,n-1 do
+	x1 = pos[i*2+1]
+	y1 = pos[i*2+2]
+	r = math.atan2(y0-y1,x1-x0)
+	dx = math.sin(r)*l
+	dy = math.cos(r)*l
+	obj.drawpoly(x0-dx,y0-dy,0,x1-dx,y1-dy,0,x1+dx,y1+dy,0,x0+dx,y0+dy,0)
+	x0 = x1
+	y0 = y1
+end
+-- 頂点描画
+obj.load("figure","円",col,l*8)
+for i=0,n-1 do
+	x0 = pos[i*2+1]
+	y0 = pos[i*2+2]
+	obj.drawpoly(x0-l,y0-l,0,x0+l,y0-l,0,x0+l,y0+l,0,x0-l,y0+l,0)
+end
+obj.setoption("blend",0)
+obj.load("tempbuffer")
+-- 繰り返し描画
+if( r_num > 1 ) then
+	w = math.ceil(math.sqrt(w*w+h*h))
+	h = w
+	obj.setoption("dst","tmp",w*2,h*2)
+	for i=0,r_num-1 do
+		obj.draw(0,0,0,1,1,0,0,i*360/(r_num*r_frq))
+	end
+	obj.load("tempbuffer")
+end
+
+@周辺ボケ光量
+--track0:ボケ,0,200,60
+--track1:光量,0,200,90
+--track2:半径,0,200,100
+--track3:境界,0,200,150
+--check0:色ずれ,0
+--dialog:縦横比補正/chk,adjust=0;光の強さ,bokeh=8;色ずれ量,colshf=50;
+ox = obj.getvalue("x")
+oy = obj.getvalue("y")
+obj.load("framebuffer")
+w,h = obj.getpixel()
+if( adjust == 0 ) then
+	l = (w+h)/2
+	a = 0
+elseif( w > h ) then
+	l = w
+	a = h/w-1
+else
+	l = h
+	a = 1-w/h
+end
+r = l*obj.track2/100
+lumin = obj.track1
+range = math.sqrt(w*w+h*h)*obj.track0/10000
+if( range > 0 ) then
+	if( obj.check0 ) then
+		if( colshf == nil ) then
+			colshf = 50
+		end
+		colshf = range*colshf/100;
+		if( colshf < 1 ) then
+			colshf = 1
+		end
+		obj.effect("領域拡張","左",colshf,"右",colshf,"塗りつぶし",1)
+		obj.effect("色ずれ","サイズ固定",1,"ずれ幅",colshf,"角度",90)
+	end
+	obj.effect("ぼかし","サイズ固定",1,"範囲",range,"光の強さ",bokeh)
+end
+if( lumin ~= 100 ) then
+	obj.effect("色調補正","明るさ",lumin)
+end
+obj.effect("マスク","type",1,"マスクの反転",1,"X",ox,"Y",oy,"サイズ",r,"縦横比",a*100,"ぼかし",l*obj.track3/400)
+obj.ox = obj.ox-ox
+obj.oy = obj.oy-oy
+
+@フレア
+--track0:サイズ,10,1000,300
+--track1:光芒長さ,0,200,85
+--track2:光芒数,0,100,35
+--track3:水平光芒,0,2000,800
+--dialog:光芒強さ,c_alp=0.5;光芒変化速度,speed=0.2;点滅,blink=0.1;水平光芒高さ,h_len=0.1;水平光芒数,h_num=1;光芒色/col,f_col=0x9999ff;
+if( c_alp == nil ) then
+	c_alp = 0.5
+end
+if( h_num == nil ) then
+	h_num = 1
+end
+if( h_num > 8 ) then
+	h_num = 8
+end
+w = obj.track0
+al = math.max(obj.getvalue("alpha")*1.5-0.5,0)
+zm = obj.getvalue("zoom")/100
+alpha = obj.rand(0,100)/100+(1-blink)
+if( alpha > 1 ) then
+	alpha = 1
+elseif( alpha < 0 ) then
+	alpha = 0
+end
+obj.setoption("blend",1)
+r = w/5
+a = 1
+obj.load("figure","円",f_col,r)
+obj.effect("ぼかし","範囲",r/2.5)
+r = r*al*zm
+for i=1,5 do
+	obj.drawpoly(-r,-r,0,r,-r,0,r,r,0,-r,r,0, 0,0,obj.w,0,obj.w,obj.h,0,obj.h, a)
+	r = r*2
+	a = a/2
+end
+if( obj.track2 > 0 ) then
+	r = w*2*obj.track1/100
+	obj.load("figure","四角形",f_col,r)
+	obj.effect("ノイズ","type",2,"周期X",50,"周期Y",0,"しきい値",100-obj.track2,"速度Y",-speed)
+	obj.effect("境界ぼかし","範囲",r,"縦横比",-100)
+	obj.effect("クリッピング","上",r/2.5)
+	obj.effect("極座標変換")
+	r = r/2.5*al*zm
+	obj.drawpoly(-r,-r,0,r,-r,0,r,r,0,-r,r,0, 0,0,obj.w,0,obj.w,obj.h,0,obj.h ,alpha*c_alp)
+end
+if( obj.track3 > 0 ) then
+	l = obj.track3
+	r = w*h_len/4*al
+	obj.load("figure","円",f_col,r)
+	obj.effect("ぼかし","範囲",r/2.5)
+	r = r*zm
+	for j=1,h_num do
+		a = alpha
+		if( h_num == 1 ) then
+			xr = 0
+			yr = r
+			xl = l
+			yl = 0
+		else
+			s = math.sin(j*math.pi/h_num)
+			c = math.cos(j*math.pi/h_num)
+			xr = c*r
+			yr = s*r
+			xl = -s*l
+			yl = c*l
+		end
+		for i=1,3 do
+			obj.drawpoly(-xr-xl,-yr-yl,0,xr-xl,yr-yl,0,xr+xl,yr+yl,0,-xr+xl,-yr+yl,0, 0,0,obj.w,0,obj.w,obj.h,0,obj.h ,a)
+			a = a/2
+			xr = xr*2
+			yr = yr*2
+		end
+	end
+end
+obj.setoption("focus_mode","fixed_size")
+
+@水面
+--track0:速度,0,100,5
+--track1:方向,-180,180,-120
+--track2:波紋,0,100,30
+--track3:傾き,0,90,0
+--dialog:色/col,col=0x005ab4;波紋幅,hw=5;波紋位置,cl=300;波紋速度,hs=20;水平境界ぼかし,hb=5;解像度,res=50;位置補正,adjust=25
+w = obj.screen_w*4
+y = obj.screen_h
+oy = -obj.screen_h*adjust/100
+res = math.min(math.max(res,10),100)
+size = obj.screen_w*res/100
+freq = 50/res
+r = obj.track3*math.pi/180
+hh = obj.track2/2
+sin = math.sin(r)
+cos = math.cos(r)
+sz = w*3/4-cos*w
+ez = w*3/4+cos*w
+sy = y+sin*w
+ey = y-sin*w
+sp = obj.track0/10
+r = obj.track1*math.pi/180
+sin = math.sin(r)
+cos = math.cos(r)
+vx = -sin*sp
+vy =  cos*sp
+cx = -sin*size*cl/100
+cy =  cos*size*cl/100
+lw = size/80
+lh = size/4
+obj.load("figure","四角形",col,size)
+obj.effect("ノイズ","強さ",120,"速度X",vx/2,"速度Y",vy/2,"変化速度",4,"周期X",freq,"周期Y",freq,"しきい値",0,"type",1,"mode",1)
+obj.effect("ラスター","横幅",lw,"高さ",lh,"周期",1,"ランダム振幅",1)
+obj.effect("ラスター","横幅",lw,"高さ",lh,"周期",1,"縦ラスター",1,"ランダム振幅",1)
+obj.effect("斜めクリッピング","中心Y",size/2-hb,"ぼかし",hb)
+obj.oy = oy
+obj.drawpoly(-w,sy,sz,w,sy,sz,w,ey,ez,-w,ey,ez, 0,0,obj.w,0,obj.w,obj.h,0,obj.h)
+obj.load("figure","四角形",0xffffff,size)
+obj.effect("ノイズ","強さ",160,"速度X",vx,"速度Y",vy,"変化速度",10,"周期X",freq,"周期Y",freq,"しきい値",0,"type",1)
+obj.effect("波紋","中心X",cx,"中心Y",cy,"幅",hw,"高さ",hh,"速度",(sp+2)*hs)
+obj.effect("ラスター","横幅",lw,"高さ",lh,"周期",1,"縦ラスター",1,"ランダム振幅",1)
+obj.effect("斜めクリッピング","中心Y",size/2-hb,"ぼかし",hb)
+obj.oy = oy
+obj.drawpoly(-w,sy,sz,w,sy,sz,w,ey,ez,-w,ey,ez, 0,0,obj.w,0,obj.w,obj.h,0,obj.h)
+
+

@@ -26,6 +26,22 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
         .flat_map(|p| p.entries.iter().cloned().map(move |e| (p.kind, e)))
         .collect();
 
+    // 対象オブジェクトの file パラメータを取得＆事前解決
+    let current_file_info: Option<(String, Option<std::path::PathBuf>, bool)> = {
+        let raw = if let Some((_, obj)) = st.scene.find_mut(id) {
+            obj.source().and_then(|s| s.text("file")).map(|f| {
+                let is_audio = obj.source().map_or(false, |s| s.kind == EffectKind::AudioFile);
+                (f.to_string(), is_audio)
+            })
+        } else {
+            None
+        };
+        raw.map(|(f, is_audio)| {
+            let res = st.resolve_cached_path(&f);
+            (f, res, is_audio)
+        })
+    };
+
     let Some((layer, obj)) = st.scene.find_mut(id) else {
         st.selected = None;
         return;
@@ -36,6 +52,8 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     let seg = keys.partition_point(|&k| k <= rel).saturating_sub(1).min(keys.len().saturating_sub(2));
 
     let mut pending_effect: Option<Effect> = None;
+    let mut pending_relink: Option<(String, bool)> = None;
+    let mut file_changed_flag = false;
 
     egui::Frame::none()
         .fill(Color32::from_rgb(24, 26, 33))
@@ -167,25 +185,49 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                                     .changed(),
                                 ParamValue::Text(s) if key == "file" => {
                                     let mut file_changed = false;
-                                    ui.horizontal(|ui| {
-                                        file_changed |= ui.add(TextEdit::singleline(s).desired_width(150.0)).changed();
-                                        if ui.button("参照...").clicked() {
-                                            if let Some(p) = rfd::FileDialog::new()
-                                                .add_filter(
-                                                    "メディアファイル",
-                                                    &[
-                                                        "mp4", "avi", "mov", "mkv", "webm", "wmv", "png", "jpg",
-                                                        "jpeg", "bmp", "webp", "gif", "wav", "mp3", "ogg", "flac",
-                                                    ],
-                                                )
-                                                .add_filter("すべてのファイル", &["*"])
-                                                .pick_file()
-                                            {
-                                                *s = p.to_string_lossy().into_owned();
-                                                file_changed = true;
+                                    let resolved_info = current_file_info.as_ref().filter(|(f, _, _)| f == s);
+                                    let is_missing = !s.trim().is_empty()
+                                        && resolved_info.map_or(false, |(_, res, _)| res.is_none());
+                                    let is_audio = resolved_info.map_or(false, |(_, _, is_aud)| *is_aud);
+
+                                    ui.vertical(|ui| {
+                                        ui.horizontal(|ui| {
+                                            file_changed |= ui.add(TextEdit::singleline(s).desired_width(150.0)).changed();
+                                            if ui.button("参照...").clicked() {
+                                                if let Some(p) = rfd::FileDialog::new()
+                                                    .add_filter(
+                                                        "メディアファイル",
+                                                        &[
+                                                            "mp4", "avi", "mov", "mkv", "webm", "wmv", "png", "jpg",
+                                                            "jpeg", "bmp", "webp", "gif", "wav", "mp3", "ogg", "flac", "m4a",
+                                                        ],
+                                                    )
+                                                    .add_filter("すべてのファイル", &["*"])
+                                                    .pick_file()
+                                                {
+                                                    *s = p.to_string_lossy().into_owned();
+                                                    file_changed = true;
+                                                }
                                             }
+                                        });
+
+                                        if is_missing {
+                                            ui.horizontal(|ui| {
+                                                ui.colored_label(Color32::from_rgb(255, 90, 90), "⚠ ファイルが見つかりません（リンク切れ）");
+                                                if ui.button("🎵 手元のファイルを割り当てる...").clicked() {
+                                                    pending_relink = Some((s.clone(), is_audio));
+                                                }
+                                            });
+                                        } else if let Some((_, Some(resolved_path), _)) = resolved_info {
+                                            ui.colored_label(
+                                                Color32::from_rgb(110, 220, 110),
+                                                format!("✓ 検出: {}", resolved_path.file_name().and_then(|n| n.to_str()).unwrap_or("")),
+                                            );
                                         }
                                     });
+                                    if file_changed {
+                                        file_changed_flag = true;
+                                    }
                                     file_changed
                                 }
                                 ParamValue::Text(s) => ui.add(TextEdit::singleline(s).desired_width(180.0)).changed(),
@@ -196,6 +238,16 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                 });
         }
     });
+
+    if let Some((old_p, is_audio)) = pending_relink {
+        st.relink_media_dialog(Some(id), &old_p, is_audio);
+        changed = true;
+    }
+
+    if file_changed_flag {
+        st.invalidate_media_cache();
+    }
+
     if changed {
         st.dirty = true;
     }

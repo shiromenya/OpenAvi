@@ -130,6 +130,18 @@ impl MediaCache {
         self.ffmpeg_bin.is_some()
     }
 
+    /// FFmpeg を再探索し、検出できた場合は失敗キャッシュを破棄して動画・音声を再デコード可能にします。
+    /// （アプリ内からの自動ダウンロード完了後などに呼び出します）
+    pub fn reload_ffmpeg(&mut self) -> bool {
+        let (ffmpeg_bin, ffprobe_bin) = locate_ffmpeg_tools();
+        self.ffmpeg_bin = ffmpeg_bin;
+        self.ffprobe_bin = ffprobe_bin;
+        self.assets.retain(|_, a| !matches!(a, CachedAsset::Failed));
+        self.metadata_cache.clear();
+        self.audio_cache.retain(|_, v| v.is_some());
+        self.ffmpeg_bin.is_some()
+    }
+
     /// メディアのメタデータ（解像度・長さ・ストリーム有無）を取得します（キャッシュ対応）。
     pub fn get_metadata(&mut self, path: &Path) -> MediaMetadata {
         if let Some(meta) = self.metadata_cache.get(path) {
@@ -154,6 +166,29 @@ impl MediaCache {
                         duration_sec: 5.0,
                         fps: 30.0,
                         has_audio: false,
+                        has_video: false,
+                    }
+                }
+            }
+            Some(MediaKind::Audio) => {
+                if let Some(probe) = &self.ffprobe_bin {
+                    let mut meta = probe_media_metadata(probe, path).unwrap_or(MediaMetadata {
+                        width: 0,
+                        height: 0,
+                        duration_sec: 180.0,
+                        fps: 30.0,
+                        has_audio: true,
+                        has_video: false,
+                    });
+                    meta.has_audio = true;
+                    meta
+                } else {
+                    MediaMetadata {
+                        width: 0,
+                        height: 0,
+                        duration_sec: 180.0,
+                        fps: 30.0,
+                        has_audio: true,
                         has_video: false,
                     }
                 }
@@ -561,8 +596,119 @@ fn load_gif_or_static(path: &Path) -> CachedAsset {
     load_static_image(path)
 }
 
+/// アプリ内ダウンロードした FFmpeg の配置先 (`%LOCALAPPDATA%\OpenAvi\bin`)。
+/// インストール先が書き込み不可でも導入できるようユーザー領域を使います。
+pub fn user_ffmpeg_dir() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join("OpenAvi").join("bin"))
+}
+
+/// FFmpeg (Windows x64 essentials ビルド) の配布 URL。
+pub const FFMPEG_DOWNLOAD_URL: &str = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
+
+/// FFmpeg / FFprobe をダウンロードして [`user_ffmpeg_dir`] に展開します（ブロッキング。別スレッドから呼び出すこと）。
+/// 成功時は配置先ディレクトリを返します。
+pub fn download_ffmpeg_blocking() -> Result<PathBuf, String> {
+    let dest = user_ffmpeg_dir().ok_or_else(|| "LOCALAPPDATA が取得できません".to_string())?;
+    std::fs::create_dir_all(&dest).map_err(|e| format!("配置先を作成できません: {e}"))?;
+
+    let work = std::env::temp_dir().join("openavi-ffmpeg-download");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).map_err(|e| format!("作業フォルダを作成できません: {e}"))?;
+    let zip = work.join("ffmpeg.zip");
+    let extract = work.join("extract");
+
+    let q = |p: &Path| p.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; \
+         [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; \
+         Invoke-WebRequest -Uri '{url}' -OutFile '{zip}' -UseBasicParsing; \
+         Expand-Archive -Path '{zip}' -DestinationPath '{extract}' -Force; \
+         $f=Get-ChildItem -Path '{extract}' -Recurse -Filter ffmpeg.exe | Select-Object -First 1; \
+         $p=Get-ChildItem -Path '{extract}' -Recurse -Filter ffprobe.exe | Select-Object -First 1; \
+         if(-not $f){{ throw 'ffmpeg.exe not found in archive' }}; \
+         Copy-Item $f.FullName '{dest}\\ffmpeg.exe' -Force; \
+         if($p){{ Copy-Item $p.FullName '{dest}\\ffprobe.exe' -Force }}",
+        url = FFMPEG_DOWNLOAD_URL,
+        zip = q(&zip),
+        extract = q(&extract),
+        dest = q(&dest),
+    );
+
+    let mut cmd = Command::new("powershell");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let output = cmd
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script])
+        .output()
+        .map_err(|e| format!("PowerShell を起動できません: {e}"))?;
+    let _ = std::fs::remove_dir_all(&work);
+
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("ダウンロードに失敗しました: {}", err.trim()));
+    }
+    if !dest.join("ffmpeg.exe").is_file() {
+        return Err("ffmpeg.exe を配置できませんでした".to_string());
+    }
+    Ok(dest)
+}
+
 fn locate_ffmpeg_tools() -> (Option<PathBuf>, Option<PathBuf>) {
-    // 1. PATH から検索
+    // 探索するディレクトリ候補リスト
+    let mut search_dirs = Vec::new();
+
+    // 1. 実行ファイル (openavi.exe) の親ディレクトリおよび bin サブディレクトリ (ポータブル同梱を最優先)
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            search_dirs.push(exe_dir.to_path_buf());
+            search_dirs.push(exe_dir.join("bin"));
+            search_dirs.push(exe_dir.join("tools"));
+        }
+    }
+
+    // 1.5 アプリ内ダウンロードで導入された FFmpeg (%LOCALAPPDATA%\OpenAvi\bin)
+    if let Some(dir) = user_ffmpeg_dir() {
+        search_dirs.push(dir);
+    }
+
+    // 2. カレントワーキングディレクトリおよび bin サブディレクトリ
+    if let Ok(cur_dir) = std::env::current_dir() {
+        search_dirs.push(cur_dir.clone());
+        search_dirs.push(cur_dir.join("bin"));
+        search_dirs.push(cur_dir.join("tools"));
+    }
+
+    // 3. インストール先ディレクトリ (%LOCALAPPDATA%\Programs\OpenAvi)
+    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+        let install_dir = PathBuf::from(&local_app_data).join("Programs").join("OpenAvi");
+        search_dirs.push(install_dir.clone());
+        search_dirs.push(install_dir.join("bin"));
+    }
+
+    // 4. Scoop / Chocolatey
+    if let Ok(user_profile) = std::env::var("USERPROFILE") {
+        search_dirs.push(PathBuf::from(user_profile).join("scoop").join("shims"));
+    }
+    search_dirs.push(PathBuf::from(r"C:\ProgramData\chocolatey\bin"));
+
+    // ディレクトリ候補から ffmpeg.exe / ffprobe.exe を探索
+    for dir in &search_dirs {
+        let ffmpeg_candidate = dir.join("ffmpeg.exe");
+        if ffmpeg_candidate.is_file() {
+            let ffprobe_candidate = dir.join("ffprobe.exe");
+            let probe = if ffprobe_candidate.is_file() {
+                Some(ffprobe_candidate)
+            } else {
+                None
+            };
+            return (Some(ffmpeg_candidate), probe);
+        }
+    }
+
+    // 5. システム PATH から検索
     if Command::new("ffmpeg")
         .arg("-version")
         .stdout(Stdio::null())
@@ -573,7 +719,7 @@ fn locate_ffmpeg_tools() -> (Option<PathBuf>, Option<PathBuf>) {
         return (Some(PathBuf::from("ffmpeg")), Some(PathBuf::from("ffprobe")));
     }
 
-    // 2. Windows WinGet パッケージ領域を検索
+    // 6. Windows WinGet パッケージ領域を検索
     if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
         let pkg_dir = PathBuf::from(local_app_data).join("Microsoft\\WinGet\\Packages");
         if let Ok(entries) = std::fs::read_dir(pkg_dir) {
@@ -622,7 +768,7 @@ fn probe_media_metadata(ffprobe: &Path, path: &Path) -> Option<MediaMetadata> {
             "-v",
             "error",
             "-show_entries",
-            "format=duration:stream=codec_type,width,height,r_frame_rate",
+            "format=duration:stream=codec_type,width,height,r_frame_rate:stream_tags=rotate:stream_side_data=rotation",
             "-of",
             "default=noprint_wrappers=1:nokey=0",
         ])
@@ -637,19 +783,30 @@ fn probe_media_metadata(ffprobe: &Path, path: &Path) -> Option<MediaMetadata> {
     let mut fps = 30.0;
     let mut has_audio = false;
     let mut has_video = false;
+    // 複数の映像ストリーム（サムネイル等）があっても最初の映像ストリームの値だけを採用する
+    let mut got_dims = false;
+    let mut got_fps = false;
+    let mut rotation: i32 = 0;
 
     for line in text.lines() {
         let line = line.trim();
         if let Some((k, v)) = line.split_once('=') {
             match k.trim() {
                 "width" => {
-                    if let Ok(w) = v.trim().parse() {
+                    if let (false, Ok(w)) = (got_dims, v.trim().parse::<u32>()) {
                         width = w;
                     }
                 }
                 "height" => {
-                    if let Ok(h) = v.trim().parse() {
+                    if let (false, Ok(h)) = (got_dims, v.trim().parse::<u32>()) {
                         height = h;
+                        got_dims = true;
+                    }
+                }
+                // スマートフォン等で撮影された縦動画の回転メタデータ（ffmpeg は自動回転するため寸法を入れ替える）
+                "rotation" | "TAG:rotate" => {
+                    if let Ok(r) = v.trim().parse::<f64>() {
+                        rotation = (r.round() as i32).rem_euclid(360);
                     }
                 }
                 "duration" => {
@@ -665,10 +822,11 @@ fn probe_media_metadata(ffprobe: &Path, path: &Path) -> Option<MediaMetadata> {
                     }
                 }
                 "r_frame_rate" => {
-                    if let Some((num, den)) = v.trim().split_once('/') {
+                    if let (false, Some((num, den))) = (got_fps, v.trim().split_once('/')) {
                         if let (Ok(n), Ok(d)) = (num.parse::<f64>(), den.parse::<f64>()) {
-                            if d > 0.0 {
+                            if d > 0.0 && n > 0.0 {
                                 fps = (n / d).round();
+                                got_fps = true;
                             }
                         }
                     }
@@ -676,6 +834,10 @@ fn probe_media_metadata(ffprobe: &Path, path: &Path) -> Option<MediaMetadata> {
                 _ => {}
             }
         }
+    }
+
+    if rotation == 90 || rotation == 270 {
+        std::mem::swap(&mut width, &mut height);
     }
 
     Some(MediaMetadata {
@@ -709,7 +871,15 @@ mod tests {
 
         if cache.has_ffmpeg() {
             let vid_path = Path::new("../../samples/sample_video.mp4");
-            let vid_frame = cache.get_frame(vid_path, 0, 0.0).expect("decode sample_video.mp4");
+            let mut vid_frame = None;
+            for _ in 0..100 {
+                if let Some(f) = cache.get_frame(vid_path, 0, 0.0) {
+                    vid_frame = Some(f);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let vid_frame = vid_frame.expect("decode sample_video.mp4");
             assert_eq!((vid_frame.width, vid_frame.height), (320, 180));
             assert_eq!(vid_frame.pixels.len(), 320 * 180 * 4);
 

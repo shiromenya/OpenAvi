@@ -1408,27 +1408,46 @@ fn extract_legacy_settings(bytes: &[u8], _warnings: &mut Vec<String>) -> SceneSe
     s
 }
 
-fn extract_media_paths_from_binary(bytes: &[u8]) -> Vec<String> {
+pub fn extract_media_paths_from_binary(bytes: &[u8]) -> Vec<String> {
     let mut results = Vec::new();
     let exts = [
         ".mp4", ".avi", ".mov", ".mkv", ".wmv", ".png", ".jpg", ".jpeg", ".bmp", ".webp", ".gif",
-        ".wav", ".mp3", ".ogg", ".flac",
+        ".wav", ".mp3", ".ogg", ".flac", ".m4a", ".aac", ".wma",
     ];
-    let mut i = 32;
+    let mut i = 0;
     while i + 6 < bytes.len() {
-        if bytes[i].is_ascii_alphabetic() && bytes[i + 1] == b':' && bytes[i + 2] == b'\\' {
-            let end = bytes[i..]
+        let is_abs = bytes[i].is_ascii_alphabetic() && bytes[i + 1] == b':' && (bytes[i + 2] == b'\\' || bytes[i + 2] == b'/');
+        let is_special = (bytes[i] == 0 || bytes[i] == b'@') && bytes[i + 1] == b':' && (bytes[i + 2] == b'\\' || bytes[i + 2] == b'/');
+        if is_abs || is_special {
+            let start = i + 1;
+            let end = bytes[start..]
                 .iter()
                 .position(|&b| b == 0 || b < 0x20)
-                .map(|p| i + p)
+                .map(|p| start + p)
                 .unwrap_or(bytes.len())
-                .min(i + 260);
-            let slice = &bytes[i..end];
+                .min(start + 260);
+            let slice = &bytes[start..end];
             let (decoded, _, _) = encoding_rs::SHIFT_JIS.decode(slice);
-            let candidate = decoded.trim().to_string();
+            let mut candidate = decoded.trim().to_string();
+            if is_abs {
+                candidate = format!("{}{}", bytes[i] as char, candidate);
+            } else {
+                candidate = format!("C{}", candidate);
+            }
             let lower = candidate.to_ascii_lowercase();
-            if exts.iter().any(|ext| lower.ends_with(ext)) && !results.contains(&candidate) {
-                results.push(candidate);
+            // 拡張子が含まれている位置でパスを切り詰める（ゴミバイナリや後続ヘッダを排除）
+            let mut matched_ext = None;
+            for ext in &exts {
+                if let Some(pos) = lower.find(ext) {
+                    matched_ext = Some(pos + ext.len());
+                    break;
+                }
+            }
+            if let Some(end_len) = matched_ext {
+                candidate.truncate(end_len);
+                if !results.contains(&candidate) {
+                    results.push(candidate);
+                }
             }
             i = end + 1;
         } else {
@@ -1616,6 +1635,310 @@ Y=20.00
                 assert!(doc.scene.object_count() >= 3000);
                 assert!(doc.scene.layers.len() >= 90);
                 break;
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_all_aupdotnet_samples() {
+        let files = [
+            "Chain.aup",
+            "DisabledEffect.aup",
+            "EffectSet01.aup",
+            "ExeditBpm.aup",
+            "ExeditCamera.aup",
+            "ExeditXY.aup",
+            "Group.aup",
+            "LayerScene.aup",
+            "Trackbar.aup",
+        ];
+
+        for fname in &files {
+            let path = format!("C:\\Users\\user\\.gemini\\antigravity\\scratch\\aupdotnet\\AupDotNet-main\\testdata\\Exedit\\{}", fname);
+            let bytes = std::fs::read(&path).unwrap();
+            let fp_magic = b"FilterProject 0.1\0";
+            let mut exedit_chunk = None;
+            let mut search_pos = 0;
+            while let Some(idx) = bytes[search_pos..].windows(fp_magic.len()).position(|w| w == fp_magic) {
+                let abs_pos = search_pos + idx;
+                let nl_pos = abs_pos + fp_magic.len();
+                let nl = u32::from_le_bytes(bytes[nl_pos..nl_pos + 4].try_into().unwrap()) as usize;
+                let n_pos = nl_pos + 4;
+                let (f_name, _, _) = encoding_rs::SHIFT_JIS.decode(&bytes[n_pos..n_pos + nl]);
+                if f_name.trim_matches('\0') == "拡張編集" {
+                    let d_len_pos = n_pos + nl;
+                    let decomp_sz = u32::from_le_bytes(bytes[d_len_pos..d_len_pos + 4].try_into().unwrap()) as usize;
+                    let comp_start = d_len_pos + 4;
+                    exedit_chunk = Some((comp_start, decomp_sz));
+                    break;
+                }
+                search_pos = abs_pos + fp_magic.len();
+            }
+
+            let (comp_start, decomp_sz) = exedit_chunk.unwrap();
+            let decomp = legacy_aup::decompress_aup(&bytes[comp_start..], decomp_sz);
+
+            let effect_type_num = u32::from_le_bytes(decomp[4..8].try_into().unwrap()) as usize;
+            let object_num = u32::from_le_bytes(decomp[8..12].try_into().unwrap()) as usize;
+            let scene_num = u32::from_le_bytes(decomp[0x68..0x6c].try_into().unwrap()) as usize;
+            let layer_num = u32::from_le_bytes(decomp[0x6c..0x70].try_into().unwrap()) as usize;
+            let trackbar_script_num = u32::from_le_bytes(decomp[0x7c..0x80].try_into().unwrap()) as usize;
+
+            let mut eff_types = Vec::new();
+            let mut eff_cur = 0x100 + layer_num * 76 + scene_num * 220 + trackbar_script_num * 128;
+            for _ in 0..effect_type_num {
+                let e_data = &decomp[eff_cur..eff_cur + 112];
+                let tb_num = u32::from_le_bytes(e_data[4..8].try_into().unwrap()) as usize;
+                let cb_num = u32::from_le_bytes(e_data[8..12].try_into().unwrap()) as usize;
+                let ext_sz = u32::from_le_bytes(e_data[12..16].try_into().unwrap()) as usize;
+                let (e_name, _, _) = encoding_rs::SHIFT_JIS.decode(&e_data[16..16 + 96]);
+                let e_name = e_name.trim_matches('\0').to_string();
+                eff_types.push((e_name, tb_num, cb_num, ext_sz));
+                eff_cur += 112;
+            }
+
+            let mut cursor = eff_cur;
+            let mut last_chain_group = 0xFFFF_FFFFu32;
+            let disabled_count = 0;
+            for i in 0..object_num {
+                let o_data = &decomp[cursor..];
+                let _flag = u32::from_le_bytes(o_data[0..4].try_into().unwrap());
+                let chain_group = u32::from_le_bytes(o_data[0x50..0x54].try_into().unwrap());
+                let ext_size_field = u32::from_le_bytes(o_data[0xF4..0xF8].try_into().unwrap()) as usize;
+                let is_chain = chain_group != 0xFFFF_FFFF && chain_group == last_chain_group && ext_size_field == 0;
+
+                let mut ext_size = 0usize;
+                for e in 0..12 {
+                    let type_idx = i32::from_le_bytes(o_data[0x54 + e * 12..0x54 + e * 12 + 4].try_into().unwrap());
+                    if type_idx == -1 {
+                        break;
+                    }
+                    let (_, _, _, sz) = &eff_types[type_idx as usize];
+                    ext_size += *sz;
+                }
+                if is_chain {
+                    ext_size = 0;
+                }
+
+                assert_eq!(ext_size_field, ext_size, "{}: obj {} ext_size_field ({}) != computed ext_size ({})",
+                    fname, i, ext_size_field, ext_size);
+
+                let obj_size = 0x5C8 + ext_size_field;
+                last_chain_group = chain_group;
+                cursor += obj_size;
+            }
+            let version = u32::from_le_bytes(decomp[0x2C..0x30].try_into().unwrap());
+            println!("{}: version=0x{:04x}, objects={}, disabled={}, cursor={}/{}", fname, version, object_num, disabled_count, cursor, decomp.len());
+            assert_eq!(cursor, decomp.len(), "{}: cursor mismatch", fname);
+        }
+    }
+
+    #[test]
+    fn test_find_kudaketa() {
+        let path = std::path::Path::new("../../samples/target_test.aup");
+        if !path.exists() { return; }
+        let bytes = std::fs::read(path).unwrap();
+        let fp_magic = b"FilterProject 0.1\0";
+        let mut search_pos = 0;
+        let mut exedit_chunk = None;
+        while let Some(idx) = bytes[search_pos..].windows(fp_magic.len()).position(|w| w == fp_magic) {
+            let abs_pos = search_pos + idx;
+            let nl_pos = abs_pos + fp_magic.len();
+            let nl = u32::from_le_bytes(bytes[nl_pos..nl_pos + 4].try_into().unwrap()) as usize;
+            let n_pos = nl_pos + 4;
+            let (f_name, _, _) = encoding_rs::SHIFT_JIS.decode(&bytes[n_pos..n_pos + nl]);
+            if f_name.trim_matches('\0') == "拡張編集" {
+                let d_len_pos = n_pos + nl;
+                let decomp_sz = u32::from_le_bytes(bytes[d_len_pos..d_len_pos + 4].try_into().unwrap()) as usize;
+                let comp_start = d_len_pos + 4;
+                exedit_chunk = Some((comp_start, decomp_sz));
+                break;
+            }
+            search_pos = abs_pos + fp_magic.len();
+        }
+        let (comp_start, decomp_sz) = exedit_chunk.unwrap();
+        let decomp = legacy_aup::decompress_aup(&bytes[comp_start..], decomp_sz);
+
+        let s_kuda = b"\x8d\xd3\x82\xaf\x82\xbd"; // 砕けた
+        for i in 0..decomp.len().saturating_sub(s_kuda.len()) {
+            if &decomp[i..i + s_kuda.len()] == s_kuda {
+                println!("FOUND 砕けた at 0x{:X}", i);
+                let start = i.saturating_sub(64);
+                let end = (i + 32).min(decomp.len());
+                println!("CONTEXT [-64..+32]: {:02X?}", &decomp[start..end]);
+                let (txt, _, _) = encoding_rs::SHIFT_JIS.decode(&decomp[start..end]);
+                println!("  as text: {:?}", txt);
+            }
+        }
+    }
+
+    #[test]
+    fn test_inspect_all_effects_in_target() {
+        let path = std::path::Path::new("../../samples/target_test.aup");
+        if !path.exists() {
+            return;
+        }
+        let bytes = std::fs::read(path).expect("read target_test.aup");
+        let doc = legacy_aup::parse_legacy_aup(&bytes).expect("parse_legacy_aup should succeed");
+
+        println!("=== ALL DISTINCT EFFECT NAMES IN TARGET AUP ===");
+        let mut effect_counts = std::collections::BTreeMap::new();
+        let mut blend_modes = std::collections::BTreeMap::new();
+        let mut shapes_with_line_width = Vec::new();
+        let mut camera_objects = Vec::new();
+        let mut glow_objects = Vec::new();
+
+        for (li, layer) in doc.scene.layers.iter().enumerate() {
+            for obj in &layer.objects {
+                for eff in &obj.effects {
+                    *effect_counts.entry(eff.name.clone()).or_insert(0) += 1;
+                    if eff.name == "図形" {
+                        let line_width = eff.eval("ライン幅", 0, 0.0);
+                        if line_width > 0.0 {
+                            shapes_with_line_width.push((li, obj.frame_start..obj.frame_end, eff.text("name").map(|s| s.to_string()), line_width));
+                        }
+                    }
+                    if eff.name.contains("グロー") || eff.name.contains("発光") || eff.name.contains("閃光") || eff.name.contains("拡散光") {
+                        glow_objects.push((li, obj.frame_start..obj.frame_end, eff.name.clone(), eff.params.clone()));
+                    }
+                    if eff.name == "標準描画" || eff.name == "拡張描画" {
+                        if let Some(b) = eff.text("blend") {
+                            *blend_modes.entry(b.to_string()).or_insert(0) += 1;
+                        }
+                    }
+                }
+                if obj.effects.iter().any(|e| e.name == "カメラ制御" || matches!(e.kind, EffectKind::Camera)) {
+                    camera_objects.push((li, obj.frame_start..obj.frame_end, obj.effects.clone()));
+                }
+            }
+        }
+
+        println!("Effect counts:");
+        for (name, count) in &effect_counts {
+            println!("  {:30}: {}", name, count);
+        }
+
+        println!("\nBlend modes:");
+        for (bm, count) in &blend_modes {
+            println!("  {:15}: {}", bm, count);
+        }
+
+        println!("\nObjects with non-zero blend mode:");
+        for (li, layer) in doc.scene.layers.iter().enumerate() {
+            for obj in &layer.objects {
+                let draw = obj.effect(&EffectKind::StandardDraw).or_else(|| obj.effect(&EffectKind::ExtendedDraw));
+                if let Some(d) = draw {
+                    if let Some(b) = d.text("blend") {
+                        if b != "0" {
+                            let src_name = obj.source().map(|s| s.name.clone()).unwrap_or_default();
+                            println!("  layer {}, range {}..{}, src='{}', blend={}, cam_target={}, effs={:?}",
+                                li, obj.frame_start, obj.frame_end, src_name, b, obj.camera_target,
+                                obj.effects.iter().map(|e| &e.name).collect::<Vec<_>>());
+                        }
+                    }
+                }
+            }
+        }
+
+        println!("\nShapes with line_width > 0 (total {}):", shapes_with_line_width.len());
+        for (li, range, name, lw) in shapes_with_line_width.iter().take(20) {
+            println!("  layer {}, range {:?}, name {:?}, line_width {}", li, range, name, lw);
+        }
+
+        println!("\nGlow-like effects (total {}):", glow_objects.len());
+        for (li, range, name, params) in glow_objects.iter().take(20) {
+            println!("  layer {}, range {:?}, name '{}', params={:?}", li, range, name, params);
+        }
+
+        println!("=== SCRIPT NAMES IN TARGET AUP ===");
+        let mut script_names = std::collections::BTreeSet::new();
+        let mut camera_effects = Vec::new();
+        for layer in &doc.scene.layers {
+            for obj in &layer.objects {
+                for eff in &obj.effects {
+                    if eff.name == "アニメーション効果" || eff.name == "カスタムオブジェクト" || eff.name == "カメラ効果" || eff.name == "スクリプト(カメラ制御)" {
+                        let s_name = eff.text("name").unwrap_or_default();
+                        let s_type = eff.text("type").unwrap_or_default();
+                        let s_param = eff.text("param").unwrap_or_default();
+                        script_names.insert(format!("{}: name='{}', type='{}', param='{}'", eff.name, s_name, s_type, s_param));
+                    }
+                    if eff.name == "カメラ効果" {
+                        camera_effects.push(eff.clone());
+                    }
+                }
+            }
+        }
+        for s in &script_names {
+            println!("  {}", s);
+        }
+        println!("Camera effects detail count: {}", camera_effects.len());
+        for ce in &camera_effects {
+            println!("  ce params: {:?}", ce.params);
+        }
+
+        assert_eq!(doc.scene.layers.iter().map(|l| l.objects.len()).sum::<usize>(), 237, "全237個のオブジェクトが欠損なく読み込まれていること");
+        assert!(!shapes_with_line_width.is_empty(), "枠線（ライン幅>0）図形が存在すること");
+        assert!(!camera_objects.is_empty(), "カメラ制御オブジェクトが存在すること");
+        assert!(effect_counts.get("グロー").copied().unwrap_or(0) >= 70, "70個以上のグローエフェクトが存在すること");
+
+        // スクリプト名が正しく解決され、null終端ゴミが含まれていないことの検証
+        let has_camera_shake = doc.scene.layers.iter().flat_map(|l| &l.objects).any(|obj| {
+            obj.effects.iter().any(|eff| eff.name == "カメラ効果" && eff.text("name") == Some("手ぶれ"))
+        });
+        assert!(has_camera_shake, "組み込みカメラ効果 '手ぶれ' が正しく名前解決されていること");
+
+        let has_circular_placement = doc.scene.layers.iter().flat_map(|l| &l.objects).any(|obj| {
+            obj.effects.iter().any(|eff| eff.name == "アニメーション効果" && eff.text("name") == Some("円形配置"))
+        });
+        assert!(has_circular_placement, "組み込みアニメーション効果 '円形配置' が正しく名前解決されていること");
+    }
+
+    #[test]
+    fn test_builtin_script_mapping_and_null_termination() {
+        use crate::legacy_aup::*;
+
+        // 1. 組み込みスクリプト名テーブルの検証
+        assert_eq!(BUILTIN_ANM_NAMES[0], "震える");
+        assert_eq!(BUILTIN_ANM_NAMES[1], "振り子");
+        assert_eq!(BUILTIN_ANM_NAMES[14], "立方体(カメラ制御)");
+        assert_eq!(BUILTIN_ANM_NAMES[23], "円形配置");
+        assert_eq!(BUILTIN_CAM_NAMES[0], "手ぶれ");
+        assert_eq!(BUILTIN_CAM_NAMES[1], "目標中心回転");
+        assert_eq!(BUILTIN_CAM_NAMES[2], "目標サイズ固定視野角");
+        assert_eq!(BUILTIN_OBJ_NAMES[4], "雲");
+        assert_eq!(BUILTIN_OBJ_NAMES[13], "フレア");
+        assert_eq!(BUILTIN_SCN_NAMES[0], "発光");
+
+        // 2. decode_sjis_cstring の null 終端テスト（末尾ゴミの除去）
+        let mut dirty_buf = [0u8; 64];
+        let hello_sjis = encoding_rs::SHIFT_JIS.encode("テスト効果").0;
+        dirty_buf[..hello_sjis.len()].copy_from_slice(&hello_sjis);
+        dirty_buf[hello_sjis.len()] = 0; // null 終端
+        // null の後にゴミデータを混入
+        dirty_buf[hello_sjis.len() + 1] = b'G';
+        dirty_buf[hello_sjis.len() + 2] = b'A';
+        dirty_buf[hello_sjis.len() + 3] = b'R';
+        dirty_buf[hello_sjis.len() + 4] = b'B';
+
+        let decoded = decode_sjis_cstring(&dirty_buf);
+        assert_eq!(decoded, "テスト効果", "null終端以降のゴミ文字列が含まれないこと");
+    }
+
+    #[test]
+    fn test_parse_real_goot_time_pf_aup() {
+        let path = r"C:\Users\user\Desktop\goot time pf.aup";
+        if let Ok(bytes) = std::fs::read(path) {
+            match legacy_aup::parse_legacy_aup(&bytes) {
+                Ok(doc) => {
+                    assert!(
+                        doc.scene.object_count() >= 3000,
+                        "3000個以上の正規オブジェクトが正常に読み込めること: got {}",
+                        doc.scene.object_count()
+                    );
+                    assert_eq!(doc.scene.layers.len(), 100, "100レイヤーが存在すること");
+                    assert!(doc.scene.settings.length < 100_000, "巨大オーバーフローせず安全なフレーム長であること");
+                }
+                Err(e) => panic!("goot time pf.aup の解析でエラーが発生しました: {:?}", e),
             }
         }
     }

@@ -247,6 +247,8 @@ impl eframe::App for OpenAviApp {
 
         self.menu_bar(ctx);
         self.status_bar(ctx);
+        self.ffmpeg_banner(ctx);
+        self.missing_media_banner(ctx);
 
         match self.layout {
             LayoutMode::Docked => {
@@ -428,6 +430,101 @@ impl OpenAviApp {
                 });
             });
         });
+    }
+
+    fn ffmpeg_banner(&mut self, ctx: &egui::Context) {
+        self.st.poll_ffmpeg_download();
+        let running = matches!(self.st.ffmpeg_dl, crate::state::FfmpegDownload::Running(_));
+        if running {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        if !running && !self.st.needs_ffmpeg() {
+            return;
+        }
+        let failed = match &self.st.ffmpeg_dl {
+            crate::state::FfmpegDownload::Failed(e) => Some(e.clone()),
+            _ => None,
+        };
+
+        egui::TopBottomPanel::top("ffmpeg_banner")
+            .frame(
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(48, 38, 16))
+                    .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(230, 170, 60)))
+                    .inner_margin(egui::Margin::symmetric(12.0, 6.0)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if running {
+                        ui.spinner();
+                        ui.colored_label(
+                            Color32::from_rgb(255, 210, 120),
+                            "FFmpeg をダウンロード中です（約 80MB）。完了すると動画・音声が自動で使えるようになります...",
+                        );
+                    } else {
+                        ui.colored_label(
+                            Color32::from_rgb(255, 210, 120),
+                            "⚠ 動画・音声のデコーダー (FFmpeg) が見つかりません。動画の映像と MP3 等の音声を再生するには FFmpeg が必要です",
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .button(egui::RichText::new("⬇ FFmpeg を自動ダウンロード").color(Color32::WHITE).strong())
+                                .on_hover_text("gyan.dev 配布の FFmpeg をダウンロードし %LOCALAPPDATA%\\OpenAvi\\bin に導入します")
+                                .clicked()
+                            {
+                                self.st.start_ffmpeg_download();
+                            }
+                            if let Some(e) = &failed {
+                                ui.colored_label(Color32::from_rgb(255, 120, 120), format!("失敗: {e}"));
+                            }
+                        });
+                    }
+                });
+            });
+    }
+
+    fn missing_media_banner(&mut self, ctx: &egui::Context) {
+        let missing = self.st.check_missing_media();
+        if missing.is_empty() {
+            return;
+        }
+
+        let first = missing[0].clone();
+        let count = missing.len();
+
+        egui::TopBottomPanel::top("missing_media_banner")
+            .frame(
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(50, 24, 24))
+                    .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(220, 70, 70)))
+                    .inner_margin(egui::Margin::symmetric(12.0, 6.0)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        Color32::from_rgb(255, 120, 120),
+                        format!(
+                            "⚠ プロジェクト内のメディア（{}）が見つかりません (リンク切れ: {} 件) - 「{}」",
+                            first.kind_name,
+                            count,
+                            first.original_path
+                        ),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let is_audio = first.kind_name.contains("音声");
+                        if ui
+                            .button(
+                                egui::RichText::new("🎵 手元のファイルを選択して割り当て...")
+                                    .color(Color32::WHITE)
+                                    .strong(),
+                            )
+                            .clicked()
+                        {
+                            self.st.relink_media_dialog(None, &first.original_path, is_audio);
+                        }
+                    });
+                });
+            });
     }
 
     fn plugins_window(&mut self, ctx: &egui::Context) {

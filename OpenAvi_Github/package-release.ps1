@@ -89,6 +89,40 @@ $stripExe = "C:\Users\user\AppData\Local\Microsoft\WinGet\Packages\BrechtSanders
 if (Test-Path $stripExe) {
     & $stripExe --strip-all (Join-Path $stage "openavi.exe")
 }
+
+# 3.1 Bundle FFmpeg tools (ffmpeg.exe, ffprobe.exe) into dist/OpenAvi/bin for standalone video playback
+$stageBin = Join-Path $stage "bin"
+New-Item -ItemType Directory -Force -Path $stageBin | Out-Null
+
+$ffmpegPath = $null
+$ffprobePath = $null
+$ffmpegCmd = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue
+if ($ffmpegCmd) { $ffmpegPath = $ffmpegCmd.Source }
+$ffprobeCmd = Get-Command ffprobe.exe -ErrorAction SilentlyContinue
+if ($ffprobeCmd) { $ffprobePath = $ffprobeCmd.Source }
+
+if (-not $ffmpegPath -or -not (Test-Path $ffmpegPath)) {
+    $wingetFfmpeg = Get-ChildItem -Path "$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Recurse -Filter "ffmpeg.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($wingetFfmpeg) { $ffmpegPath = $wingetFfmpeg.FullName }
+}
+if (-not $ffprobePath -or -not (Test-Path $ffprobePath)) {
+    $wingetFfprobe = Get-ChildItem -Path "$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Recurse -Filter "ffprobe.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($wingetFfprobe) { $ffprobePath = $wingetFfprobe.FullName }
+}
+
+if ($ffmpegPath -and (Test-Path $ffmpegPath)) {
+    Copy-Item $ffmpegPath (Join-Path $stageBin "ffmpeg.exe") -Force
+    Write-Host "Bundled FFmpeg: $ffmpegPath -> $stageBin\ffmpeg.exe"
+} else {
+    Write-Warning "FFmpeg binary not found to bundle into package!"
+}
+if ($ffprobePath -and (Test-Path $ffprobePath)) {
+    Copy-Item $ffprobePath (Join-Path $stageBin "ffprobe.exe") -Force
+    Write-Host "Bundled FFprobe: $ffprobePath -> $stageBin\ffprobe.exe"
+} else {
+    Write-Warning "FFprobe binary not found to bundle into package!"
+}
+
 Copy-Item "assets" (Join-Path $stage "assets") -Recurse -Force
 Copy-Item "samples" (Join-Path $stage "samples") -Recurse -Force
 Copy-Item "plugins" (Join-Path $stage "plugins") -Recurse -Force

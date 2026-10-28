@@ -72,7 +72,98 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
         }
     }
 
-    // 2. レイヤー順に合成描画
+    let has_ffmpeg = st.media.has_ffmpeg();
+
+    // 2. カメラ制御オブジェクトの検出とパラメータ構築
+    let mut active_camera = None;
+    let mut camera_layer = None;
+    for (li, obj) in st.scene.objects_at(frame) {
+        if !st.scene.layers[li].visible {
+            continue;
+        }
+        if let Some(cam_eff) = obj.effects.iter().find(|e| e.name == "カメラ制御" || matches!(e.kind, EffectKind::Camera)) {
+            if !cam_eff.enabled {
+                continue;
+            }
+            let rel = frame - obj.frame_start;
+            let cx = cam_eff.eval("X", rel, 0.0);
+            let cy = cam_eff.eval("Y", rel, 0.0);
+            let cz = cam_eff.eval("Z", rel, -1024.0);
+            let mut tx = cam_eff.eval("目標X", rel, 0.0);
+            let mut ty = cam_eff.eval("目標Y", rel, 0.0);
+            let mut tz = cam_eff.eval("目標Z", rel, 0.0);
+            let target_layer = cam_eff.eval("目標レイヤー", rel, 0.0) as usize;
+            if target_layer > 0 && target_layer <= st.scene.layers.len() {
+                let target_li = target_layer - 1;
+                if let Some(t_obj) = st.scene.layers[target_li].objects.iter().find(|o| o.contains(frame)) {
+                    let t_rel = frame - t_obj.frame_start;
+                    if let Some(t_draw) = t_obj.effect(&EffectKind::StandardDraw).or_else(|| t_obj.effect(&EffectKind::ExtendedDraw)) {
+                        tx = t_draw.eval("X", t_rel, 0.0);
+                        ty = t_draw.eval("Y", t_rel, 0.0);
+                        tz = t_draw.eval("Z", t_rel, 0.0);
+                    }
+                }
+            }
+            let roll = cam_eff.eval("傾き", rel, 0.0);
+            let fov = cam_eff.eval("視野角", rel, 0.0);
+
+            let d = if fov > 0.1 {
+                (sh as f64 / 2.0) / (fov.to_radians() / 2.0).tan()
+            } else {
+                1024.0
+            };
+
+            let mut cam_params = CameraParams {
+                x: cx,
+                y: cy,
+                z: cz,
+                tx,
+                ty,
+                tz,
+                rz: roll,
+                ux: 0.0,
+                uy: -1.0,
+                uz: 0.0,
+                d,
+            };
+
+            // カメラ制御オブジェクト自身に含まれるカメラ効果を適用
+            for eff in &obj.effects {
+                if (eff.name == "カメラ効果" || eff.name == "スクリプト(カメラ制御)") && eff.enabled {
+                    let eff_sub_name = eff.text("name").unwrap_or("手ぶれ");
+                    let tr0 = eff.eval("track0", rel, 0.0);
+                    let tr1 = eff.eval("track1", rel, 0.0);
+                    let tr2 = eff.eval("track2", rel, 0.0);
+                    let tr3 = eff.eval("track3", rel, 0.0);
+                    apply_camera_effect(&mut cam_params, eff_sub_name, tr0, tr1, tr2, tr3, rel as f64 / fps, sh as f64);
+                }
+            }
+
+            // タイムライン上で同時にアクティブな別レイヤーの「カメラ効果」オブジェクトもすべて適用
+            for (other_li, other_obj) in st.scene.objects_at(frame) {
+                if other_obj.id == obj.id || !st.scene.layers[other_li].visible {
+                    continue;
+                }
+                for eff in &other_obj.effects {
+                    if (eff.name == "カメラ効果" || eff.name == "スクリプト(カメラ制御)") && eff.enabled {
+                        let o_rel = frame - other_obj.frame_start;
+                        let eff_sub_name = eff.text("name").unwrap_or("手ぶれ");
+                        let tr0 = eff.eval("track0", o_rel, 0.0);
+                        let tr1 = eff.eval("track1", o_rel, 0.0);
+                        let tr2 = eff.eval("track2", o_rel, 0.0);
+                        let tr3 = eff.eval("track3", o_rel, 0.0);
+                        apply_camera_effect(&mut cam_params, eff_sub_name, tr0, tr1, tr2, tr3, o_rel as f64 / fps, sh as f64);
+                    }
+                }
+            }
+
+            active_camera = Some(Camera3D::from_params(&cam_params, fov));
+            camera_layer = Some(li);
+            break;
+        }
+    }
+
+    // 3. レイヤー順 / 3D深度順に合成描画
     let ctx = DrawCtx {
         painter: &painter,
         canvas,
@@ -82,12 +173,71 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
         screen_h: sh as f64,
         textures: &resolved_textures,
         plugins: &st.plugins,
+        has_ffmpeg,
+        camera: active_camera,
     };
+
+    let mut visible_objs: Vec<(usize, &TimelineObject, Frame, f64)> = Vec::new();
     for (li, obj) in st.scene.objects_at(frame) {
         if !st.scene.layers[li].visible {
             continue;
         }
-        draw_object(&ctx, li, obj, frame - obj.frame_start, st.selected == Some(obj.id));
+        let rel = frame - obj.frame_start;
+        let depth = if obj.camera_target {
+            if let Some(ref cam) = active_camera {
+                let draw = obj
+                    .effect(&EffectKind::StandardDraw)
+                    .or_else(|| obj.effect(&EffectKind::ExtendedDraw));
+                let bx = draw.map(|d| d.eval("X", rel, 0.0)).unwrap_or(0.0);
+                let by = draw.map(|d| d.eval("Y", rel, 0.0)).unwrap_or(0.0);
+                let bz = draw.map(|d| d.eval("Z", rel, 0.0)).unwrap_or(0.0);
+                let vx = bx - cam.eye[0];
+                let vy = by - cam.eye[1];
+                let vz = bz - cam.eye[2];
+                vx * cam.forward[0] + vy * cam.forward[1] + vz * cam.forward[2]
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+        visible_objs.push((li, obj, rel, depth));
+    }
+
+    let cam_layer = camera_layer.unwrap_or(usize::MAX);
+    if active_camera.is_some() {
+        visible_objs.sort_by(|a, b| {
+            let a_cam = a.1.camera_target;
+            let b_cam = b.1.camera_target;
+            let a_group = if a_cam {
+                1u8 // 3D空間
+            } else if a.0 < cam_layer {
+                0u8 // 2D背景
+            } else {
+                2u8 // 2D前面オーバーレイ
+            };
+            let b_group = if b_cam {
+                1u8
+            } else if b.0 < cam_layer {
+                0u8
+            } else {
+                2u8
+            };
+
+            if a_group != b_group {
+                a_group.cmp(&b_group)
+            } else if a_group == 1 {
+                // 3D 同士: カメラから遠い順（depth 降順）。depth が同じならレイヤー昇順
+                b.3.total_cmp(&a.3).then_with(|| a.0.cmp(&b.0))
+            } else {
+                // 2D 同士: レイヤー昇順
+                a.0.cmp(&b.0)
+            }
+        });
+    }
+
+    for (li, obj, rel, _) in visible_objs {
+        draw_object(&ctx, li, obj, rel, st.selected == Some(obj.id));
     }
 
     painter.text(
@@ -231,6 +381,359 @@ fn bottom_transport_bar(ui: &mut egui::Ui, st: &mut EditorState) {
         });
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct CameraParams {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub tx: f64,
+    pub ty: f64,
+    pub tz: f64,
+    pub rz: f64,
+    pub ux: f64,
+    pub uy: f64,
+    pub uz: f64,
+    pub d: f64,
+}
+
+/// AviUtl 互換の決定論的疑似乱数生成器 (obj.rand 互換)
+pub fn aviutl_rand(st_num: f64, ed_num: f64, seed: i32, frame: i64) -> f64 {
+    let mut h = (frame as u64).wrapping_mul(0x9E3779B97F4A7C15)
+        ^ ((seed as u64).wrapping_mul(0xBF58476D1CE4E5B9));
+    h ^= h >> 30;
+    h = h.wrapping_mul(0xBF58476D1CE4E5B9);
+    h ^= h >> 27;
+    h = h.wrapping_mul(0x94D049BB133111EB);
+    h ^= h >> 31;
+    let norm = (h as f64) / (u64::MAX as f64);
+    st_num + norm * (ed_num - st_num)
+}
+
+/// AviUtl 互換の Catmull-Rom スプライン補間 (obj.interpolation 互換)
+pub fn aviutl_interpolation(t: f64, p0: f64, p1: f64, p2: f64, p3: f64) -> f64 {
+    0.5 * (
+        (2.0 * p1)
+            + (-p0 + p2) * t
+            + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t * t
+            + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t * t * t
+    )
+}
+
+/// カメラ効果（@手ぶれ、@目標中心回転、@目標サイズ固定視野角 等）をカメラパラメータに適用します。
+pub fn apply_camera_effect(
+    cam: &mut CameraParams,
+    eff_name: &str,
+    track0: f64,
+    track1: f64,
+    track2: f64,
+    _track3: f64,
+    time_sec: f64,
+    screen_h: f64,
+) {
+    let sec = eff_name.split('@').next().unwrap_or(eff_name);
+    match sec {
+        "手ぶれ" | "手ブレ" => {
+            if track2 <= 0.0 {
+                cam.tx += aviutl_rand(-track0, track0, 0, (time_sec * 100.0) as i64);
+                cam.ty += aviutl_rand(-track0, track0, 1, (time_sec * 100.0) as i64);
+                cam.tz += aviutl_rand(-track0, track0, 2, (time_sec * 100.0) as i64);
+                cam.rz += aviutl_rand(-track1, track1, 3, (time_sec * 100.0) as i64);
+            } else {
+                let t = time_sec * 100.0 / track2;
+                let p = t.floor() as i64;
+                let t_frac = t - (p as f64);
+
+                let x0 = aviutl_rand(-1000.0, 1000.0, 0, p) / 1000.0 * track0;
+                let x1 = aviutl_rand(-1000.0, 1000.0, 0, p + 1) / 1000.0 * track0;
+                let x2 = aviutl_rand(-1000.0, 1000.0, 0, p + 2) / 1000.0 * track0;
+                let x3 = aviutl_rand(-1000.0, 1000.0, 0, p + 3) / 1000.0 * track0;
+
+                let y0 = aviutl_rand(-1000.0, 1000.0, 1, p) / 1000.0 * track0;
+                let y1 = aviutl_rand(-1000.0, 1000.0, 1, p + 1) / 1000.0 * track0;
+                let y2 = aviutl_rand(-1000.0, 1000.0, 1, p + 2) / 1000.0 * track0;
+                let y3 = aviutl_rand(-1000.0, 1000.0, 1, p + 3) / 1000.0 * track0;
+
+                let z0 = aviutl_rand(-1000.0, 1000.0, 2, p) / 1000.0 * track0;
+                let z1 = aviutl_rand(-1000.0, 1000.0, 2, p + 1) / 1000.0 * track0;
+                let z2 = aviutl_rand(-1000.0, 1000.0, 2, p + 2) / 1000.0 * track0;
+                let z3 = aviutl_rand(-1000.0, 1000.0, 2, p + 3) / 1000.0 * track0;
+
+                let r0 = aviutl_rand(-1000.0, 1000.0, 3, p) / 1000.0 * track1;
+                let r1 = aviutl_rand(-1000.0, 1000.0, 3, p + 1) / 1000.0 * track1;
+                let r2 = aviutl_rand(-1000.0, 1000.0, 3, p + 2) / 1000.0 * track1;
+                let r3 = aviutl_rand(-1000.0, 1000.0, 3, p + 3) / 1000.0 * track1;
+
+                cam.tx += aviutl_interpolation(t_frac, x0, x1, x2, x3);
+                cam.ty += aviutl_interpolation(t_frac, y0, y1, y2, y3);
+                cam.tz += aviutl_interpolation(t_frac, z0, z1, z2, z3);
+                cam.rz += aviutl_interpolation(t_frac, r0, r1, r2, r3);
+            }
+        }
+        "目標中心回転" => {
+            let x = cam.x - cam.tx;
+            let y = cam.y - cam.ty;
+            let z = cam.z - cam.tz;
+
+            let vx = cam.ux;
+            let vy = cam.uy;
+            let vz = cam.uz;
+            let r_h = track0.to_radians();
+            let s_h = r_h.sin();
+            let c_h = r_h.cos();
+            let m00 = vx * vx * (1.0 - c_h) + c_h;
+            let m01 = vx * vy * (1.0 - c_h) - vz * s_h;
+            let m02 = vz * vx * (1.0 - c_h) + vy * s_h;
+            let m10 = vx * vy * (1.0 - c_h) + vz * s_h;
+            let m11 = vy * vy * (1.0 - c_h) + c_h;
+            let m12 = vy * vz * (1.0 - c_h) - vx * s_h;
+            let m20 = vz * vx * (1.0 - c_h) - vy * s_h;
+            let m21 = vy * vz * (1.0 - c_h) + vx * s_h;
+            let m22 = vz * vz * (1.0 - c_h) + c_h;
+
+            let x2 = m00 * x + m01 * y + m02 * z;
+            let y2 = m10 * x + m11 * y + m12 * z;
+            let z2 = m20 * x + m21 * y + m22 * z;
+
+            let l2 = (x2 * x2 + y2 * y2 + z2 * z2).sqrt();
+            if l2 > 1e-6 {
+                let n_vx = x2 / l2;
+                let n_vy = y2 / l2;
+                let n_vz = z2 / l2;
+
+                let cr_x = n_vy * cam.uz - n_vz * cam.uy;
+                let cr_y = n_vz * cam.ux - n_vx * cam.uz;
+                let cr_z = n_vx * cam.uy - n_vy * cam.ux;
+                let cr_l = (cr_x * cr_x + cr_y * cr_y + cr_z * cr_z).sqrt();
+                if cr_l > 1e-6 {
+                    let ax_x = cr_x / cr_l;
+                    let ax_y = cr_y / cr_l;
+                    let ax_z = cr_z / cr_l;
+
+                    let r_v = track1.to_radians();
+                    let s_v = r_v.sin();
+                    let c_v = r_v.cos();
+
+                    let vm00 = ax_x * ax_x * (1.0 - c_v) + c_v;
+                    let vm01 = ax_x * ax_y * (1.0 - c_v) - ax_z * s_v;
+                    let vm02 = ax_z * ax_x * (1.0 - c_v) + ax_y * s_v;
+                    let vm10 = ax_x * ax_y * (1.0 - c_v) + ax_z * s_v;
+                    let vm11 = ax_y * ax_y * (1.0 - c_v) + c_v;
+                    let vm12 = ax_y * ax_z * (1.0 - c_v) - ax_x * s_v;
+                    let vm20 = ax_z * ax_x * (1.0 - c_v) - ax_y * s_v;
+                    let vm21 = ax_y * ax_z * (1.0 - c_v) + ax_x * s_v;
+                    let vm22 = ax_z * ax_z * (1.0 - c_v) + c_v;
+
+                    cam.x = cam.tx + vm00 * x2 + vm01 * y2 + vm02 * z2;
+                    cam.y = cam.ty + vm10 * x2 + vm11 * y2 + vm12 * z2;
+                    cam.z = cam.tz + vm20 * x2 + vm21 * y2 + vm22 * z2;
+
+                    let ux = cam.ux;
+                    let uy = cam.uy;
+                    let uz = cam.uz;
+                    cam.ux = vm00 * ux + vm01 * uy + vm02 * uz;
+                    cam.uy = vm10 * ux + vm11 * uy + vm12 * uz;
+                    cam.uz = vm20 * ux + vm21 * uy + vm22 * uz;
+                }
+            }
+        }
+        "目標サイズ固定視野角" => {
+            let x = cam.tx - cam.x;
+            let y = cam.ty - cam.y;
+            let z = cam.tz - cam.z;
+            let l = (x * x + y * y + z * z).sqrt();
+            if l > 1e-6 && cam.d > 1e-6 {
+                let norm_x = x / l;
+                let norm_y = y / l;
+                let norm_z = z / l;
+                let r = l / cam.d;
+                let mut p = (screen_h / (cam.d * 2.0)).atan() * 360.0 / std::f64::consts::PI;
+                p = (p + track0).clamp(1.0, 120.0);
+                cam.d = screen_h / ((p * std::f64::consts::PI / 360.0).tan() * 2.0);
+                let new_l = r * cam.d;
+                cam.x = cam.tx - new_l * norm_x;
+                cam.y = cam.ty - new_l * norm_y;
+                cam.z = cam.tz - new_l * norm_z;
+            }
+        }
+        _ => {}
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Camera3D {
+    pub eye: [f64; 3],
+    #[allow(dead_code)]
+    pub target: [f64; 3],
+    pub roll: f64,
+    #[allow(dead_code)]
+    pub fov: f64,
+    pub focal_length: f64,
+    pub forward: [f64; 3],
+    pub right_prime: [f64; 3],
+    pub up_prime: [f64; 3],
+}
+
+impl Camera3D {
+    pub fn from_params(p: &CameraParams, fov: f64) -> Self {
+        let dx = p.tx - p.x;
+        let dy = p.ty - p.y;
+        let dz = p.tz - p.z;
+        let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+        let forward = if dist < 1e-6 {
+            [0.0, 0.0, 1.0]
+        } else {
+            [dx / dist, dy / dist, dz / dist]
+        };
+
+        // 上方向ベクトル
+        let up_norm = (p.ux * p.ux + p.uy * p.uy + p.uz * p.uz).sqrt();
+        let cam_up = if up_norm < 1e-6 {
+            if forward[1].abs() > 0.999 {
+                [0.0, 0.0, 1.0]
+            } else {
+                [0.0, -1.0, 0.0]
+            }
+        } else {
+            [p.ux / up_norm, p.uy / up_norm, p.uz / up_norm]
+        };
+
+        // right = cross(forward, cam_up)
+        let rx = forward[1] * cam_up[2] - forward[2] * cam_up[1];
+        let ry = forward[2] * cam_up[0] - forward[0] * cam_up[2];
+        let rz = forward[0] * cam_up[1] - forward[1] * cam_up[0];
+        let r_len = (rx * rx + ry * ry + rz * rz).sqrt();
+        let right = if r_len < 1e-6 {
+            [1.0, 0.0, 0.0]
+        } else {
+            [rx / r_len, ry / r_len, rz / r_len]
+        };
+
+        // up = cross(right, forward)
+        let ux = right[1] * forward[2] - right[2] * forward[1];
+        let uy = right[2] * forward[0] - right[0] * forward[2];
+        let uz = right[0] * forward[1] - right[1] * forward[0];
+        let up = [ux, uy, uz];
+
+        // ロール回転（傾き）
+        let roll_rad = p.rz.to_radians();
+        let cos_r = roll_rad.cos();
+        let sin_r = roll_rad.sin();
+        let right_prime = [
+            right[0] * cos_r + up[0] * sin_r,
+            right[1] * cos_r + up[1] * sin_r,
+            right[2] * cos_r + up[2] * sin_r,
+        ];
+        let up_prime = [
+            -right[0] * sin_r + up[0] * cos_r,
+            -right[1] * sin_r + up[1] * cos_r,
+            -right[2] * sin_r + up[2] * cos_r,
+        ];
+
+        Self {
+            eye: [p.x, p.y, p.z],
+            target: [p.tx, p.ty, p.tz],
+            roll: p.rz,
+            fov,
+            focal_length: p.d,
+            forward,
+            right_prime,
+            up_prime,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn new(eye: [f64; 3], target: [f64; 3], roll: f64, fov: f64) -> Self {
+        let dx = target[0] - eye[0];
+        let dy = target[1] - eye[1];
+        let dz = target[2] - eye[2];
+        let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+        let forward = if dist < 1e-6 {
+            [0.0, 0.0, 1.0]
+        } else {
+            [dx / dist, dy / dist, dz / dist]
+        };
+
+        // ワールドの上方向：Y軸下向きが画面下なので、上方向は [0.0, -1.0, 0.0]
+        let world_up = if forward[1].abs() > 0.999 {
+            [0.0, 0.0, 1.0]
+        } else {
+            [0.0, -1.0, 0.0]
+        };
+
+        // right = cross(forward, world_up)
+        let rx = forward[1] * world_up[2] - forward[2] * world_up[1];
+        let ry = forward[2] * world_up[0] - forward[0] * world_up[2];
+        let rz = forward[0] * world_up[1] - forward[1] * world_up[0];
+        let r_len = (rx * rx + ry * ry + rz * rz).sqrt();
+        let right = if r_len < 1e-6 {
+            [1.0, 0.0, 0.0]
+        } else {
+            [rx / r_len, ry / r_len, rz / r_len]
+        };
+
+        // up = cross(right, forward)
+        let ux = right[1] * forward[2] - right[2] * forward[1];
+        let uy = right[2] * forward[0] - right[0] * forward[2];
+        let uz = right[0] * forward[1] - right[1] * forward[0];
+        let up = [ux, uy, uz];
+
+        // ロール回転（傾き）
+        let roll_rad = roll.to_radians();
+        let cos_r = roll_rad.cos();
+        let sin_r = roll_rad.sin();
+        let right_prime = [
+            right[0] * cos_r + up[0] * sin_r,
+            right[1] * cos_r + up[1] * sin_r,
+            right[2] * cos_r + up[2] * sin_r,
+        ];
+        let up_prime = [
+            -right[0] * sin_r + up[0] * cos_r,
+            -right[1] * sin_r + up[1] * cos_r,
+            -right[2] * sin_r + up[2] * cos_r,
+        ];
+
+        // 焦点距離（AviUtl基準: 視野角0時は焦点距離1024.0）
+        let focal_length = if fov > 0.1 {
+            (1024.0 / 2.0) / (fov.to_radians() / 2.0).tan()
+        } else {
+            1024.0
+        };
+
+        Self {
+            eye,
+            target,
+            roll,
+            fov,
+            focal_length,
+            forward,
+            right_prime,
+            up_prime,
+        }
+    }
+
+    /// 3D ワールド座標 [x, y, z] をカメラ座標系に変換し、透視投影した結果 (screen_x, screen_y, scale_3d, z_cam) を返す
+    pub fn project(&self, p: [f64; 3]) -> Option<(f32, f32, f32, f64)> {
+        let vx = p[0] - self.eye[0];
+        let vy = p[1] - self.eye[1];
+        let vz = p[2] - self.eye[2];
+
+        let x_cam = vx * self.right_prime[0] + vy * self.right_prime[1] + vz * self.right_prime[2];
+        let y_cam = -(vx * self.up_prime[0] + vy * self.up_prime[1] + vz * self.up_prime[2]);
+        let z_cam = vx * self.forward[0] + vy * self.forward[1] + vz * self.forward[2];
+
+        if z_cam <= 1.0 {
+            // カメラの背面または近すぎるクリップ面
+            return None;
+        }
+
+        let scale_3d = (self.focal_length / z_cam) as f32;
+        let x_proj = (x_cam as f32) * scale_3d;
+        let y_proj = (y_cam as f32) * scale_3d;
+
+        Some((x_proj, y_proj, scale_3d, z_cam))
+    }
+}
+
 struct DrawCtx<'a> {
     painter: &'a egui::Painter,
     canvas: Rect,
@@ -240,11 +743,15 @@ struct DrawCtx<'a> {
     screen_h: f64,
     textures: &'a std::collections::HashMap<ObjectId, (egui::TextureId, [usize; 2])>,
     plugins: &'a PluginRegistry,
+    has_ffmpeg: bool,
+    camera: Option<Camera3D>,
 }
 
 #[derive(Default, Clone, Copy)]
 struct FilterVisuals {
     glow_strength: f32,
+    glow_radius: f32,
+    glow_color: Option<Color32>,
     chroma_shift: f32,
     chroma_angle: f32,
     border_width: f32,
@@ -252,6 +759,68 @@ struct FilterVisuals {
     shadow_offset: Option<egui::Vec2>,
     shadow_alpha: f32,
     tint_color: Option<(Color32, f32)>,
+    blend_mode: i32,
+}
+
+fn rotate_3d(p: [f64; 3], rx_deg: f64, ry_deg: f64, rz_deg: f64) -> [f64; 3] {
+    let rx = rx_deg.to_radians();
+    let ry = ry_deg.to_radians();
+    let rz = rz_deg.to_radians();
+
+    // 1. X軸回転
+    let cos_x = rx.cos();
+    let sin_x = rx.sin();
+    let x1 = p[0];
+    let y1 = p[1] * cos_x - p[2] * sin_x;
+    let z1 = p[1] * sin_x + p[2] * cos_x;
+
+    // 2. Y軸回転
+    let cos_y = ry.cos();
+    let sin_y = ry.sin();
+    let x2 = x1 * cos_y + z1 * sin_y;
+    let y2 = y1;
+    let z2 = -x1 * sin_y + z1 * cos_y;
+
+    // 3. Z軸回転
+    let cos_z = rz.cos();
+    let sin_z = rz.sin();
+    let x3 = x2 * cos_z - y2 * sin_z;
+    let y3 = x2 * sin_z + y2 * cos_z;
+    let z3 = z2;
+
+    [x3, y3, z3]
+}
+
+fn closed_stroke(painter: &egui::Painter, pts: &[Pos2], stroke: Stroke) {
+    if pts.len() < 2 {
+        return;
+    }
+    let n = pts.len();
+    for i in 0..n {
+        painter.line_segment([pts[i], pts[(i + 1) % n]], stroke);
+    }
+}
+
+fn project_3d_points(
+    cam: &Camera3D,
+    canvas: Rect,
+    scale: f32,
+    world_pos: [f64; 3],
+    rot: [f64; 3],
+    local_pts: &[[f32; 2]],
+    zoom: f32,
+) -> Option<Vec<Pos2>> {
+    let mut out = Vec::with_capacity(local_pts.len());
+    for &[lx, ly] in local_pts {
+        let p_rot = rotate_3d([(lx * zoom) as f64, (ly * zoom) as f64, 0.0], rot[0], rot[1], rot[2]);
+        let pw = [world_pos[0] + p_rot[0], world_pos[1] + p_rot[1], world_pos[2] + p_rot[2]];
+        if let Some((sx, sy, _, _)) = cam.project(pw) {
+            out.push(canvas.center() + vec2(sx, sy) * scale);
+        } else {
+            return None;
+        }
+    }
+    Some(out)
 }
 
 fn u32_to_color32(rgb: u32) -> Color32 {
@@ -286,6 +855,9 @@ fn draw_object(ctx: &DrawCtx, layer_idx: usize, obj: &TimelineObject, rel: Frame
     let base_zoom = ev("拡大率", 100.0) / 100.0;
     let base_rot = ev("回転", 0.0);
     let base_alpha = (1.0 - ev("透明度", 0.0) / 100.0).clamp(0.0, 1.0);
+    let base_rx = ev("X軸回転", 0.0);
+    let base_ry = ev("Y軸回転", 0.0);
+    let base_rz = if base_rot != 0.0 { base_rot } else { ev("Z軸回転", 0.0) };
 
     let time_sec = rel as f64 / ctx.fps.max(1.0);
     let total_sec = obj.length() as f64 / ctx.fps.max(1.0);
@@ -295,7 +867,7 @@ fn draw_object(ctx: &DrawCtx, layer_idx: usize, obj: &TimelineObject, rel: Frame
         x: base_x,
         y: base_y,
         z: base_z,
-        rz: base_rot,
+        rz: base_rz,
         zoom: 1.0,
         alpha: base_alpha,
         time: time_sec,
@@ -310,6 +882,9 @@ fn draw_object(ctx: &DrawCtx, layer_idx: usize, obj: &TimelineObject, rel: Frame
     };
 
     let mut fx = FilterVisuals::default();
+    if let Some(b) = draw.and_then(|d| d.text("blend")).and_then(|b| b.parse::<i32>().ok()) {
+        fx.blend_mode = b;
+    }
 
     // フィルタ効果・スクリプト (.anm / .obj / .cam / .scn) および .auf プラグインの評価
     for eff in &obj.effects {
@@ -324,7 +899,6 @@ fn draw_object(ctx: &DrawCtx, layer_idx: usize, obj: &TimelineObject, rel: Frame
         }
 
         // 1) プラグインレジストリ内の Lua スクリプト (.anm/.obj/.cam/.scn) または外部プラグインを実行
-        // （内蔵標準フィルタの場合は無駄なスクリプト探索をスキップして高速化）
         let is_builtin_filter = matches!(eff.name.as_str(), "フェード" | "振動" | "縁取り" | "シャドー" | "ドロップシャドウ" | "単色化") && eff.text("name").is_none();
         let ran_lua = if is_builtin_filter {
             false
@@ -352,7 +926,9 @@ fn draw_object(ctx: &DrawCtx, layer_idx: usize, obj: &TimelineObject, rel: Frame
             lua_st.oy += (phase * 1.3).cos() * ay;
         } else if eff.name.contains("グロー") || eff.name.contains("発光") || eff.name.contains("拡散光") || eff.name.contains("閃光") {
             let strength = eff.eval("強さ", rel, 60.0) as f32;
-            fx.glow_strength = (fx.glow_strength + strength / 100.0).min(2.5);
+            let diffusion = eff.eval("拡散", rel, 30.0) as f32;
+            fx.glow_strength = (fx.glow_strength + strength / 100.0).min(6.0);
+            fx.glow_radius = (fx.glow_radius + diffusion).max(10.0);
         } else if eff.name.contains("色収差") || eff.name.contains("色ズレ") {
             let shift = eff.eval("ズレ幅", rel, 8.0) as f32;
             let ang = (eff.eval("角度", rel, 0.0) as f32).to_radians();
@@ -372,21 +948,79 @@ fn draw_object(ctx: &DrawCtx, layer_idx: usize, obj: &TimelineObject, rel: Frame
             let col = eff.text("color").and_then(parse_color).unwrap_or(Color32::from_rgb(255, 200, 120));
             fx.tint_color = Some((col, strength));
         } else if !ran_lua && eff.name == "アニメーション効果" {
-            // スクリプトファイル未存在時のフォールバック評価
             let script_name = eff.text("name").unwrap_or_default();
             let sec = script_name.split('@').next().unwrap_or(script_name);
             match sec {
-                "揺れ" | "振動" => {
-                    let ax = eff.eval("X振幅", rel, 25.0);
-                    let ay = eff.eval("Y振幅", rel, 15.0);
-                    let period = eff.eval("周期", rel, 0.4).max(0.01);
-                    let phase = (time_sec / period) * (TAU as f64);
-                    lua_st.ox += phase.sin() * ax;
-                    lua_st.oy += (phase * 1.3).cos() * ay;
+                "揺れ" | "振動" | "震える" => {
+                    let ax = eff.eval("X振幅", rel, eff.eval("track0", rel, 25.0));
+                    let ay = eff.eval("Y振幅", rel, eff.eval("track0", rel, 15.0));
+                    let interval = eff.eval("間隔", rel, eff.eval("track2", rel, 0.0));
+                    let angle = eff.eval("角度", rel, eff.eval("track1", rel, 0.0));
+                    if interval <= 0.0 {
+                        lua_st.ox += aviutl_rand(-ax, ax, 0, (time_sec * 100.0) as i64);
+                        lua_st.oy += aviutl_rand(-ay, ay, 1, (time_sec * 100.0) as i64);
+                        if angle != 0.0 {
+                            lua_st.rz += aviutl_rand(-angle, angle, 2, (time_sec * 100.0) as i64);
+                        }
+                    } else {
+                        let t = time_sec * 100.0 / interval;
+                        let p = t.floor() as i64;
+                        let t_frac = t - (p as f64);
+                        let x0 = aviutl_rand(-1000.0, 1000.0, 0, p) / 1000.0 * ax;
+                        let x1 = aviutl_rand(-1000.0, 1000.0, 0, p + 1) / 1000.0 * ax;
+                        let x2 = aviutl_rand(-1000.0, 1000.0, 0, p + 2) / 1000.0 * ax;
+                        let x3 = aviutl_rand(-1000.0, 1000.0, 0, p + 3) / 1000.0 * ax;
+
+                        let y0 = aviutl_rand(-1000.0, 1000.0, 1, p) / 1000.0 * ay;
+                        let y1 = aviutl_rand(-1000.0, 1000.0, 1, p + 1) / 1000.0 * ay;
+                        let y2 = aviutl_rand(-1000.0, 1000.0, 1, p + 2) / 1000.0 * ay;
+                        let y3 = aviutl_rand(-1000.0, 1000.0, 1, p + 3) / 1000.0 * ay;
+
+                        lua_st.ox += aviutl_interpolation(t_frac, x0, x1, x2, x3);
+                        lua_st.oy += aviutl_interpolation(t_frac, y0, y1, y2, y3);
+                        if angle != 0.0 {
+                            let r0 = aviutl_rand(-1000.0, 1000.0, 2, p) / 1000.0 * angle;
+                            let r1 = aviutl_rand(-1000.0, 1000.0, 2, p + 1) / 1000.0 * angle;
+                            let r2 = aviutl_rand(-1000.0, 1000.0, 2, p + 2) / 1000.0 * angle;
+                            let r3 = aviutl_rand(-1000.0, 1000.0, 2, p + 3) / 1000.0 * angle;
+                            lua_st.rz += aviutl_interpolation(t_frac, r0, r1, r2, r3);
+                        }
+                    }
+                }
+                "振り子" => {
+                    let speed = eff.eval("速さ", rel, eff.eval("track0", rel, 2.0));
+                    let angle = eff.eval("角度", rel, eff.eval("track1", rel, 30.0));
+                    lua_st.rz += (time_sec * speed * std::f64::consts::PI).sin() * angle;
+                }
+                "円形配置" => {
+                    let circumference = eff.eval("円周", rel, eff.eval("track0", rel, 100.0));
+                    let radius = eff.eval("半径", rel, eff.eval("track1", rel, 100.0));
+                    let rot = eff.eval("回転", rel, eff.eval("track2", rel, 0.0));
+                    let shift = eff.eval("ずらし", rel, eff.eval("track3", rel, 0.0));
+                    let num = eff.eval("数", rel, 8.0).round().max(1.0) as usize;
+                    for i in 1..=num {
+                        let r = ((i as f64 - (num as f64 + 1.0) / 2.0) * circumference / 50.0 / (num as f64) + rot / 180.0) * std::f64::consts::PI;
+                        let x = r.sin() * radius;
+                        let y = -r.cos() * radius;
+                        let deg = r.to_degrees();
+                        let z = shift * deg / 360.0;
+                        lua_st.draw_calls.push(au2_plugin::LuaDrawCall {
+                            ox: x,
+                            oy: y,
+                            oz: z,
+                            zoom: 1.0,
+                            alpha: 1.0,
+                            rx: 0.0,
+                            ry: 0.0,
+                            rz: deg,
+                            color: None,
+                            primitive: None,
+                        });
+                    }
                 }
                 "点滅" => {
-                    let period = eff.eval("周期", rel, 0.5).max(0.01);
-                    let min_t = (eff.eval("最小透明度", rel, 60.0) / 100.0).clamp(0.0, 1.0);
+                    let period = eff.eval("周期", rel, eff.eval("track0", rel, 0.5)).max(0.01);
+                    let min_t = (eff.eval("最小透明度", rel, eff.eval("track1", rel, 60.0)) / 100.0).clamp(0.0, 1.0);
                     let w = (((time_sec / period) * (TAU as f64)).sin() + 1.0) * 0.5;
                     lua_st.alpha *= 1.0 - min_t * w;
                 }
@@ -404,7 +1038,9 @@ fn draw_object(ctx: &DrawCtx, layer_idx: usize, obj: &TimelineObject, rel: Frame
         match fcall.name.as_str() {
             "グロー" | "発光" | "拡散光" | "閃光" => {
                 let s = fcall.params.get("強さ").map(|v| v.as_num() as f32).unwrap_or(60.0);
-                fx.glow_strength = (fx.glow_strength + s / 100.0).min(2.5);
+                let d = fcall.params.get("拡散").map(|v| v.as_num() as f32).unwrap_or(30.0);
+                fx.glow_strength = (fx.glow_strength + s / 100.0).min(6.0);
+                fx.glow_radius = (fx.glow_radius + d).max(10.0);
             }
             "縁取り" => {
                 fx.border_width = fcall.params.get("サイズ").map(|v| v.as_num() as f32).unwrap_or(4.0);
@@ -426,17 +1062,56 @@ fn draw_object(ctx: &DrawCtx, layer_idx: usize, obj: &TimelineObject, rel: Frame
         return;
     }
 
-    let x = (base_x + lua_st.ox - lua_st.cx) as f32;
-    let y = (base_y + lua_st.oy - lua_st.cy) as f32;
-    let zoom = (base_zoom * lua_st.zoom).max(0.0) as f32;
-    let angle = (lua_st.rz as f32).to_radians();
+    let raw_x = base_x + lua_st.ox - lua_st.cx;
+    let raw_y = base_y + lua_st.oy - lua_st.cy;
+    let raw_z = base_z + lua_st.oz - lua_st.cz;
+    let raw_zoom = (base_zoom * lua_st.zoom).max(0.0);
+    let raw_rz = lua_st.rz;
+
+    let (x, y, zoom, angle) = if obj.camera_target {
+        if let Some(ref cam) = ctx.camera {
+            if let Some((proj_x, proj_y, scale_3d, _)) = cam.project([raw_x, raw_y, raw_z]) {
+                (
+                    proj_x,
+                    proj_y,
+                    (raw_zoom * scale_3d as f64) as f32,
+                    ((raw_rz - cam.roll) as f32).to_radians(),
+                )
+            } else {
+                return;
+            }
+        } else {
+            (
+                raw_x as f32,
+                raw_y as f32,
+                raw_zoom as f32,
+                (raw_rz as f32).to_radians(),
+            )
+        }
+    } else {
+        (
+            raw_x as f32,
+            raw_y as f32,
+            raw_zoom as f32,
+            (raw_rz as f32).to_radians(),
+        )
+    };
 
     // `obj.drawpoly(...)` が呼ばれている場合はポリゴン群を描画
     for poly in &lua_st.poly_calls {
         let pts: Vec<Pos2> = poly
             .pts
             .iter()
-            .map(|&(px, py, _)| ctx.canvas.center() + vec2(x + px as f32, y + py as f32) * ctx.scale)
+            .map(|&(px, py, pz)| {
+                if obj.camera_target {
+                    if let Some(ref cam) = ctx.camera {
+                        if let Some((proj_x, proj_y, _, _)) = cam.project([raw_x + px, raw_y + py, raw_z + pz]) {
+                            return ctx.canvas.center() + vec2(proj_x, proj_y) * ctx.scale;
+                        }
+                    }
+                }
+                ctx.canvas.center() + vec2(x + px as f32, y + py as f32) * ctx.scale
+            })
             .collect();
         let col = poly.color.map(u32_to_color32).unwrap_or(Color32::WHITE).gamma_multiply(poly.alpha as f32);
         let c = Pos2::new(
@@ -450,12 +1125,48 @@ fn draw_object(ctx: &DrawCtx, layer_idx: usize, obj: &TimelineObject, rel: Frame
     if !lua_st.draw_calls.is_empty() {
         let mut last_bounds = None;
         for dc in &lua_st.draw_calls {
-            let inst_x = (base_x + dc.ox) as f32;
-            let inst_y = (base_y + dc.oy) as f32;
-            let inst_zoom = (base_zoom * dc.zoom).max(0.0) as f32;
-            let inst_angle = (dc.rz as f32).to_radians();
+            let inst_raw_x = raw_x + dc.ox;
+            let inst_raw_y = raw_y + dc.oy;
+            let inst_raw_z = raw_z + dc.oz;
+            let inst_raw_zoom = (base_zoom * dc.zoom).max(0.0);
+            let inst_raw_rz = dc.rz;
+
+            let (inst_x, inst_y, inst_zoom, inst_angle) = if obj.camera_target {
+                if let Some(ref cam) = ctx.camera {
+                    if let Some((proj_x, proj_y, scale_3d, _)) = cam.project([inst_raw_x, inst_raw_y, inst_raw_z]) {
+                        (
+                            proj_x,
+                            proj_y,
+                            (inst_raw_zoom * scale_3d as f64) as f32,
+                            ((inst_raw_rz - cam.roll) as f32).to_radians(),
+                        )
+                    } else {
+                        continue;
+                    }
+                } else {
+                    (
+                        inst_raw_x as f32,
+                        inst_raw_y as f32,
+                        inst_raw_zoom as f32,
+                        (inst_raw_rz as f32).to_radians(),
+                    )
+                }
+            } else {
+                (
+                    inst_raw_x as f32,
+                    inst_raw_y as f32,
+                    inst_raw_zoom as f32,
+                    (inst_raw_rz as f32).to_radians(),
+                )
+            };
+
             let inst_alpha = dc.alpha.clamp(0.0, 1.0) as f32;
             let prim = dc.primitive.as_ref().or(lua_st.loaded_primitive.as_ref());
+            let inst_transform_3d = if obj.camera_target {
+                Some(([inst_raw_x, inst_raw_y, inst_raw_z], [base_rx, base_ry, inst_raw_rz]))
+            } else {
+                None
+            };
             last_bounds = draw_single_instance(
                 ctx,
                 obj,
@@ -468,6 +1179,7 @@ fn draw_object(ctx: &DrawCtx, layer_idx: usize, obj: &TimelineObject, rel: Frame
                 inst_alpha,
                 prim,
                 &fx,
+                inst_transform_3d,
                 selected,
             );
         }
@@ -478,6 +1190,12 @@ fn draw_object(ctx: &DrawCtx, layer_idx: usize, obj: &TimelineObject, rel: Frame
         }
         return;
     }
+
+    let transform_3d = if obj.camera_target {
+        Some(([raw_x, raw_y, raw_z], [base_rx, base_ry, raw_rz]))
+    } else {
+        None
+    };
 
     let bounds = draw_single_instance(
         ctx,
@@ -491,6 +1209,7 @@ fn draw_object(ctx: &DrawCtx, layer_idx: usize, obj: &TimelineObject, rel: Frame
         alpha,
         lua_st.loaded_primitive.as_ref(),
         &fx,
+        transform_3d,
         selected,
     );
 
@@ -514,6 +1233,7 @@ fn draw_single_instance(
     alpha: f32,
     loaded_prim: Option<&LuaLoadedPrimitive>,
     fx: &FilterVisuals,
+    transform_3d: Option<([f64; 3], [f64; 3])>,
     selected: bool,
 ) -> Option<Rect> {
     let center = ctx.canvas.center() + vec2(x, y) * ctx.scale;
@@ -530,7 +1250,20 @@ fn draw_single_instance(
         } else {
             c
         };
-        base.gamma_multiply(alpha)
+        // グローまたは加算合成（1, 11, 12）時の発光ハイライト強調
+        let is_glow_or_add = fx.glow_strength > 0.01 || fx.blend_mode == 1 || fx.blend_mode == 11 || fx.blend_mode == 12;
+        let final_base = if is_glow_or_add {
+            let boost = (fx.glow_strength * 0.25 + if fx.blend_mode == 1 { 0.4 } else { 0.18 }).min(0.7);
+            Color32::from_rgba_unmultiplied(
+                (base.r() as f32 * (1.0 - boost) + 255.0 * boost).min(255.0) as u8,
+                (base.g() as f32 * (1.0 - boost) + 255.0 * boost).min(255.0) as u8,
+                (base.b() as f32 * (1.0 - boost) + 255.0 * boost).min(255.0) as u8,
+                base.a(),
+            )
+        } else {
+            base
+        };
+        final_base.gamma_multiply(alpha)
     };
 
     // ドロップシャドウの背面描画
@@ -540,46 +1273,78 @@ fn draw_single_instance(
         ctx.painter.circle_filled(sh_center, 45.0 * k, sh_col);
     }
 
-    // グロー (32bit .auf / 内蔵グロー) の背面ハロー描画
+    // グロー (32bit .auf / 内蔵グロー) の背面ハロー描画（多層拡散ブルーム）
     if fx.glow_strength > 0.01 {
-        let glow_alpha = (fx.glow_strength * alpha * 90.0).min(180.0) as u8;
-        let glow_col = Color32::from_rgba_unmultiplied(255, 240, 180, glow_alpha);
-        ctx.painter.circle_filled(center, 85.0 * k * (1.0 + fx.glow_strength * 0.35), glow_col);
+        let diff_r = fx.glow_radius * k;
+        let halo_r = 75.0 * k * (1.0 + fx.glow_strength * 0.25) + diff_r;
+        let glow_alpha = (fx.glow_strength * alpha * 45.0).clamp(10.0, 160.0) as u8;
+        let glow_col = fx.glow_color.unwrap_or(Color32::from_rgba_unmultiplied(255, 235, 170, glow_alpha));
+        ctx.painter.circle_filled(center, halo_r, glow_col.gamma_multiply(0.35));
+        ctx.painter.circle_filled(center, halo_r * 0.6, glow_col.gamma_multiply(0.65));
+        ctx.painter.circle_filled(center, halo_r * 0.3, Color32::from_white_alpha((fx.glow_strength * alpha * 35.0).min(180.0) as u8));
     }
 
     // カスタムオブジェクト (.obj) 等で `obj.load("figure", ...)` や `obj.mes(...)` が実行された場合
     if let Some(prim) = loaded_prim {
         match prim {
-            LuaLoadedPrimitive::Figure { fig_type, color, size, .. } => {
+            LuaLoadedPrimitive::Figure { fig_type, color, size, line_width } => {
                 let sz = (*size as f32 * k).max(1.0);
                 let col = apply_tint(u32_to_color32(*color));
+                let is_stroke = *line_width > 0.0 && *line_width < *size && *line_width < 3999.0;
+                let stroke_w = (*line_width as f32 * k).max(1.0);
+                let stroke = Stroke::new(stroke_w, col);
+
                 if fx.border_width > 0.0 {
                     let bcol = fx.border_color.unwrap_or(Color32::WHITE).gamma_multiply(alpha);
                     ctx.painter.circle_filled(center, sz / 2.0 + fx.border_width * ctx.scale, bcol);
                 }
                 match fig_type.as_str() {
                     "四角形" => {
-                        fan(
-                            ctx.painter,
-                            center,
-                            &polygon(center, sz * std::f32::consts::FRAC_1_SQRT_2, 4, angle + PI / 4.0),
-                            col,
-                        );
+                        let pts = polygon(center, sz * std::f32::consts::FRAC_1_SQRT_2, 4, angle + PI / 4.0);
+                        if is_stroke {
+                            closed_stroke(ctx.painter, &pts, stroke);
+                        } else {
+                            fan(ctx.painter, center, &pts, col);
+                        }
                     }
                     "三角形" => {
-                        fan(ctx.painter, center, &polygon(center, sz / 2.0, 3, angle), col);
+                        let pts = polygon(center, sz / 2.0, 3, angle);
+                        if is_stroke {
+                            closed_stroke(ctx.painter, &pts, stroke);
+                        } else {
+                            fan(ctx.painter, center, &pts, col);
+                        }
                     }
                     "五角形" => {
-                        fan(ctx.painter, center, &polygon(center, sz / 2.0, 5, angle), col);
+                        let pts = polygon(center, sz / 2.0, 5, angle);
+                        if is_stroke {
+                            closed_stroke(ctx.painter, &pts, stroke);
+                        } else {
+                            fan(ctx.painter, center, &pts, col);
+                        }
                     }
                     "六角形" => {
-                        fan(ctx.painter, center, &polygon(center, sz / 2.0, 6, angle), col);
+                        let pts = polygon(center, sz / 2.0, 6, angle);
+                        if is_stroke {
+                            closed_stroke(ctx.painter, &pts, stroke);
+                        } else {
+                            fan(ctx.painter, center, &pts, col);
+                        }
                     }
                     "星型" => {
-                        fan(ctx.painter, center, &star(center, sz / 2.0, angle), col);
+                        let pts = star(center, sz / 2.0, angle);
+                        if is_stroke {
+                            closed_stroke(ctx.painter, &pts, stroke);
+                        } else {
+                            fan(ctx.painter, center, &pts, col);
+                        }
                     }
                     _ => {
-                        ctx.painter.circle_filled(center, sz / 2.0, col);
+                        if is_stroke {
+                            ctx.painter.circle_stroke(center, (sz - stroke_w).max(0.0) / 2.0, stroke);
+                        } else {
+                            ctx.painter.circle_filled(center, sz / 2.0, col);
+                        }
                     }
                 }
                 return Some(Rect::from_center_size(center, vec2(sz, sz)));
@@ -600,9 +1365,17 @@ fn draw_single_instance(
 
     match src.kind {
         EffectKind::Shape => {
-            let size = src.eval("サイズ", rel, 100.0) as f32 * k;
+            let raw_size = src.eval("サイズ", rel, 100.0) as f32;
+            let size = (raw_size * k).max(1.0);
+            let line_width = src.eval("ライン幅", rel, 0.0) as f32;
+            let aspect = src.eval("縦横比", rel, 0.0) as f32 / 100.0;
+            let (w_mult, h_mult) = if aspect >= 0.0 { (1.0 + aspect, 1.0) } else { (1.0, 1.0 - aspect) };
             let color = apply_tint(src.text("color").and_then(parse_color).unwrap_or(Color32::WHITE));
             let ty: u32 = src.text("type").and_then(|t| t.trim().parse().ok()).unwrap_or(1);
+            let is_stroke = line_width > 0.0 && line_width < raw_size && line_width < 3999.0;
+            let stroke_w = (line_width * k).max(1.0);
+            let stroke = Stroke::new(stroke_w, color);
+
             if fx.border_width > 0.0 && ty != 0 {
                 let bcol = fx.border_color.unwrap_or(Color32::WHITE).gamma_multiply(alpha);
                 ctx.painter.circle_filled(center, size / 2.0 + fx.border_width * ctx.scale, bcol);
@@ -612,73 +1385,142 @@ fn draw_single_instance(
                 ctx.painter.circle_filled(center - shift_vec, size / 2.0, Color32::from_rgba_unmultiplied(255, 40, 40, (alpha * 130.0) as u8));
                 ctx.painter.circle_filled(center + shift_vec, size / 2.0, Color32::from_rgba_unmultiplied(40, 180, 255, (alpha * 130.0) as u8));
             }
-            match ty {
+
+            // ローカル頂点列を生成（縦横比を反映）
+            let local_pts: Vec<[f32; 2]> = match ty {
                 0 => {
-                    // 背景: プロジェクト解像度の矩形を中心座標(X, Y)・拡大率・回転・透明度を適用して描画
-                    let bg_w = ctx.screen_w as f32 * k;
-                    let bg_h = ctx.screen_h as f32 * k;
-                    let r = Rect::from_center_size(center, vec2(bg_w, bg_h));
-                    let corners = rotated_rect(r, angle);
-                    fan(ctx.painter, center, &corners, color);
-                    Some(r)
+                    // 背景
+                    let hw = ctx.screen_w as f32 / 2.0;
+                    let hh = ctx.screen_h as f32 / 2.0;
+                    vec![[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]]
                 }
                 1 => {
-                    // 円
-                    ctx.painter.circle_filled(center, size / 2.0, color);
-                    Some(Rect::from_center_size(center, vec2(size, size)))
+                    // 円 (24分割の多角形近似で3D透視投影にも美しく対応)
+                    let rx = (raw_size * w_mult) / 2.0;
+                    let ry = (raw_size * h_mult) / 2.0;
+                    (0..24).map(|i| {
+                        let a = TAU * (i as f32) / 24.0;
+                        [a.cos() * rx, a.sin() * ry]
+                    }).collect()
                 }
                 2 => {
                     // 四角形
-                    fan(ctx.painter, center, &polygon(center, size * std::f32::consts::FRAC_1_SQRT_2, 4, angle + PI / 4.0), color);
-                    Some(Rect::from_center_size(center, vec2(size, size)))
+                    let hw = (raw_size * w_mult) / 2.0;
+                    let hh = (raw_size * h_mult) / 2.0;
+                    vec![[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]]
                 }
                 3 => {
                     // 三角形
-                    fan(ctx.painter, center, &polygon(center, size / 2.0, 3, angle), color);
-                    Some(Rect::from_center_size(center, vec2(size, size)))
+                    let r = raw_size / 2.0;
+                    (0..3).map(|i| {
+                        let a = -PI / 2.0 + TAU * (i as f32) / 3.0;
+                        [a.cos() * r * w_mult, a.sin() * r * h_mult]
+                    }).collect()
                 }
                 4 => {
                     // 五角形
-                    fan(ctx.painter, center, &polygon(center, size / 2.0, 5, angle), color);
-                    Some(Rect::from_center_size(center, vec2(size, size)))
+                    let r = raw_size / 2.0;
+                    (0..5).map(|i| {
+                        let a = -PI / 2.0 + TAU * (i as f32) / 5.0;
+                        [a.cos() * r * w_mult, a.sin() * r * h_mult]
+                    }).collect()
                 }
                 5 => {
                     // 六角形
-                    fan(ctx.painter, center, &polygon(center, size / 2.0, 6, angle), color);
-                    Some(Rect::from_center_size(center, vec2(size, size)))
+                    let r = raw_size / 2.0;
+                    (0..6).map(|i| {
+                        let a = -PI / 2.0 + TAU * (i as f32) / 6.0;
+                        [a.cos() * r * w_mult, a.sin() * r * h_mult]
+                    }).collect()
                 }
                 6 => {
                     // 星型
-                    fan(ctx.painter, center, &star(center, size / 2.0, angle), color);
-                    Some(Rect::from_center_size(center, vec2(size, size)))
+                    let r = raw_size / 2.0;
+                    (0..10).map(|i| {
+                        let rad = if i % 2 == 0 { r } else { r * 0.4 };
+                        let a = -PI / 2.0 + TAU * (i as f32) / 10.0;
+                        [a.cos() * rad * w_mult, a.sin() * rad * h_mult]
+                    }).collect()
                 }
                 n => {
-                    let sides = (n as usize).clamp(3, 12);
-                    fan(ctx.painter, center, &polygon(center, size / 2.0, sides, angle), color);
-                    Some(Rect::from_center_size(center, vec2(size, size)))
+                    let sides = (n as usize).clamp(3, 24);
+                    let r = raw_size / 2.0;
+                    (0..sides).map(|i| {
+                        let a = -PI / 2.0 + TAU * (i as f32) / sides as f32;
+                        [a.cos() * r * w_mult, a.sin() * r * h_mult]
+                    }).collect()
                 }
+            };
+
+            // 頂点をスクリーン座標に変換（3Dカメラ投影 or 2D平面変換）
+            let screen_pts: Option<Vec<Pos2>> = if let (Some(cam), Some((w_pos, rot))) = (ctx.camera, transform_3d) {
+                project_3d_points(&cam, ctx.canvas, ctx.scale, w_pos, rot, &local_pts, zoom / ctx.scale)
+            } else {
+                let rot = Rot2::from_angle(angle);
+                Some(local_pts.iter().map(|&[lx, ly]| center + rot * vec2(lx * k, ly * k)).collect())
+            };
+
+            let Some(pts) = screen_pts else {
+                return None;
+            };
+
+            if is_stroke && ty != 0 {
+                closed_stroke(ctx.painter, &pts, stroke);
+            } else {
+                fan(ctx.painter, center, &pts, color);
             }
+
+            Some(Rect::from_center_size(center, vec2(size * w_mult, size * h_mult)))
         }
         EffectKind::Text => {
-            let size = (src.eval("サイズ", rel, 34.0) as f32 * k).max(1.0);
+            // epaint のフォントアトラスは巨大フォント（>100pt）でアトラス境界違反・クラッシュを起こすため、
+            // フォントのラスタライズサイズは最大 96.0 に抑え、それ以上の超巨大テキストはメッシュ頂点スケーリングで安全に描画する
+            let max_font_size = 96.0_f32;
+            let raw_size = (src.eval("サイズ", rel, 34.0) as f32 * k).max(1.0);
+            let (font_size, scale_up) = if raw_size > max_font_size {
+                (max_font_size, (raw_size / max_font_size).min(100.0))
+            } else {
+                (raw_size, 1.0)
+            };
             let color = apply_tint(src.text("color").and_then(parse_color).unwrap_or(Color32::WHITE));
             let text = src.text("text").unwrap_or_default().replace("\r\n", "\n");
+
+            let render_safe_text = |painter: &egui::Painter, target_center: Pos2, galley: std::sync::Arc<egui::epaint::Galley>, col: Color32, text_angle: f32| {
+                let unscaled_half = galley.size() / 2.0;
+                let unscaled_pos = target_center - Rot2::from_angle(text_angle) * unscaled_half;
+                let shape = egui::epaint::TextShape::new(unscaled_pos, galley, col).with_angle(text_angle);
+                if scale_up > 1.001 {
+                    let clipped = egui::epaint::ClippedShape {
+                        clip_rect: egui::Rect::EVERYTHING,
+                        shape: egui::Shape::Text(shape),
+                    };
+                    let primitives = painter.ctx().tessellate(vec![clipped], painter.ctx().pixels_per_point());
+                    for prim in primitives {
+                        if let egui::epaint::Primitive::Mesh(mut mesh) = prim.primitive {
+                            for v in &mut mesh.vertices {
+                                v.pos = target_center + (v.pos - target_center) * scale_up;
+                            }
+                            painter.add(egui::Shape::Mesh(mesh));
+                        }
+                    }
+                } else {
+                    painter.add(shape);
+                }
+            };
+
             if fx.chroma_shift > 0.5 {
                 let shift_vec = vec2(fx.chroma_angle.cos(), fx.chroma_angle.sin()) * fx.chroma_shift * ctx.scale;
                 let r_col = Color32::from_rgba_unmultiplied(255, 50, 50, (alpha * 150.0) as u8);
                 let b_col = Color32::from_rgba_unmultiplied(50, 180, 255, (alpha * 150.0) as u8);
-                let g1 = ctx.painter.layout(text.clone(), FontId::proportional(size), r_col, f32::INFINITY);
-                let g2 = ctx.painter.layout(text.clone(), FontId::proportional(size), b_col, f32::INFINITY);
-                let half = g1.size() / 2.0;
-                let pos = center - Rot2::from_angle(angle) * half;
-                ctx.painter.add(egui::epaint::TextShape::new(pos - shift_vec, g1, r_col).with_angle(angle));
-                ctx.painter.add(egui::epaint::TextShape::new(pos + shift_vec, g2, b_col).with_angle(angle));
+                let g1 = ctx.painter.layout(text.clone(), FontId::proportional(font_size), r_col, f32::INFINITY);
+                let g2 = ctx.painter.layout(text.clone(), FontId::proportional(font_size), b_col, f32::INFINITY);
+                render_safe_text(ctx.painter, center - shift_vec, g1, r_col, angle);
+                render_safe_text(ctx.painter, center + shift_vec, g2, b_col, angle);
             }
-            let galley = ctx.painter.layout(text, FontId::proportional(size), color, f32::INFINITY);
-            let half = galley.size() / 2.0;
-            let pos = center - Rot2::from_angle(angle) * half;
-            let r = Rect::from_center_size(center, galley.size());
-            ctx.painter.add(egui::epaint::TextShape::new(pos, galley, color).with_angle(angle));
+            let galley = ctx.painter.layout(text, FontId::proportional(font_size), color, f32::INFINITY);
+            let scaled_size = galley.size() * scale_up;
+            let r = Rect::from_center_size(center, scaled_size);
+            render_safe_text(ctx.painter, center, galley, color, angle);
             Some(r)
         }
         EffectKind::ImageFile | EffectKind::VideoFile => {
@@ -710,7 +1552,18 @@ fn draw_single_instance(
                 let corners = rotated_rect(r, angle);
                 let placeholder_col = apply_tint(Color32::from_rgba_unmultiplied(40, 50, 70, 35));
                 fan(ctx.painter, center, &corners, placeholder_col);
-                if selected {
+
+                let is_video = matches!(src.kind, EffectKind::VideoFile);
+                if is_video && !ctx.has_ffmpeg {
+                    // FFmpeg が見つからない場合は選択中かどうかにかかわらず親切に案内
+                    ctx.painter.text(
+                        center,
+                        Align2::CENTER_CENTER,
+                        format!("{}\n【動画デコーダー (FFmpeg) 未検出】\n画面上部の「FFmpeg を自動ダウンロード」を押してください", obj.display_name()),
+                        FontId::proportional((13.0 * zoom.max(0.5)).min(22.0)),
+                        Color32::from_rgb(255, 140, 140),
+                    );
+                } else if selected {
                     ctx.painter.text(
                         center,
                         Align2::CENTER_CENTER,
@@ -831,3 +1684,81 @@ fn fan(painter: &egui::Painter, center: Pos2, pts: &[Pos2], color: Color32) {
     }
     painter.add(Shape::mesh(mesh));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_aviutl_camera_effects_math() {
+        let mut cam = CameraParams {
+            x: 0.0,
+            y: 0.0,
+            z: -1024.0,
+            tx: 0.0,
+            ty: 0.0,
+            tz: 0.0,
+            rz: 0.0,
+            ux: 0.0,
+            uy: -1.0,
+            uz: 0.0,
+            d: 1024.0,
+        };
+
+        // 1. 手ぶれテスト
+        apply_camera_effect(&mut cam, "手ぶれ", 50.0, 10.0, 20.0, 0.0, 0.5, 720.0);
+        assert!(cam.tx.abs() > 0.0 || cam.ty.abs() > 0.0 || cam.tz.abs() > 0.0, "手ぶれで注視点座標が変化すること");
+        assert!(cam.rz.abs() > 0.0, "手ぶれでロール角が変化すること");
+
+        // 2. 目標中心回転テスト (水平90度回転)
+        let mut rot_cam = CameraParams {
+            x: 0.0,
+            y: 0.0,
+            z: -1000.0,
+            tx: 0.0,
+            ty: 0.0,
+            tz: 0.0,
+            rz: 0.0,
+            ux: 0.0,
+            uy: -1.0,
+            uz: 0.0,
+            d: 1024.0,
+        };
+        apply_camera_effect(&mut rot_cam, "目標中心回転", 90.0, 0.0, 0.0, 0.0, 0.0, 720.0);
+        assert!((rot_cam.x.abs() - 1000.0).abs() < 1.0, "水平90度回転でX座標が±1000近傍になること: got {}", rot_cam.x);
+        assert!(rot_cam.z.abs() < 1.0, "水平90度回転でZ座標が0近傍になること: got {}", rot_cam.z);
+
+        // 3. 目標サイズ固定視野角テスト (ドリーズーム)
+        let mut fov_cam = CameraParams {
+            x: 0.0,
+            y: 0.0,
+            z: -1000.0,
+            tx: 0.0,
+            ty: 0.0,
+            tz: 0.0,
+            rz: 0.0,
+            ux: 0.0,
+            uy: -1.0,
+            uz: 0.0,
+            d: 1000.0,
+        };
+        apply_camera_effect(&mut fov_cam, "目標サイズ固定視野角", 20.0, 0.0, 0.0, 0.0, 0.0, 720.0);
+        assert!((fov_cam.z - (-1000.0)).abs() > 10.0, "視野角変更に伴いカメラ距離が再計算されること: got {}", fov_cam.z);
+    }
+
+    #[test]
+    fn test_aviutl_rand_and_interpolation() {
+        let r1 = aviutl_rand(-10.0, 10.0, 1, 100);
+        let r2 = aviutl_rand(-10.0, 10.0, 1, 100);
+        assert_eq!(r1, r2, "同一シード・フレームで決定論的に同じ乱数が得られること");
+        assert!(r1 >= -10.0 && r1 <= 10.0, "範囲内であること");
+
+        // Catmull-Rom スプライン補間: t=0 で p1, t=1 で p2 を通ること
+        let val_0 = aviutl_interpolation(0.0, 10.0, 20.0, 30.0, 40.0);
+        let val_1 = aviutl_interpolation(1.0, 10.0, 20.0, 30.0, 40.0);
+        assert!((val_0 - 20.0).abs() < 1e-6, "t=0 で p1 (20.0) を通ること: got {}", val_0);
+        assert!((val_1 - 30.0).abs() < 1e-6, "t=1 で p2 (30.0) を通ること: got {}", val_1);
+    }
+}
+
+

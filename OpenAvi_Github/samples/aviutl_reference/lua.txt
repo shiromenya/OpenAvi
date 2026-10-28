@@ -1,0 +1,969 @@
+
+- Luaスクリプトについて -
+
+	スクリプト制御、スクリプトファイル(*.anm,*.obj,*.scn,*.cam)、
+	テキストのスクリプト制御文字で利用可能なスクリプトには
+	Lua言語が使用出来ます。また幾つかの変数と関数が拡張されています。
+
+
+- 変数 -
+
+	対象オブジェクトの情報が以下の変数に入ります。
+
+	obj.ox : 基準座標からの相対座標X
+	obj.oy : 基準座標からの相対座標Y
+	obj.oz : 基準座標からの相対座標Z
+	obj.rx : X軸回転角度(360.0で一回転)
+	obj.ry : Y軸回転角度(360.0で一回転)
+	obj.rz : Z軸回転角度(360.0で一回転)
+	obj.cx : 中心の相対座標X
+	obj.cy : 中心の相対座標Y
+	obj.cz : 中心の相対座標Z
+	obj.zoom : 拡大率(1.0=等倍)
+	obj.alpha : 不透明度(0.0～1.0/0.0=透明/1.0=不透明)
+	obj.aspect : アスペクト比(-1.0～1.0/プラス=横縮小/マイナス縦縮小)
+	obj.x : 表示基準座標X (ReadOnly)
+	obj.y : 表示基準座標Y (ReadOnly)
+	obj.z : 表示基準座標Z (ReadOnly)
+	obj.w : 画像サイズW (ReadOnly)
+	obj.h : 画像サイズH (ReadOnly)
+	obj.screen_w : スクリーンサイズW (ReadOnly)
+	obj.screen_h : スクリーンサイズH (ReadOnly)
+	obj.framerate : フレームレート (ReadOnly)
+	obj.frame : オブジェクト基準での現在のフレーム番号 (ReadOnly)
+	obj.time : オブジェクト基準での現在の時間(秒) (ReadOnly)
+	obj.totalframe : オブジェクトの総フレーム数 (ReadOnly)
+	obj.totaltime : オブジェクトの総時間(秒) (ReadOnly)
+	obj.layer : オブジェクトが配置されているレイヤー (ReadOnly)
+	obj.index : 複数オブジェクト時の番号 (ReadOnly) ※個別オブジェクト用
+	obj.num : 複数オブジェクト時の数(1=単体オブジェクト/0=不定) (ReadOnly) ※個別オブジェクト用
+	obj.track0 : トラックバー0の値 (ReadOnly) ※スクリプトファイル内のみ使用可
+	obj.track1 : トラックバー1の値 (ReadOnly) ※スクリプトファイル内のみ使用可
+	obj.track2 : トラックバー2の値 (ReadOnly) ※スクリプトファイル内のみ使用可
+	obj.track3 : トラックバー3の値 (ReadOnly) ※スクリプトファイル内のみ使用可
+	obj.check0 : チェックボックスの値 (ReadOnly) ※スクリプトファイル内のみ使用可
+
+
+- 注意点 -
+
+	○モーションブラー等に対応する為にはobj.frameは使わずobj.timeを使うようにしてください。
+	○pixel系の関数でオブジェクト全体をドット処理するとかなり重いのであまり実用向きではありません。
+	○スクリプトはSJISの2バイト文字の0x5cをエスケープ処理してから実行されます。
+	○スクリプト制御、テキストオブジェクト内のスクリプトのUnicode文字はUnicodeタグ(&#????;)に変換されます。
+	○扱えるスクリプトの最大サイズは約32KBです。それ以上の場合はdofile()等を活用してください。
+	○スクリプトからスクリプトを呼び出した場合は上手く動作しない場合があります。
+
+
+- 関数 -
+
+	以下の関数が追加されています。
+
+	○obj.mes(text)
+		テキストオブジェクトの中で指定のテキストを追加します。
+		テキストオブジェクトのテキスト内のみ使用出来ます。
+		※obj.を省略してmes()のみでも使用出来ます。
+		text	: 表示するテキストを指定します。
+		例：obj.mes("この文字が挿入されて表示されます")
+
+	○obj.effect([name,param1,value1,param2,value2,...])
+		指定のフィルタ効果を実行します。メディアオブジェクトのみ使用出来ます。
+		引数なしで呼ぶとスクリプト以降のフィルタ効果を実行します。
+		name	: エフェクトの名前を指定します。
+		param1	: エフェクトのパラメータの名前を指定します。
+		value1	: エフェクトのパラメータの値を指定します。
+		param?,value?の組み合わせは必要な分だけ指定できます。
+		※トラックバー、チェックボックス以外の設定のparam,valueは
+		オブジェクトファイルのエクスポート等で出力された時の名前や値になります。
+		※名称が変わるトラックバーはエクスポート等の出力での名前を参照して下さい。
+		※ディスプレイスメントマップの形状指定で"type"を0,"name"を"*tempbuffer"に
+		指定するとtempbufferを形状として読み込みます。
+		例：obj.effect("色調補正","明るさ",150,"色相",180)
+
+	○obj.draw([ox,oy,oz,zoom,alpha,rx,ry,rz])
+		現在のオブジェクトを描画します。メディアオブジェクトのみ使用出来ます。
+		通常何もしなくても最後に描画されますがobj.draw()を使うことにより
+		オブジェクトを複数回描画することが出来ます。
+		※obj.draw()を使用した場合スクリプト以降のフィルタ効果は実行されません。
+		※obj.effect()を引数なしで呼ぶことで事前にスクリプト以降のフィルタ効果を実行出来ます。
+		ox	: 相対座標X
+		oy	: 相対座標Y
+		oz	: 相対座標Z
+		zoom	: 拡大率(1.0=等倍)
+		alpha	: 不透明度(0.0=透明/1.0=不透明)
+		rx	: X軸回転角度(360.0で一回転)
+		ry	: Y軸回転角度(360.0で一回転)
+		rz	: Z軸回転角度(360.0で一回転)
+		例：obj.draw(2,10,0)
+
+	○obj.drawpoly(x0,y0,z0,x1,y1,z1,x2,y2,z2,x3,y3,z3[,u0,v0,u1,v1,u2,v2,u3,v3,alpha])
+		現在のオブジェクトの任意部分を任意の四角形で描画します。メディアオブジェクトのみ使用出来ます。
+		※内角が全て180度以下の平面以外は正しく描画されません。
+		※頂点0から3が時計回りになる面が表面になります。
+		※obj.drawpoly()を使用した場合スクリプト以降のフィルタ効果は実行されません。
+		x0,y0,z0 : 四角形の頂点0の座標
+		x1,y1,z1 : 四角形の頂点1の座標
+		x2,y2,z2 : 四角形の頂点2の座標
+		x3,y3,z3 : 四角形の頂点3の座標
+		u0,v0	 : 頂点0に対応するオブジェクトの画像の座標
+		u1,v1	 : 頂点1に対応するオブジェクトの画像の座標
+		u2,v2	 : 頂点2に対応するオブジェクトの画像の座標
+		u3,v3	 : 頂点3に対応するオブジェクトの画像の座標
+		例：obj.drawpoly(-50,-50,0, 50,-50,0, 50,50,0, -50,50,0, 0,0, obj.w,0, obj.w,obj.h, 0,obj.h)
+
+	○obj.load([type],...)
+		現在のオブジェクトの画像を読み込みます。
+		typeを省略した場合は自動的に判別します。
+		※読み込まれていた画像は破棄されます。
+
+		◇動画ファイル
+			obj.load("movie",file[,time,flag])
+			動画ファイルから指定時間の画像を読み込みます。
+			file	: 動画ファイル名
+			time	: 表示する画像の時間(秒)(省略時はオブジェクトの現時間)
+			flag	: 0=アルファ無し / 1=アルファ付き
+			戻り値	: 動画の総時間(秒)
+			例：obj.load("movie","c:\\test.avi")
+		◇画像ファイル
+			obj.load("image",file)
+			画像ファイルを読み込みます。
+			file	: 画像ファイル名
+			例：obj.load("image","c:\\test.bmp")
+		◇テキスト
+			obj.load("text",text[,speed,time])
+			テキストを読み込みます。
+			色とサイズ、フォントの制御文字が使用出来ます。
+			speed,timeを設定すると表示する文字数を変更出来ます。
+			※テキストオブジェクトには使用出来ません。
+			text	: 読み込むテキスト
+			speed	: timeパラメータの1秒間で表示する文字数
+			time	: speedパラメータに対する経過時間
+			例：obj.load("text","この文字が画像として読み込まれます")
+		◇図形
+			図形を読み込みます。
+			obj.load("figure",name[,color,size,line])
+			name	: 図形名
+			color	: 色(0x000000～0xffffff)
+			size	: 図形のサイズ
+			line	: 図形のライン幅
+			例：obj.load("figure","円",0xffffff,100)
+		◇フレームバッファ
+			フレームバッファから読み込みます。
+			load("framebuffer"[,x,y,w,h])
+			x,y,w,h	: フレームバッファから取得する範囲(省略時は全体)
+		◇仮想バッファ
+			仮想バッファから読み込みます。
+			※仮想バッファはobj.copybuffer(),obj.setoption()で作成することが出来ます。
+			load("tempbuffer"[,x,y,w,h])
+			x,y,w,h	: 仮想バッファから取得する範囲(省略時は全体)
+		◇レイヤー上のオブジェクト
+			指定のレイヤー上のオブジェクトを読み込みます。
+			obj.load("layer",no[,effect])
+			no	: レイヤー番号(1～)
+			effect	: 追加エフェクトの実行( true=する / false<デフォルト>=しない )
+		◇直前オブジェクト
+			直前オブジェクトを読み込みます。
+			obj.load("before");
+			カスタムオブジェクトで他のオブジェクトを読み込む前の時のみ使えます。
+
+	○obj.setfont(name,size[,type,col1,col2])
+		obj.load()のテキストで使うフォントを指定します。
+		※スクリプトの呼び出し毎に指定する必要があります。
+		name	: フォント名
+		size	: フォントサイズ
+		type	: 文字の装飾(0～4)
+			  0=標準文字 / 1=影付き文字 / 2=影付き文字(薄)
+			  3=縁取り文字 / 4=縁取り文字(細)
+		col1	: 文字の色(0x000000～0xffffff)
+		col2	: 影・縁の色(0x000000～0xffffff)
+
+	○obj.rand(st_num,ed_num[,seed,frame])
+		乱数を発生させます。通常の乱数と異なり同一時間のフレームで
+		常に同じ値が出るように乱数を発生させます。
+		※obj.を省略してrand()のみでも使用出来ます。
+		st_num	: 乱数の最小値
+		ed_num	: 乱数の最大値
+		seed	: 乱数の種(省略時はオブジェクト毎に異なる乱数になります
+			  プラスの値を指定すると種が同じでもオブジェクト毎に異なる乱数になり
+			  マイナスの値では種が同じならば全てのオブジェクトで同じ乱数になります)
+		frame	: フレーム番号(省略時は現在のフレームになります)
+		例：obj.rand(10,20)
+
+	○obj.setoption(name,value)
+		現在のオブジェクトの各種オプションを設定します。
+		※スクリプトの呼び出し毎に指定する必要があります。
+		name	: オプション名
+		value	: オプション値
+
+		◇裏面を表示しない
+			obj.setoption("culling",value)
+			value	: 0=表示 / 1=非表示
+
+		◇カメラの方向を向く
+			obj.setoption("billboard",value)
+			value	: 0=向かない / 1=横方向のみ / 2=縦方向のみ / 3=向く
+
+		◇シャドーの対象
+			obj.setoption("shadow",value)
+			value	: 0=非対象 / 1=対象
+
+		◇アンチエイリアス
+			obj.setoption("antialias",value)
+			value	: 0=しない / 1=する
+
+		◇合成モード
+			obj.setoption("blend",value[,option])
+			value	: 0=通常 / 1=加算 / 2=減算 / 3=乗算 / 4=スクリーン
+				  5=オーバーレイ / 6=比較(明) / 7=比較(暗) / 8=輝度 / 9=色差
+				  以下は仮想バッファ専用の合成モードです。
+				  "alpha_add"=色情報は加重平均してアルファ値は加算します
+				  "alpha_max"=色情報は加重平均してアルファ値は大きい方を採用します
+				  "alpha_sub"=色情報は何もせずにアルファ値を減算します
+				  "alpha_add2"=色情報は重ね合わせしてアルファ値は加算します
+			option	: "force"=強制指定モード
+			フレームバッファへの描画の合成モードは元々の合成モードが通常の場合のみ反映されます。
+			元々が通常以外の場合で反映させるには"force"オプションを指定してください。
+
+		◇描画先を仮想バッファに変更する
+			obj.setoption("drawtarget","tempbuffer"[,w,h])
+			w,h	: 仮想バッファのサイズ(省略時は初期化しません)
+			描画先を仮想バッファにするとobj.draw(),obj.drawpoly()での描画が
+			仮想バッファに対して行われます。この場合はオブジェクトの持っている
+			座標等の設定は反映せず引数の座標そのままで描画されます。
+			サイズを指定すると仮想バッファを透明色で初期化します。
+			仮想バッファは全てのオブジェクトで共用になります。
+
+		◇描画先をフレームバッファに変更する
+			obj.setoption("drawtarget","framebuffer")
+			obj.draw(),obj.drawpoly()の描画先をフレームバッファにします。
+			フレームバッファに対してdraw()等で描画を行っていない場合には
+			setoption()で変更しなくてもスクリプト終了後には自動的に
+			フレームバッファに対しての描画となります。
+
+		◇スクリプト内でフレームバッファに描画されたかのステータスを変更する
+			obj.setoption("draw_state",flag)
+			flag	: true=描画済み / false=未描画
+
+		◇オブジェクトのフォーカス枠モード
+			obj.setoption("focus_mode",value)
+			value	: "fixed_size"=大きさ固定の枠にする
+
+		◇カメラのパラメータを設定する
+			カメラの各種パラメータを設定します。
+			カメラがエディットモードの時は反映されません。
+			※カメラ効果、スクリプト(カメラ制御)のみ使用可
+			obj.setoption("camera_param",cam)
+			cam	: カメラのパラメータ(テーブル)
+			   .x	: カメラの座標X
+			   .y	: カメラの座標Y
+			   .z	: カメラの座標Z
+			   .tx	: カメラの目標座標X
+			   .ty	: カメラの目標座標Y
+			   .tz	: カメラの目標座標Z
+			   .rz	: カメラの傾き
+			   .ux	: カメラの上方向単位ベクトルX
+			   .uy	: カメラの上方向単位ベクトルY
+			   .uz	: カメラの上方向単位ベクトルZ
+			   .d	: カメラからスクリーンまでの距離(焦点距離)
+			例：cam = obj.getoption("camera_param");
+
+	○obj.getoption(name,...)
+		現在のオブジェクトの各種オプションを取得します。
+		name	: オプション名
+
+		◇トラックバーの移動モード
+			obj.getoption("track_mode",value)
+			value	: トラックバーの番号
+			戻り値	: 0=無し / 1=直線 / 2=曲線 / 3=瞬間 / 4=中間点
+				  5=移動量 / 6=ランダム / 7=加減速 / 8=反復
+		◇オブジェクトの区間の数
+			obj.getoption("section_num")
+			戻り値	: 区間の数(中間点の数+1)
+
+		◇スクリプト名を取得する
+			obj.getoption("script_name"[,value][,skip])
+			value	: フィルタ効果の上下の相対位置(0は自分/マイナスは上/プラスは下)
+			skip    : 無効になっているフィルタ効果をスキップするか( true=する / false<デフォルト>=しない )
+			戻り値	: スクリプト名(対象がスクリプト以外なら空のテキスト)
+			例：if obj.getoption("script_name") == obj.getoption("script_name",-1) then
+			※標準で入っているスクリプト名は取得出来ません
+
+		◇GUIの表示状態を調べる
+			obj.getoption("gui")
+			戻り値	: true=表示 / false=非表示
+			※動画の出力中は非表示状態になります。
+
+		◇カメラ制御状態を取得する
+			obj.getoption("camera_mode")
+			戻り値	: 0=カメラ制御対象外 / 0以外=カメラ制御対象
+
+		◇カメラのパラメータを取得する
+			obj.getoption("camera_param")
+			戻り値	: カメラのパラメータ(テーブル)
+			※テーブルの内容はobj.setoption("camera_param")と同じです。
+			例：cam = obj.getoption("camera_param");
+
+		◇個別オブジェクトが有効かを調べる
+			obj.getoption("multi_object")
+			戻り値	: true=有効 / false=無効
+
+	○obj.getvalue(target[,time,section])
+		現在のオブジェクトの設定値を取得します。
+		target	: 設定種別
+			  0=トラックバー0の値
+			  1=トラックバー1の値
+			  2=トラックバー2の値
+			  3=トラックバー3の値
+			  "x"=基準座標X
+			  "y"=基準座標Y
+			  "z"=基準座標Z
+			  "rx"=基準X軸回転角度
+			  "ry"=基準Y軸回転角度
+			  "rz"=基準Z軸回転角度
+			  "zoom"=基準拡大率(100=等倍) ※obj.zoom(1.0=等倍)と異なっているので注意
+			  "alpha"=基準不透明度(0.0～1.0/0.0=透明/1.0=不透明)
+			  "aspect"=基準アスペクト比(-1.0～1.0/プラス=横縮小/マイナス縦縮小)
+			  "time"=オブジェクト基準の時間
+			  "layer7.x"=レイヤー7のオブジェクトの基準座標X
+			  ※layer[レイヤー番号].[設定種別]で別レイヤーのオブジェクトの値を取得出来ます
+			  "scenechange"=シーンチェンジでの表示割合(0.0～1.0) シーンチェンジのみ使用可
+			  ※使い方はシーンチェンジスクリプトの例を参照してください
+		time	: どの時点の値を取得するかの時間(秒)(省略時は現時間)
+		section	: 時間の基準となる区間の番号(省略時は開始点)
+			  0=開始点 / 1=最初の中間点 / 2=2個目の中間点 / -1=終了点
+			  ※対象オブジェクトの時間制御は反映されません。
+
+	○obj.setanchor(name,num[,option,..])
+		アンカーポイントを表示します。
+		この関数を呼び出した時にアンカーポイントの表示設定と
+		アンカーが移動していた場合の変数への反映を行います。
+		この関数は呼び出し毎に8回まで呼び出す事が出来ます。
+		呼び出し順序や回数を変更すると正しく反映されない場合があります。
+		name	: --dialogで指定されている座標を格納する変数名を指定します。※変数名を文字列として指定
+			  "track"を指定すると--track0から指定されているトラックバーの始点終点中間点の値を参照します。
+			  ※直接テーブル変数名を指定するとアンカー表示や移動なしで線だけを表示します。
+		num	: アンカーポイントの数を指定します。全てのアンカー合計で16個まで指定できます。
+			  name="track"の場合は0を指定して下さい。アンカーポイント数は開始終了中間点の数になります。
+		option	: 各種オプションを列挙出来ます。
+			  "line"=アンカーポイントを線で結びます。
+			  "loop"=アンカーポイントを線で結び一周させます。
+			  "star"=アンカーポイントをオブジェクトの中心とそれぞれ線で結びます。
+			  "arm"=アンカーポイントとオブジェクトの中心を線で結びます。
+			  "color"=上記オプションの線の色を変更します。後続の引数に色(0x000000～0xffffff)を指定します。
+			  "inout"=上記オプションの線の表示をIN,OUT側の2個として表示します。(アンカー数は半々になります)
+			  "xyz"=アンカーポイントを3D座標で制御します。※デフォルトは2D座標
+			  ※カメラ制御+シャドーで使用する場合にプレビューで影部分が少しずれる場合があります。
+		戻り値	: 取得したアンカーポイントの数
+		例：obj.setanchor("pos",3)
+		    n = obj.setanchor("track",0,"line")
+
+	○obj.getaudio(buf,file,type,size)
+		音声ファイルからオーディオデータを取得します。
+		オブジェクトの時間を基準とした位置のデータを取得します。
+		buf	: データを受け取るテーブルを指定します。
+			　※nilを指定すると第3戻り値でテーブルを返します。
+		file	: 音声ファイル名("audiobuffer"を指定すると編集中の音声データが取得出来ます)
+		type	: 取得データの種類
+			  "pcm"=PCMサンプリングデータ(16bitモノラル)
+			  "spectrum"=周波数毎の音量データ
+			  "fourier"=音声を離散フーリエ変換したデータ(sizeの指定は不要)
+			　 ※元周波数の1/2048～1/2まで1/2048刻みの1024個のデータになります(たぶん…
+		size	: 取得するデータ数(指定した値より少ない場合があります)
+		戻り値	: 取得したデータ数,サンプリングレート
+		例：n = obj.getaudio(buf,"audiobuffer","spectrum",32)
+		    n,rate = obj.getaudio(buf,"c:\\test.wav","pcm",1000)
+		    n,rate,buf = obj.getaudio(nil,"c:\\test.wav","pcm",1000)
+
+	○obj.filter(name[,param1,value1,param2,value2,...])
+		指定のスクリーン全体へのフィルタ(フィルタオブジェクト)を実行します。
+		拡張編集プラグインで追加されたフィルタのみ使用出来ます。
+		引数の指定方法はobj.effect()と同様になります。
+		フィルタによっては正しく使用出来ない場合があります。
+		※オブジェクトの画像データが壊れる場合があります。
+		例：obj.filter("色調補正","明るさ",150,"色相",180)
+
+	○obj.copybuffer(dst,src)
+		画像バッファをコピーします。
+		※コピー先の画像バッファのサイズはコピー元のサイズに変更されます。
+		dst	: コピー先のバッファ
+			  "tmp"=仮想バッファ
+			  "obj"=オブジェクト
+			  "cache:xxxx"=キャッシュバッファ(xxxxは任意の名前)
+		src	: コピー元のバッファ
+			  "frm"=フレームバッファ
+			  "obj"=オブジェクト
+			  "tmp"=仮想バッファ
+			  "cache:xxxx"=キャッシュバッファ(xxxxは任意の名前)
+			  "image:xxxx"=画像ファイル(xxxxはスクリプトフォルダからの相対パスの画像ファイル名)
+		戻り値	: true=成功 / false=失敗
+		※dstとsrcの組み合わせは以下のものが使用できます。
+		    "obj" <= "tmp"
+		    "obj" <= "frm"
+		    "obj" <= "cache:xxxx"
+		    "obj" <= "image:xxxx"
+		    "tmp" <= "obj"
+		    "tmp" <= "frm"
+		    "tmp" <= "cache:xxxx"
+		    "tmp" <= "image:xxxx"
+		    "cache:xxxx" <= "obj"
+		    "cache:xxxx" <= "tmp"
+		キャッシュバッファの名前は全てのオブジェクトで共通となります。
+		キャッシュバッファや仮想バッファは画像データのキャッシュから確保されるので
+		他の画像等をキャッシュ数より読み込むと破棄される場合があります。
+		※小さい画像等の場合は面積の合計が最大画像サイズ分で一つのキャッシュ分になります。
+		※キャッシュを使う場合はスクリプトの呼び出し毎に完結させた方が無難です。
+
+	○obj.getpixel(x,y[,type])
+		現在のオブジェクトのピクセル情報を取得します。
+		引数なしで呼ぶとオブジェクトのピクセル数を取得できます。
+		※ピクセル数はobj.w,obj.hと異なる場合があります。(色々あって分かりづらくなってます…)
+		x,y	: 取得するピクセルの座標
+		type	: ピクセル情報のタイプ("col","rgb","yc")
+			　※省略時は obj.pixeloption("type") で指定したタイプ(通常は"col")
+		戻り値	: タイプが"col"の場合
+				色情報(0x000000～0xffffff)と不透明度(0.0=透明/1.0=不透明)
+				col,a = obj.getpixel(0,0,"col")
+			  タイプが"rgb"の場合
+				各8bit(0～255)のRGBA情報
+				r,g,b,a = obj.getpixel(0,0,"rgb")
+			  タイプが"yc"の場合
+				YCbCr内部形式
+				y,cb,cr,a = obj.getpixel(0,0,"yc")
+			  引数なし
+				横、縦のピクセル数
+				w,h = obj.getpixel()
+
+	○obj.putpixel(x,y,...)
+		現在のオブジェクトのピクセル情報を書き換えます。
+		引数なしで呼ぶとオブジェクトのピクセル数を取得できます。
+		受け渡すピクセル情報のタイプは obj.pixeloption("type") で指定したタイプになります。
+		x,y	: 書き換えるピクセルの座標
+		色情報	: タイプが"col"の場合
+				色情報(0x000000～0xffffff)と不透明度(0.0=透明/1.0=不透明)
+				obj.putpixel(0,0,col,a)
+			  タイプが"rgb"の場合
+				各8bit(0～255)のRGBA情報
+				obj.putpixel(0,0,r,g,b,a)
+			  タイプが"yc"の場合
+				YCbCr内部形式
+				obj.putpixel(0,0,y,cb,cr,a)
+
+	○obj.copypixel(dst_x,dst_y,src_x,src_y)
+		現在のオブジェクトのピクセル情報をコピーします。
+		dst_x,dst_y	: コピー先の座標
+		src_x,src_y	: コピー元の座標
+
+	○obj.pixeloption(name,value)
+		obj.getpixel(),obj.putpixel(),obj.copypixel() の処理オプションを設定します。
+		※スクリプトの呼び出し毎に指定する必要があります。
+		name	: オプション名
+		value	: オプション値
+
+		◇ピクセル情報タイプを指定する
+			obj.pixeloption("type",value)
+			value	: "col" / "rgb" / "yc"
+
+		◇ピクセル情報の読み出し先を指定する
+			obj.pixeloption("get",value)
+			value	: "obj"=オブジェクト / "frm"=フレームバッファ(アルファ値がありません)
+
+		◇ピクセル情報の書き込み先を指定する
+			obj.pixeloption("put",value)
+			value	: "obj"=オブジェクト / "frm"=フレームバッファ(アルファ値がありません)
+
+		◇書き込む時のブレンドタイプを指定する
+			obj.pixeloption("blend",value)
+			value	: 引数なし=置き換え / 0=通常 / 1=加算 / 2=減算 / 3=乗算 / 4=スクリーン
+				  5=オーバーレイ / 6=比較(明) / 7=比較(暗) / 8=輝度 / 9=色差
+
+	○obj.getpixeldata([option,...])
+		現在のオブジェクトの画像データを読み出します。
+		この関数はDLLを利用して画像処理をする為のものです。
+		画像データは現在のオブジェクト画像の解像度でRGBA(32bit)形式で格納されます。
+		画像データの内容はdraw(),effect()等の描画処理系の関数を使用すると
+		壊れますので必要であれば別の領域にコピーして処理して下さい。
+		option	: 各種オプションを列挙出来ます。
+			  "work"=画像と同じサイズのワークバッファのポインタを取得します。
+			  "alloc"=メモリ(フルユーザデータ)を確保して格納します
+		戻り値	: データのポインタ(ユーザーデータ),横,縦のピクセル数
+		例：data,w,h = obj.getpixeldata()
+		    work = obj.getpixeldata("work")
+
+	○obj.putpixeldata(data)
+		現在のオブジェクトへ画像データを書き込みます。
+		この関数はDLLを利用して画像処理をする為のものです。
+		getpixeldata()で取得出来る画像データ形式と同じ物を
+		現在のオブジェクトに書き込みます。画像データの解像度は
+		オブジェクトと同じでなけれなばなりません。
+		data	: 画像データへのポインタ(ユーザーデータ)
+		例：obj.putpixeldata(data)
+
+	○obj.getpoint(target[,option])
+		トラックバーの値を取得します。
+
+		target	: 整数=各区間でのトラックバー値
+				0=開始点 / 1=最初の中間点 / 2=2個目の中間点 / ...
+				optionで取得する関連トラックの相対位置を指定することが出来ます。
+			  "index"=現在の区間での位置を取得します。
+				開始点と最初の中間点の間の場合は0.5等の少数で表されます。
+			  "num"=開始終了中間点の総数を取得します。
+			  "time"=現在の時間を取得します。
+				optionで時間を取得する区間を指定することができます。
+			  "accelerate"=加速度が設定されているかを取得します。
+				戻り値 : true=有効 / false=無効
+			  "decelerate"=減速度が設定されているかを取得します。
+				戻り値 : true=有効 / false=無効
+			  "param"=トラックバーの設定値を取得します。
+			  "link"=関連トラックでのインデックスと総数を取得します。
+				index,num = obj.getpoint("link")
+				関連トラックは座標等で他のトラックの値を取得する為に使用します。
+				X座標での戻り値：0,3 / Y座標での戻り値：1,3 / Z座標での戻り値：2,3
+
+	○obj.getinfo(name,...)
+		各種環境情報を取得します。
+		name	: 取得する情報の名前
+
+		◇スクリプトフォルダのパスを取得する
+			obj.getinfo("script_path")
+			戻り値	: スクリプトフォルダのパス
+
+		◇動画の出力中かを調べる
+			obj.getinfo("saving")
+			戻り値	: true=出力中 / false=非出力中
+
+		◇最大画像サイズを取得する
+			max_x,max_y = obj.getinfo("image_max")
+			戻り値	: 最大画像サイズ(横幅,高さ)
+
+	○obj.interpolation(time,x0,y0,z0,x1,y1,z1,x2,y2,z2,x3,y3,z3)
+		連続した点p0(x0,y0,z0),p1(x1,y1,z1),p2(x2,y2,z2),p3(x3,y3,z3)から
+		時間time(0～1)に応じたp1,p2間の座標を計算します。
+		※y,z座標は省略することが出来ます。
+		例：x,y,z = obj.interpolation(time,x0,y0,z0,x1,y1,z1,x2,y2,z2,x3,y3,z3)
+		    x,y = obj.interpolation(time,x0,y0,x1,y1,x2,y2,x3,y3)
+
+	○RGB(r,g,b)
+		色情報(0x000000～0xffffff)と赤(0～255),緑(0～255),青(0～255)各要素の相互変換をします。
+		r,g,bを2つ指定した場合はオブジェクトの時間経過に応じて色を変化させます。
+		例：col = RGB(r,g,b)
+		    r,g,b = RGB(col)
+		    col = RGB(r1,g1,b1,r2,g2,b2)
+
+	○HSV(h,s,v)
+		色情報(0x000000～0xffffff)と色相(0～360),彩度(0～100),明度(0～100)各要素の相互変換をします。
+		h,s,vを2つ指定した場合はオブジェクトの時間経過に応じて色を変化させます。
+		例：col = HSV(h,s,v)
+		    h,s,v = HSV(col)
+		    col = HSV(h1,s1,v1,h2,s2,v2)
+
+	○OR(a,b) / AND(a,b) / XOR(a,b)
+		OR,AND,XORのビット演算をします。
+		例：c = OR(a,b)
+
+	○SHIFT(a,shift)
+		算術シフトをします。shiftが正の数だと左シフト、負の数だと右シフトになります。
+		例：b = SHIFT(a,1)
+
+	○debug_print(text)
+		指定の文字をOutputDebugString()に送ります。デバッグ用です。
+		※スクリプト実行エラーのメッセージは自動的にOutputDebugString()に
+		送られるようになっています。
+		text	: デバッグ表示文字
+		例 : debug_print("デバッグ表示")
+
+
+- 使用例 -
+
+	○テキスト内でスクリプトを使う例
+		以下のテキストでオブジェクト時間のタイムカウンタが表示します。
+
+		現在のオブジェクトの時間=<?mes(string.format("%02d:%02d.%02d",obj.time/60,obj.time%60,(obj.time*100)%100))?>
+
+	○オブジェクトの座標や角度を時間経過で変化させる例
+		以下のスクリプトで時間と共に右方向に移動しながら右回転します。
+
+		obj.ox = obj.ox + obj.time*10
+		obj.rz = obj.rz + obj.time*360
+
+	○オブジェクトにフィルタ効果をかける例
+		以下のスクリプトで時間と共に明るくなったり暗くなったりします。
+
+		i = math.cos(obj.time*math.pi*2)*50
+		obj.effect("色調補正","明るさ",100+i)
+
+	○オブジェクトを複数描画させる例
+		以下のスクリプトでオブジェクトを円状に10個描画します。
+
+		n = 10
+		l = obj.w*2
+		for i=0,n do
+		  r = 360*i/n
+		  x = math.sin(r*math.pi/180)*l
+		  y = -math.cos(r*math.pi/180)*l
+		  obj.draw(x,y,0,1,1,0,0,r)
+		end
+
+	○スクリプトファイル内でトラックバー、チェックボックスの値を使う例
+		スクリプトファイル(*.anm,*.obj,*.scn,*.cam)の先頭で'--track0:名前,最小値,最大値,デフォルト値,移動単位'
+		のように指定するとトラックバーが有効になります。移動単位は'1','0.1','0.01'か省略が出来ます。
+		最大4個のトラックバーが使用できます。※シーンチェンジでは最大2個になります。
+		'--check0:名前,デフォルト値(0か1)'のように指定するとチェックボックスが有効になります。
+
+		--track0:X速度,-10,10,0
+		--track1:Y速度,-10,10,0,1
+		--check0:重力,0
+		obj.ox = obj.ox + obj.track0*obj.time
+		obj.oy = obj.oy + obj.track1*obj.time
+		if( obj.check0 ) then
+		  obj.oy = obj.oy + obj.time*obj.time
+		end
+
+	○スクリプトファイル内でパラメータ設定を使う例
+		スクリプトファイル(*.anm,*.obj,*.scn,*.cam)の先頭で'--param:デフォルト設定'のように指定すると
+		パラメータ設定の項目が有効になります。最大255バイトまで。
+		※--color,--file,--dialogと同時に指定出来ません。
+
+		--param:dx=10;dy=20;
+		obj.ox = obj.ox + dx*obj.time
+		obj.oy = obj.oy + dy*obj.time
+
+	○スクリプトファイル内で色選択ダイアログを使う例
+		スクリプトファイル(*.anm,*.obj,*.scn,*.cam)の先頭で'--color:デフォルト設定'のように指定すると
+		色選択ダイアログの項目が有効になります。
+		指定した色は変数(color)に格納されます
+		※--color,--file,--dialogと同時に指定出来ません。
+
+		--color:0xffffff
+		obj.load("figure","四角形",color,100)
+
+	○スクリプトファイル内でファイル選択ダイアログを使う例
+		スクリプトファイル(*.anm,*.obj,*.scn,*.cam)の先頭で'--file:'のように指定すると
+		ファイル選択ダイアログの項目が有効になります。
+		指定したファイルは変数(file)に格納されます
+		※--color,--file,--dialogと同時に指定出来ません。
+
+		--file:
+		obj.load(file)
+
+	○スクリプトファイル内で値入力ダイアログを使う例
+		スクリプトファイル(*.anm,*.obj,*.scn,*.cam)の先頭で'--dialog:表示名,変数名=初期値;'のように指定すると
+		値入力ダイアログの項目が有効になります。最大16項目まで指定出来ます。
+		表示名の最後を'/chk','/col','/fig'にするとチェックボックスや色や図形の選択ボタンが追加されます。
+		チェックボックスと選択ボタンはそれぞれ最大4項目まで指定出来ます。
+		※--color,--file,--dialogと同時に指定出来ません。
+
+		--dialog:Xオフセット,x=100;Yオフセット,y=100;
+		obj.ox = obj.ox + x
+		obj.oy = obj.oy + y
+
+		--dialog:サイズ,size=100;色/col,col=0xffffff;図形/fig,fig="四角形"
+		obj.load("figure",fig,col,size)
+
+	○アニメーション効果、カスタムオブジェクトを1ファイルで複数登録する例
+		スクリプトファイル(*.anm,*.obj,*.scn,*.cam)のファイル名の先頭を'@'にして
+		以下のように各スクリプトの先頭に'@名前'のように定義すると
+		複数のスクリプトを纏めて定義することが出来ます。
+		※exedit.anm,exedit.objのスクリプトもこの形式になっています。
+
+		◇複数登録する場合のファイル内容 [@複数登録例.anm]
+		@sample1
+		--track0:速度,-10,10,10
+		obj.ox = obj.ox + obj.track0*obj.time
+		@sample2
+		--track0:速度,-10,10,10
+		obj.oy = obj.oy + obj.track0*obj.time
+
+		◇単独登録する場合のファイル内容 [単独登録例.anm]
+		--track0:速度,-10,10,10
+		obj.ox = obj.ox + obj.track0*obj.time
+
+	○シーンチェンジスクリプトの例
+		以下のスクリプトで時間と共にクロスフェードします。
+		シーンチェンジスクリプトではフレームバッファにシーンチェンジ後の画像
+		オブジェクトにシーンチェンジ前の画像が入っていてどちらを表示するかの
+		割合をobj.getvalue("scenechange")で取得して処理します。
+		※0ならオブジェクト、1ならフレームバッファ側になります。
+
+		a = 1-obj.getvalue("scenechange")
+		obj.draw(0,0,0,1,a)
+
+	○アンカーポイントの表示と座標の取得をする例
+		以下のスクリプトでアンカーポイントの表示と座標の取得をします。
+
+		◇ダイアログの変数を使う場合
+		--dialog:座標,pos={}
+		num = 3
+		obj.setanchor("pos",num,"loop");
+		for i=0,num-1 do
+			x = pos[i*2+1]
+			y = pos[i*2+2]
+		end
+		※3D座標の場合はXYZの3座標ずつ配列に入ります。
+		※pos={}は初期値を入れておくことも出来ます。
+
+		◇トラックバーを使う場合
+		--track0:X,-1000,1000,0
+		--track1:Y,-1000,1000,0
+		--track2:Z,-1000,1000,0
+		num = obj.setanchor("track",0,"xyz","line");
+		for i=0,num-1 do
+			x = obj.getvalue(0,0,i)
+			y = obj.getvalue(1,0,i)
+			z = obj.getvalue(2,0,i)
+		end
+
+		◇複数回のobj.setanchor()を使う場合
+		--dialog:座標1,pos1={};座標2,pos2={}
+		obj.setanchor("pos1",4,"loop","color",RGB(0,255,255));
+		obj.setanchor("pos2",2,"line","color",RGB(0,255,0));
+		※同じダイアログの変数を複数で使うことは出来ません。
+
+	○トラックバー変化方法スクリプトの例
+		以下のスクリプトでトラックバーの値を開始点から終了点まで等速で変化させます。
+		トラックバー変化方法スクリプトでは通常のオブジェクト関係の変数や関数は使用出来ません。
+		スクリプトファイル(*.tra)の先頭で'--twopoint'のように指定すると中間点を無視する変化方法になります。
+		'--param:初期値(整数)'のように指定するとトラックバー設定が出来るようになります。
+		'--speed:加速初期値(0/1),減速初期値(0/1)'のように指定すると加減速の設定が出来るようになります。
+
+		index,ratio = math.modf(obj.getpoint("index"))
+		st = obj.getpoint(index);
+		ed = obj.getpoint(index+1);
+		return st + (ed-st)*ratio;
+
+
+- 履歴 -
+
+	[2011/2/28] ver 0.87f
+	obj.effect()で画像が無くなるような処理をした場合に正しく反映されていなかったのを修正。
+	obj.load()でファイル名に全角文字が含まれている画像ファイルが読み込めなかったのを修正。
+	obj.load()で動画ファイルが読み込めなかった時に警告ダイアログが表示されていたのを修正。
+	obj.load()のテキスト読み込みがテキストオブジェクトでは使用出来ない説明を追加。
+	obj.effect()にスクリプト以降のフィルタ効果を実行する機能を追加。
+
+	[2011/3/29] ver 0.87g
+	obj.effect()でサイズ等のパラメータに変化があった場合に反映されていなかったのを修正。
+	obj.drawpoly(),obj.setoption()を追加した。
+	obj.setfont()に色のパラメータを追加した。
+	ダイアログ選択機能(--color,--file)を追加した。
+
+	[2011/3/30] ver 0.87h
+	obj.effect()の処理後にいくつかのパラメータが元の値に戻っていたのを修正。
+
+	[2011/4/10] ver 0.87i
+	色選択ダイアログでキャンセルした場合に色が元に戻っていなかったのを修正。
+	ダイアログ選択機能(--dialog)を追加した。
+	obj.getoption()を追加した。
+
+	[2011/4/25] ver 0.88
+	--dialogの定義で使用する文字によっては正常に動作しなかったのを修正。
+	obj.draw(),obj.drawpoly()でobj.setoption()のblendが反映されていなかったのを修正。
+	obj.effect()でトラックバー、チェックボックス以外の設定値も反映するようにした。
+
+	[2011/5/8] ver 0.88a
+	obj.effect()で正しく設定値が反映されない場合があったのを修正。
+	obj.setoption()のblendは描画オブジェクトの合成モードが標準の場合に反映するようにした。
+	--dialogで入力出来る項目数の最大を12個に増やした。
+
+	[2011/5/30] ver 0.88b
+	obj.getoption()で取得出来る情報の種類を追加した。
+	obj.getvalue()を追加した。
+
+	[2011/6/20] ver 0.89
+	obj.getvalue()で標準描画オブジェクトのZ座標を取得した場合も値を返すようにした。
+	obj.getvalue()で別レイヤーのオブジェクトの値を取得出来るようにした。
+
+	[2011/7/19] ver 0.89b
+	obj.getaudio(),obj.getpixel()を追加した。
+
+	[2011/8/1] ver 0.89c
+	obj.getpixel()のピクセルタイプを省略出来るようにした。
+	obj.putpixel(),obj.copypixel(),obj.pixeloption()を追加した。
+	--dialogでダイアログに値が正しく反映されない場合があったのを修正。
+
+	[2011/8/22] ver 0.89d
+	スクリプトの名前によっては正常に動作しなかったのを修正。
+	obj.getaudio()で"audiobuffer"を使用した時にカメラ制御が効かなくなっていたのを修正。
+
+	[2011/8/29] ver 0.89e
+	--dialogでダイアログに値が正しく反映されない場合があったのを修正。
+
+	[2011/9/5] ver 0.89f
+	--dialogで値を変更した時に設定内容が正しく表示されない場合があったのを修正。
+	obj.getvalue()で正しい値が取得出来ない場合があったのを修正。
+
+	[2011/10/2] ver 0.89g
+	obj.rand()で条件によっては似た値が出やすくなっていたのを修正。
+	obj.drawpoly()でuv座標を省略出来るようにした。
+	obj.load()にアルファ付き動画ファイル用のパラメータを追加した。
+	obj.load(),obj.setoption()に仮想バッファ関連を追加した。
+	obj.copybuffer()を追加した。
+	obj.getvalue()で取得出来る情報の種類を追加した。
+	--trackで値の変更単位を設定出来るようにした。
+	シーンチェンジスクリプトの説明を追加した。
+
+	[2011/10/16] ver 0.89h
+	obj.load()の"framebuffer","tempbuffer"にパラメータを追加した。
+	obj.setoptionの"blend"に仮想バッファ専用の合成モードを追加した。
+	--dialogの定義でチェックボックスや色や図形の選択を設定出来るようにした。
+
+	[2011/11/7] ver 0.89i
+	シーンチェンジスクリプトで使用できるトラックバーの数を最大2個に変更した。
+	obj.filter()を追加した。
+
+	[2011/11/19] ver 0.89j
+	package.path,package.cpathの初期値をexedit.aufがあるフォルダとscriptフォルダに変更した。
+	obj.setoption()の仮想バッファ関連の引数を変更。※以前のままでも使用出来ます。
+	obj.setanchor(),RGB(),OR(),AND(),XOR(),SHIFT()を追加した。
+	obj.setanchor()を使用したアンカーポイント制御の説明を追加した。
+
+	[2011/11/23] ver 0.89j2
+	obj.getinfo(),obj.getpixeldata(),obj.putpixeldata()を追加した。
+	obj.setanchor()のオプションを追加した。
+
+	[2011/12/5] ver 0.89k
+	obj.setoption()の"antialias"の設定が仮想バッファ描画時に反映されていなかったのを修正。
+	obj.getpixeldata(),obj.putpixeldata()が正しく動いていなかったのを修正。
+	obj.setanchor()の戻り値が返らない時があったのを修正。
+	obj.rx,obj.ry,obj.rzの初期角度に基準回転角度を入れるようにした。
+	obj.cx,obj.cy,obj.czを追加した。
+
+	[2011/12/26] ver 0.89l
+	フィルタ効果をタイムラインに配置した場合にobj.setanchor()が表示されなかったのを修正。
+	RGB()でオブジェクトの時間経過で色を変化させる設定方法を追加した。
+	obj.getoption()に"camera_param","camera_mode","gui"を追加した。
+	obj.setoption()に"camera_param","draw_state"を追加した。
+	obj.getinfo()に"saving"を追加した。
+	obj.copybuffer()の引数の種類を追加した。
+	obj.interpolation(),HSV()を追加した。
+
+	[2011/12/29] ver 0.89l3
+	obj.getoption(),obj.setoption()の"camera_param"の設定を追加した。
+
+	[2012/1/9] ver 0.89m
+	音声オブジェクトに対してobj.getvalue()で座標等の取得をした時に落ちていたのを修正。
+	obj.getvalue()のtargetに"alpha","aspect"を追加した。
+	obj.setanchor()のoptionに"inout","color"を追加した。
+	obj.setanchor()を複数回呼び出せるようにした。
+
+	[2012/1/22] ver 0.89m2
+	obj.setoption()の"blend"にオプションを追加した。
+	obj.setanchor()に線だけを表示する方法を追加した。
+	obj.getpixeldata()に"type"のオプションを追加した。
+
+	[2012/1/29] ver 0.89n
+	obj.getoption()の"gui"で対象の設定ダイアログが非表示の時にtrueになる事があったのを修正。
+	--dialogの最初の色設定(/col)のボタンをオブジェクト設定ダイアログにも表示するようにした。
+	--check0をダイアログ(--dialog等)と同時に使えるようにした。
+
+	[2012/3/4] ver 0.89o
+	1ドットのオブジェクトに対してobj.getpixeldata()をした時に落ちていたのを修正。
+	obj.getpixeldata()で横幅が奇数の時にゴミが入る場合があったのを修正。
+	obj.setoption()に"focus_mode"を追加した。
+	スクリプトの読み込みバッファを増やした。
+	--dialogで入力出来る項目数の最大を16個に増やした。
+	スクリプトファイルをUTF-8に変換しないで実行するようにした。
+
+	[2012/3/13] ver 0.89p
+	スクリプト制御、テキストオブジェクトをUTF-8に変換しないで実行するようにした。
+
+	[2012/3/24] ver 0.89p2
+	mes(),obj.load()の"text"でUnicodeタグ(10進数)を表示できるようにした。
+	スクリプト制御、テキストオブジェクトのUnicode文字をタグに変換して処理するようにした。
+
+	[2012/4/8] ver 0.90
+	obj.copybuffer()の引数の種類に"cache","image"を追加した。
+
+	[2012/5/27] ver 0.90b
+	obj.getaudio()の戻り値にサンプリングレートを追加した。
+
+	[2012/6/17] ver 0.90c
+	obj.getaudio()のtypeに"fourier"を追加した
+
+	[2012/7/17] ver 0.90c4
+	obj.getoption()に"multi_object"のオプションを追加した。
+
+	[2012/9/3] ver 0.90d3
+	カメラ制御+シャドー使用時にobj.setanchor()が正しく動かない場合があったのを修正。
+
+	[2013/1/3] ver 0.90e
+	obj.putpixeldata()でユーザデータ形を扱えるようにした。
+
+	[2013/1/6] ver 0.90e2
+	obj.getvalue()のtargetに"time"を追加した。
+
+	[2013/2/11] ver 0.90e3
+	obj.copybuffer()でサイズが0のオブジェクトを扱った場合に固まる事があったのを修正。
+
+	[2013/3/3] ver 0.90e4
+	obj.getoption()の"script_name"にskipのオプションを追加した。
+	obj.effect()の説明を追加した。
+	obj.load()に"layer","before"を追加した。
+	試験的にスクリプトから1度だけスクリプトを呼べるようにした。
+
+	[2013/3/18] ver 0.90e5
+	obj.load()の"layer"で音声オブジェクトを指定した場合に落ちるのを修正。
+	obj.getoption()の"script_name"のskipが中間点以降で正しく動かなかったのを修正。
+
+	[2013/4/15] ver 0.91
+	obj.getpixeldata()に"alloc"のオプションを追加した。
+	obj.getaudio()でデータのテーブルを戻り値で取得できるようにした。
+	obj.getpoint()を追加した。
+	トラックバー変化方法スクリプトの説明を追加した。
+
+	[2013/4/21] ver 0.91a
+	トラックバー変化方法スクリプトでpackage.path,package.cpathを設定するようにした。
+	トラックバー変化方法スクリプトでobj.rand()を使用できるようにした。
+
+	[2013/6/2] ver 0.91b
+	スクリプトからスクリプトを呼び出して戻った時に仮想バッファのサイズが変更されていたのを修正。
+	obj.setoption()の"blend"に"alpha_add2"のオプションを追加した。
+
+	[2013/6/30] ver 0.91c
+	obj.load()の"text"で"speed","time"のオプションを追加した。
+	obj.getinfo()に"image_max"を追加した。
+
+
+- Luaのバイナリについて -
+
+	付属のlua51.dllはLuaの本家サイトにあるバージョン5.1.4に
+	5.1.4-2のパッチを当ててビルドしたものです。
+
+	Luaの本家サイト
+	http://www.lua.org/
+
+
+- Luaのライセンス -
+
+	Lua License
+	-----------
+
+	Lua is licensed under the terms of the MIT license reproduced below.
+	This means that Lua is free software and can be used for both academic
+	and commercial purposes at absolutely no cost.
+
+	For details and rationale, see http://www.lua.org/license.html .
+
+	===============================================================================
+
+	Copyright (C) 1994-2008 Lua.org, PUC-Rio.
+
+	Permission is hereby granted, free of charge, to any person obtaining a copy
+	of this software and associated documentation files (the "Software"), to deal
+	in the Software without restriction, including without limitation the rights
+	to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+	copies of the Software, and to permit persons to whom the Software is
+	furnished to do so, subject to the following conditions:
+
+	The above copyright notice and this permission notice shall be included in
+	all copies or substantial portions of the Software.
+
+	THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+	IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+	FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+	AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+	LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+	OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+	THE SOFTWARE.
+
+	===============================================================================
+
+

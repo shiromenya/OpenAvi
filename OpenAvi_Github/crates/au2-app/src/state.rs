@@ -21,6 +21,18 @@ pub struct SourceMediaItem {
     pub kind: MediaKind,
 }
 
+/// プロジェクト内で未検出（リンク切れ）となっているメディア素材情報。
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub struct MissingMediaItem {
+    pub object_id: ObjectId,
+    pub layer_index: usize,
+    pub kind_name: String,
+    pub original_path: String,
+    pub frame_start: Frame,
+    pub frame_end: Frame,
+}
+
 /// タイムライン右クリック時のコンテキストターゲット。
 #[derive(Clone, Copy, Debug)]
 pub struct ContextTarget {
@@ -105,8 +117,17 @@ pub struct EditorState {
     /// 動画再生フレーム用の In-Place 更新 GPU テクスチャキャッシュ (Path -> (Handle, 現在フレーム番号, 解像度))
     stream_textures: HashMap<PathBuf, (TextureHandle, u32, [usize; 2])>,
     /// ファイルパス解決のキャッシュ（毎フレームの OS ディスク IO / exists 呼び出しを削減）
-    resolved_paths: HashMap<String, Option<PathBuf>>,
+    pub resolved_paths: HashMap<String, Option<PathBuf>>,
+    /// FFmpeg（動画・音声デコーダー）のアプリ内ダウンロード状態
+    pub ffmpeg_dl: FfmpegDownload,
     pub dirty: bool,
+}
+
+/// FFmpeg アプリ内ダウンロードの進行状態。
+pub enum FfmpegDownload {
+    Idle,
+    Running(std::sync::mpsc::Receiver<Result<PathBuf, String>>),
+    Failed(String),
 }
 
 fn resolve_app_path(rel: &str) -> Option<PathBuf> {
@@ -170,7 +191,72 @@ impl Default for EditorState {
             static_textures: HashMap::new(),
             stream_textures: HashMap::new(),
             resolved_paths: HashMap::new(),
+            ffmpeg_dl: FfmpegDownload::Idle,
             dirty: false,
+        }
+    }
+}
+
+impl EditorState {
+    /// 動画・音声メディアを扱うのに FFmpeg が必要なのに見つかっていない場合 `true`。
+    pub fn needs_ffmpeg(&self) -> bool {
+        if self.media.has_ffmpeg() {
+            return false;
+        }
+        let in_scene = self.scene.layers.iter().any(|l| {
+            l.objects.iter().any(|o| {
+                o.source()
+                    .is_some_and(|s| matches!(s.kind, EffectKind::VideoFile | EffectKind::AudioFile))
+            })
+        });
+        in_scene
+            || self
+                .sources
+                .iter()
+                .any(|s| matches!(s.kind, MediaKind::Video | MediaKind::Audio))
+    }
+
+    /// FFmpeg を別スレッドでダウンロードして `%LOCALAPPDATA%\OpenAvi\bin` に導入します。
+    pub fn start_ffmpeg_download(&mut self) {
+        if matches!(self.ffmpeg_dl, FfmpegDownload::Running(_)) {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(au2_media::download_ffmpeg_blocking());
+        });
+        self.ffmpeg_dl = FfmpegDownload::Running(rx);
+        self.status = "FFmpeg をダウンロードしています（約 80MB・数十秒〜数分かかります）...".into();
+    }
+
+    /// ダウンロード完了を確認し、成功時は FFmpeg を再読込して動画・音声を即座に使えるようにします。
+    pub fn poll_ffmpeg_download(&mut self) {
+        let result = match &self.ffmpeg_dl {
+            FfmpegDownload::Running(rx) => match rx.try_recv() {
+                Ok(r) => Some(r),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Some(Err("ダウンロード処理が予期せず終了しました".to_string()))
+                }
+            },
+            _ => None,
+        };
+        match result {
+            Some(Ok(dir)) => {
+                self.ffmpeg_dl = FfmpegDownload::Idle;
+                if self.media.reload_ffmpeg() {
+                    self.static_textures.clear();
+                    self.stream_textures.clear();
+                    self.status = format!("FFmpeg を導入しました ({})。動画・音声が再生できます", dir.display());
+                } else {
+                    self.ffmpeg_dl = FfmpegDownload::Failed("導入後も FFmpeg を検出できませんでした".into());
+                }
+            }
+            Some(Err(e)) => {
+                self.status = e.clone();
+                self.ffmpeg_dl = FfmpegDownload::Failed(e);
+            }
+            None => {}
         }
     }
 }
@@ -225,6 +311,8 @@ impl EditorState {
     }
 
     /// パス解決をメモリキャッシュ経由で行い、毎フレームの OS ファイルシステム I/O を排除します。
+    /// プロジェクトファイルと同じディレクトリやサブディレクトリ（audio, sounds, bgm 等）、デスクトップ、
+    /// および拡張子違い（.wav と .mp3 等）も自動で曖昧探索して解決します。
     pub fn resolve_cached_path(&mut self, path_str: &str) -> Option<PathBuf> {
         let trimmed = path_str.trim();
         if trimmed.is_empty() {
@@ -233,22 +321,96 @@ impl EditorState {
         if let Some(cached) = self.resolved_paths.get(trimmed) {
             return cached.clone();
         }
+
+        // 1. そのまま存在するかチェック
         let mut p = PathBuf::from(trimmed);
+        if !p.exists() && (trimmed.starts_with(":\\") || trimmed.starts_with(":/")) {
+            let with_c = format!("C{}", trimmed);
+            let p_c = PathBuf::from(&with_c);
+            if p_c.exists() {
+                p = p_c;
+            }
+        }
+
         if !p.exists() {
-            if let Some(resolved) = resolve_app_path(trimmed) {
-                p = resolved;
-            } else if trimmed.ends_with("sample.mp4") {
-                if let Some(sample_vid) = resolve_app_path("samples/sample_video.mp4") {
-                    p = sample_vid;
-                } else {
-                    self.resolved_paths.insert(trimmed.to_string(), None);
-                    return None;
+            let file_name = Path::new(trimmed).file_name().map(|n| n.to_string_lossy().into_owned());
+            let file_stem = Path::new(trimmed).file_stem().map(|s| s.to_string_lossy().to_ascii_lowercase());
+
+            // 探索ディレクトリ一覧
+            let mut search_dirs: Vec<PathBuf> = Vec::new();
+            if let Some(proj) = &self.file_path {
+                if let Some(parent) = proj.parent() {
+                    search_dirs.push(parent.to_path_buf());
+                    for sub in ["audio", "sounds", "sound", "bgm", "assets", "material", "media", "music"] {
+                        search_dirs.push(parent.join(sub));
+                    }
                 }
+            }
+            if let Some(user) = std::env::var_os("USERPROFILE") {
+                let desktop = PathBuf::from(user).join("Desktop");
+                search_dirs.push(desktop.clone());
+                for sub in ["aviutl animation", "audio", "sounds", "sound", "bgm", "music", "OpenAvi"] {
+                    search_dirs.push(desktop.join(sub));
+                }
+            }
+            if let Ok(cur) = std::env::current_dir() {
+                search_dirs.push(cur.clone());
+                search_dirs.push(cur.join("samples"));
+            }
+
+            let mut found = None;
+
+            // 2. 同名ファイルで検索
+            if let Some(name) = &file_name {
+                for dir in &search_dirs {
+                    let cand = dir.join(name);
+                    if cand.exists() {
+                        found = Some(cand);
+                        break;
+                    }
+                }
+            }
+
+            // 3. 拡張子違い（例: wav <-> mp3 <-> m4a 等）の同名幹で検索
+            if found.is_none() {
+                if let Some(stem) = &file_stem {
+                    'outer: for dir in &search_dirs {
+                        if dir.is_dir() {
+                            if let Ok(entries) = std::fs::read_dir(dir) {
+                                for entry in entries.flatten() {
+                                    let path = entry.path();
+                                    if path.is_file() {
+                                        if let Some(s) = path.file_stem().and_then(|s| s.to_str()) {
+                                            if s.eq_ignore_ascii_case(stem) {
+                                                found = Some(path);
+                                                break 'outer;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 4. アプリケーション相対およびサンプル
+            if found.is_none() {
+                if let Some(resolved) = resolve_app_path(trimmed) {
+                    found = Some(resolved);
+                } else if trimmed.ends_with("sample.mp4") {
+                    found = resolve_app_path("samples/sample_video.mp4");
+                }
+            }
+
+            if let Some(resolved) = found {
+                p = resolved;
             } else {
                 self.resolved_paths.insert(trimmed.to_string(), None);
                 return None;
             }
         }
+
         self.resolved_paths.insert(trimmed.to_string(), Some(p.clone()));
         Some(p)
     }
@@ -342,6 +504,7 @@ impl EditorState {
             timeline: std::mem::take(&mut self.timeline),
             plugins,
             sources,
+            ffmpeg_dl: std::mem::replace(&mut self.ffmpeg_dl, FfmpegDownload::Idle),
             ..Self::default()
         };
         self.status = "新規プロジェクトを作成しました".into();
@@ -370,21 +533,20 @@ impl EditorState {
 
     /// シーン内のオブジェクトが参照している実在メディアファイルをソースパネルに同期登録します。
     pub fn sync_sources_from_scene(&mut self) {
-        let mut paths = Vec::new();
+        let mut files = Vec::new();
         for layer in &self.scene.layers {
             for obj in &layer.objects {
                 if let Some(src) = obj.source() {
-                    if let Some(f) = src.text("file") {
-                        let p = PathBuf::from(f);
-                        if p.exists() {
-                            paths.push(p);
-                        }
+                    if let Some(f) = src.text("file").filter(|s| !s.trim().is_empty()) {
+                        files.push(f.to_string());
                     }
                 }
             }
         }
-        for p in paths {
-            let _ = self.register_source(&p);
+        for f in files {
+            if let Some(p) = self.resolve_cached_path(&f) {
+                let _ = self.register_source(&p);
+            }
         }
     }
 
@@ -613,6 +775,12 @@ impl EditorState {
                 self.timeline.scroll_y = 0.0;
                 self.dirty = false;
                 self.sync_sources_from_scene();
+                let missing = self.check_missing_media();
+                if !missing.is_empty() {
+                    let msg = format!("⚠ プロジェクト内のメディア（音声/動画）が未検出です（{} 件）。手元のファイルを指定してください", missing.len());
+                    self.warnings.push(msg.clone());
+                    self.status = msg;
+                }
             }
             Err(e) => {
                 self.status = format!(".aup の読み込みに失敗しました: {e}");
@@ -876,5 +1044,122 @@ impl EditorState {
                 );
             }
         }
+    }
+
+    /// シーン内の未検出（ファイルが見つからない）メディアオブジェクト一覧を返します。
+    pub fn check_missing_media(&mut self) -> Vec<MissingMediaItem> {
+        let mut candidates = Vec::new();
+        for (layer_idx, layer) in self.scene.layers.iter().enumerate() {
+            for obj in &layer.objects {
+                if let Some(src) = obj.source() {
+                    if matches!(src.kind, EffectKind::AudioFile | EffectKind::VideoFile | EffectKind::ImageFile) {
+                        if let Some(file_str) = src.text("file").filter(|s| !s.trim().is_empty()) {
+                            let kind_name = match src.kind {
+                                EffectKind::AudioFile => "音声 (MP3/WAV)",
+                                EffectKind::VideoFile => "動画 (MP4/AVI)",
+                                EffectKind::ImageFile => "画像",
+                                _ => "メディア",
+                            };
+                            candidates.push((
+                                obj.id,
+                                layer_idx,
+                                kind_name.to_string(),
+                                file_str.to_string(),
+                                obj.frame_start,
+                                obj.frame_end,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut missing = Vec::new();
+        for (id, layer_idx, kind_name, file_str, start, end) in candidates {
+            if self.resolve_cached_path(&file_str).is_none() {
+                missing.push(MissingMediaItem {
+                    object_id: id,
+                    layer_index: layer_idx,
+                    kind_name,
+                    original_path: file_str,
+                    frame_start: start,
+                    frame_end: end,
+                });
+            }
+        }
+        missing
+    }
+
+    /// 未検出メディアや既存オブジェクトの参照ファイルを新しいパスに再設定（再リンク）します。
+    /// `target_id` が None の場合、または `old_path` と一致する全オブジェクトを一括更新します。
+    pub fn relink_media(&mut self, target_id: Option<ObjectId>, old_path: &str, new_path: &Path) {
+        let new_path_str = new_path.to_string_lossy().to_string();
+        let mut count = 0;
+        for layer in &mut self.scene.layers {
+            for obj in &mut layer.objects {
+                let is_target = target_id.map_or(false, |id| obj.id == id);
+                let has_same_path = obj.source().and_then(|s| s.text("file")).map_or(false, |f| f == old_path);
+
+                if is_target || (target_id.is_none() && has_same_path) || (has_same_path && !old_path.is_empty()) {
+                    if let Some(src) = obj.source_mut() {
+                        if let Some(au2_core::ParamValue::Text(t)) = src.param_mut("file") {
+                            *t = new_path_str.clone();
+                        } else {
+                            src.push_text("file", new_path_str.clone());
+                        }
+                        count += 1;
+                    }
+                }
+            }
+        }
+
+        // キャッシュクリア＆再キャッシュ
+        self.resolved_paths.clear();
+        self.resolved_paths.insert(new_path_str.clone(), Some(new_path.to_path_buf()));
+        self.register_source(new_path);
+        self.sync_sources_from_scene();
+        self.sync_audio_playback();
+        self.dirty = true;
+        let base_name = new_path.file_name().and_then(|n| n.to_str()).unwrap_or(&new_path_str);
+        self.status = format!("メディアファイルを `{base_name}` に再設定しました（{count} 件のオブジェクトを更新）");
+    }
+
+    /// 未検出メディアをユーザー選択ファイルに再リンクするダイアログを開きます。
+    pub fn relink_media_dialog(&mut self, target_id: Option<ObjectId>, old_path: &str, is_audio: bool) -> bool {
+        let mut dlg = rfd::FileDialog::new()
+            .set_title(if is_audio {
+                "手元の音声ファイル (MP3 / WAV / M4A 等) を選択して割り当て"
+            } else {
+                "手元のメディアファイルを選択して割り当て"
+            });
+
+        if let Some(user) = std::env::var_os("USERPROFILE") {
+            let desktop = PathBuf::from(user).join("Desktop");
+            if desktop.exists() {
+                dlg = dlg.set_directory(desktop);
+            }
+        }
+
+        if is_audio {
+            dlg = dlg.add_filter("音声ファイル (*.mp3, *.wav, *.m4a, *.flac, *.ogg)", &["mp3", "wav", "m4a", "flac", "ogg"]);
+        } else {
+            dlg = dlg.add_filter("メディアファイル", &["mp3", "wav", "m4a", "flac", "ogg", "mp4", "avi", "mov", "png", "jpg", "jpeg"]);
+        }
+        dlg = dlg.add_filter("すべてのファイル (*.*)", &["*"]);
+
+        if let Some(p) = dlg.pick_file() {
+            self.relink_media(target_id, old_path, &p);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// メディアキャッシュを破棄し、ソース一覧とオーディオ再生キューを最新状態に再同期します。
+    pub fn invalidate_media_cache(&mut self) {
+        self.resolved_paths.clear();
+        self.sync_sources_from_scene();
+        self.sync_audio_playback();
+        self.dirty = true;
     }
 }
