@@ -93,6 +93,8 @@ impl Default for TimelineView {
 
 pub struct EditorState {
     pub scene: Scene,
+    /// マルチシーン（Root = 0, Scene 1..N）のマップ
+    pub scenes: std::collections::BTreeMap<u32, Scene>,
     /// 現在のプロジェクトファイルパス（`.aup` または `.exo`）
     pub file_path: Option<PathBuf>,
     pub encoding: TextEncoding,
@@ -174,6 +176,7 @@ impl Default for EditorState {
     fn default() -> Self {
         Self {
             scene: Scene::new("Root", SceneSettings::default()),
+            scenes: std::collections::BTreeMap::new(),
             file_path: None,
             encoding: TextEncoding::ShiftJis,
             frame: 0,
@@ -738,6 +741,7 @@ impl EditorState {
                     doc.scene.object_count()
                 );
                 self.scene = doc.scene;
+                self.scenes = doc.scenes;
                 self.warnings = doc.warnings;
                 self.file_path = path.map(Path::to_path_buf);
                 self.selected = None;
@@ -766,6 +770,7 @@ impl EditorState {
                     doc.scene.object_count()
                 );
                 self.scene = doc.scene;
+                self.scenes = doc.scenes;
                 self.warnings = doc.warnings;
                 self.file_path = path.map(Path::to_path_buf);
                 self.selected = None;
@@ -804,6 +809,8 @@ impl EditorState {
                     log::warn!("{w}");
                 }
                 self.scene = doc.scene;
+                self.scenes = std::collections::BTreeMap::new();
+                self.scenes.insert(0, self.scene.clone());
                 if self.scene.settings.length < 18000 {
                     self.scene.settings.length = self.scene.settings.length.max(self.scene.content_end()).max(18000);
                 }

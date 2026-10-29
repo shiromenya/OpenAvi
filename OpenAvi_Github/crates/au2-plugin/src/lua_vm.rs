@@ -23,6 +23,8 @@ pub struct LuaDrawCall {
     pub rz: f64,
     pub color: Option<u32>,
     pub primitive: Option<LuaLoadedPrimitive>,
+    /// `[上, 下, 左, 右]` のクリッピング量（ピクセル単位）
+    pub clip: Option<[f64; 4]>,
 }
 
 /// `obj.drawpoly(...)` による四角形ポリゴン描画。
@@ -103,6 +105,16 @@ pub struct LuaObjState {
     pub poly_calls: Vec<LuaPolyCall>,
     pub filter_calls: Vec<LuaFilterCall>,
     pub blend_mode: i64,
+    pub culling: bool,
+    pub billboard: i64,
+    pub current_clip: Option<[f64; 4]>,
+    pub cam_tx: f64,
+    pub cam_ty: f64,
+    pub cam_tz: f64,
+    pub cam_ux: f64,
+    pub cam_uy: f64,
+    pub cam_uz: f64,
+    pub cam_d: f64,
     /// `.tra` スクリプト等が `return` した数値結果
     pub return_value: Option<f64>,
 }
@@ -149,6 +161,16 @@ impl Default for LuaObjState {
             poly_calls: Vec::new(),
             filter_calls: Vec::new(),
             blend_mode: 0,
+            culling: false,
+            billboard: 0,
+            current_clip: None,
+            cam_tx: 0.0,
+            cam_ty: 0.0,
+            cam_tz: 0.0,
+            cam_ux: 0.0,
+            cam_uy: -1.0,
+            cam_uz: 0.0,
+            cam_d: 1024.0,
             return_value: None,
         }
     }
@@ -1067,6 +1089,7 @@ struct Vm<'a> {
     scopes: Vec<HashMap<String, LuaVal>>,
     steps: usize,
     rng_state: u64,
+    multi_return: Vec<LuaVal>,
 }
 
 impl<'a> Vm<'a> {
@@ -1082,6 +1105,7 @@ impl<'a> Vm<'a> {
             scopes: vec![HashMap::new()],
             steps: 0,
             rng_state: seed,
+            multi_return: Vec::new(),
         }
     }
 
@@ -1208,7 +1232,11 @@ impl<'a> Vm<'a> {
         }
         match stmt {
             Stmt::Local(names, exprs) => {
-                let vals: Vec<LuaVal> = exprs.iter().map(|e| self.eval_expr(e)).collect();
+                self.multi_return.clear();
+                let mut vals: Vec<LuaVal> = exprs.iter().map(|e| self.eval_expr(e)).collect();
+                if vals.len() < names.len() && !self.multi_return.is_empty() {
+                    vals.append(&mut self.multi_return);
+                }
                 for (i, name) in names.iter().enumerate() {
                     let v = vals.get(i).cloned().unwrap_or(LuaVal::Nil);
                     self.set_local(name.clone(), v);
@@ -1216,7 +1244,11 @@ impl<'a> Vm<'a> {
                 Flow::None
             }
             Stmt::Assign(lvals, exprs) => {
-                let vals: Vec<LuaVal> = exprs.iter().map(|e| self.eval_expr(e)).collect();
+                self.multi_return.clear();
+                let mut vals: Vec<LuaVal> = exprs.iter().map(|e| self.eval_expr(e)).collect();
+                if vals.len() < lvals.len() && !self.multi_return.is_empty() {
+                    vals.append(&mut self.multi_return);
+                }
                 for (i, lv) in lvals.iter().enumerate() {
                     let v = vals.get(i).cloned().unwrap_or(LuaVal::Nil);
                     self.assign_lvalue(lv, v);
@@ -1587,7 +1619,9 @@ impl<'a> Vm<'a> {
             self.scopes.pop();
             if let Flow::Return(mut r) = f {
                 if !r.is_empty() {
-                    return r.remove(0);
+                    let first = r.remove(0);
+                    self.multi_return = r;
+                    return first;
                 }
             }
         }
@@ -1952,6 +1986,32 @@ impl<'a> Vm<'a> {
                             self.obj.ox += phase.sin() * ax;
                             self.obj.oy += (phase * 1.37).cos() * ay;
                         }
+                        "クリッピング" => {
+                            let top = params.get("上").map(|v| v.as_num()).unwrap_or(0.0);
+                            let bottom = params.get("下").map(|v| v.as_num()).unwrap_or(0.0);
+                            let left = params.get("左").map(|v| v.as_num()).unwrap_or(0.0);
+                            let right = params.get("右").map(|v| v.as_num()).unwrap_or(0.0);
+                            self.obj.current_clip = Some([top, bottom, left, right]);
+                        }
+                        "リサイズ" => {
+                            let z = params.get("拡大率").map(|v| v.as_num() / 100.0).unwrap_or(1.0);
+                            let sx = params.get("X").map(|v| v.as_num() / 100.0).unwrap_or(1.0);
+                            let sy = params.get("Y").map(|v| v.as_num() / 100.0).unwrap_or(1.0);
+                            let avg_s = ((sx + sy) * 0.5).max(0.0);
+                            self.obj.zoom *= z * avg_s;
+                            if sx > 0.001 && sy > 0.001 && (sx - sy).abs() > 0.001 {
+                                if sx < sy {
+                                    self.obj.aspect = ((1.0 - sx / sy) * 100.0).clamp(-100.0, 100.0);
+                                } else {
+                                    self.obj.aspect = (-(1.0 - sy / sx) * 100.0).clamp(-100.0, 100.0);
+                                }
+                            }
+                        }
+                        "透明度" => {
+                            if let Some(tr) = params.get("透明度") {
+                                self.obj.alpha *= (1.0 - tr.as_num() / 100.0).clamp(0.0, 1.0);
+                            }
+                        }
                         _ => {}
                     }
                     self.obj.filter_calls.push(LuaFilterCall { name, params });
@@ -1973,7 +2033,7 @@ impl<'a> Vm<'a> {
                     .iter()
                     .rev()
                     .find(|f| f.name == "単色化" || f.name == "グラデーション")
-                    .and_then(|f| f.params.get("color").map(|v| v.as_num() as u32));
+                    .and_then(|f| f.params.get("color").or_else(|| f.params.get("色")).map(|v| v.as_num() as u32));
                 if self.obj.draw_calls.len() < 512 {
                     self.obj.draw_calls.push(LuaDrawCall {
                         ox,
@@ -1986,6 +2046,7 @@ impl<'a> Vm<'a> {
                         rz,
                         color,
                         primitive: self.obj.loaded_primitive.clone(),
+                        clip: self.obj.current_clip,
                     });
                 }
                 LuaVal::Nil
@@ -2016,16 +2077,140 @@ impl<'a> Vm<'a> {
                 }
                 LuaVal::Nil
             }
+            "interpolation" => {
+                let catmull = |t: f64, p0: f64, p1: f64, p2: f64, p3: f64| -> f64 {
+                    let t2 = t * t;
+                    let t3 = t2 * t;
+                    0.5 * ((2.0 * p1)
+                        + (-p0 + p2) * t
+                        + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+                        + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3)
+                };
+                let t = args.first().map(|v| v.as_num()).unwrap_or(0.0);
+                if args.len() >= 13 {
+                    let vx = catmull(t, args[1].as_num(), args[4].as_num(), args[7].as_num(), args[10].as_num());
+                    let vy = catmull(t, args[2].as_num(), args[5].as_num(), args[8].as_num(), args[11].as_num());
+                    let vz = catmull(t, args[3].as_num(), args[6].as_num(), args[9].as_num(), args[12].as_num());
+                    self.multi_return = vec![LuaVal::Num(vy), LuaVal::Num(vz)];
+                    LuaVal::Num(vx)
+                } else if args.len() >= 9 {
+                    let vx = catmull(t, args[1].as_num(), args[3].as_num(), args[5].as_num(), args[7].as_num());
+                    let vy = catmull(t, args[2].as_num(), args[4].as_num(), args[6].as_num(), args[8].as_num());
+                    self.multi_return = vec![LuaVal::Num(vy)];
+                    LuaVal::Num(vx)
+                } else if args.len() >= 5 {
+                    let v = catmull(t, args[1].as_num(), args[2].as_num(), args[3].as_num(), args[4].as_num());
+                    LuaVal::Num(v)
+                } else {
+                    LuaVal::Num(0.0)
+                }
+            }
+            "getpixel" => {
+                if args.is_empty() {
+                    self.multi_return = vec![LuaVal::Num(self.obj.h)];
+                    LuaVal::Num(self.obj.w)
+                } else {
+                    self.multi_return = vec![LuaVal::Num(1.0)];
+                    LuaVal::Num(0xFFFFFF as f64)
+                }
+            }
+            "getoption" => {
+                let opt = args.first().map(|v| v.as_str()).unwrap_or_default();
+                match opt.as_str() {
+                    "camera_param" => {
+                        let mut map = HashMap::new();
+                        map.insert("x".into(), LuaVal::Num(self.obj.x + self.obj.ox));
+                        map.insert("y".into(), LuaVal::Num(self.obj.y + self.obj.oy));
+                        map.insert("z".into(), LuaVal::Num(self.obj.z + self.obj.oz));
+                        map.insert("tx".into(), LuaVal::Num(self.obj.cam_tx));
+                        map.insert("ty".into(), LuaVal::Num(self.obj.cam_ty));
+                        map.insert("tz".into(), LuaVal::Num(self.obj.cam_tz));
+                        map.insert("rz".into(), LuaVal::Num(self.obj.rz));
+                        map.insert("ux".into(), LuaVal::Num(self.obj.cam_ux));
+                        map.insert("uy".into(), LuaVal::Num(self.obj.cam_uy));
+                        map.insert("uz".into(), LuaVal::Num(self.obj.cam_uz));
+                        map.insert("d".into(), LuaVal::Num(self.obj.cam_d));
+                        LuaVal::Table(map, Vec::new())
+                    }
+                    "section_num" => LuaVal::Num(1.0),
+                    "track_mode" => LuaVal::Num(0.0),
+                    "camera_mode" => LuaVal::Num(1.0),
+                    "multi_object" => LuaVal::Bool(self.obj.num > 1),
+                    "gui" => LuaVal::Bool(true),
+                    _ => LuaVal::Num(0.0),
+                }
+            }
             "setoption" => {
                 if let Some(opt) = args.first() {
-                    if opt.as_str() == "blend" {
-                        if let Some(mode) = args.get(1) {
-                            self.obj.blend_mode = mode.as_num() as i64;
+                    match opt.as_str().as_str() {
+                        "blend" => {
+                            if let Some(mode) = args.get(1) {
+                                self.obj.blend_mode = mode.as_num() as i64;
+                            }
                         }
+                        "culling" => {
+                            if let Some(v) = args.get(1) {
+                                self.obj.culling = v.as_num() as i64 != 0;
+                            }
+                        }
+                        "billboard" => {
+                            if let Some(v) = args.get(1) {
+                                self.obj.billboard = v.as_num() as i64;
+                            }
+                        }
+                        "camera_param" => {
+                            if let Some(LuaVal::Table(map, _)) = args.get(1) {
+                                if let Some(v) = map.get("x") {
+                                    self.obj.ox = v.as_num() - self.obj.x;
+                                }
+                                if let Some(v) = map.get("y") {
+                                    self.obj.oy = v.as_num() - self.obj.y;
+                                }
+                                if let Some(v) = map.get("z") {
+                                    self.obj.oz = v.as_num() - self.obj.z;
+                                }
+                                if let Some(v) = map.get("tx") {
+                                    self.obj.cam_tx = v.as_num();
+                                }
+                                if let Some(v) = map.get("ty") {
+                                    self.obj.cam_ty = v.as_num();
+                                }
+                                if let Some(v) = map.get("tz") {
+                                    self.obj.cam_tz = v.as_num();
+                                }
+                                if let Some(v) = map.get("rz") {
+                                    self.obj.rz = v.as_num();
+                                }
+                                if let Some(v) = map.get("ux") {
+                                    self.obj.cam_ux = v.as_num();
+                                }
+                                if let Some(v) = map.get("uy") {
+                                    self.obj.cam_uy = v.as_num();
+                                }
+                                if let Some(v) = map.get("uz") {
+                                    self.obj.cam_uz = v.as_num();
+                                }
+                                if let Some(v) = map.get("d") {
+                                    self.obj.cam_d = v.as_num();
+                                }
+                            }
+                        }
+                        "drawtarget" => {
+                            if args.get(1).map(|v| v.as_str()).as_deref() == Some("tempbuffer") {
+                                if let (Some(w), Some(h)) = (args.get(2), args.get(3)) {
+                                    self.obj.w = w.as_num().max(1.0);
+                                    self.obj.h = h.as_num().max(1.0);
+                                    self.obj.draw_calls.clear();
+                                    self.obj.current_clip = None;
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 LuaVal::Nil
             }
+            "setanchor" => LuaVal::Num(1.0),
             "copybuffer" => LuaVal::Bool(true),
             _ => LuaVal::Nil,
         }
@@ -2056,6 +2241,28 @@ pub fn execute_compiled_script(stmts: &[Stmt], state: &mut LuaObjState) {
     if let Flow::Return(vals) = vm.exec_block(stmts) {
         if let Some(first) = vals.first() {
             state.return_value = Some(first.as_num());
+        }
+    }
+}
+
+/// `.aup` / `.exo` の `param=` 文字列（例: `num=8;dir=0;rot=0;col=0xffffff;`）を評価し、
+/// 代入された変数を `state.named_vars` に格納します。
+pub fn execute_param_assignments(param_str: &str, state: &mut LuaObjState) {
+    if param_str.trim().is_empty() {
+        return;
+    }
+    let stmts = compile_lua_script(param_str);
+    let (globals, scopes) = {
+        let mut vm = Vm::new(state);
+        let _ = vm.exec_block(&stmts);
+        (vm.globals, vm.scopes)
+    };
+    for (k, v) in globals {
+        state.named_vars.insert(k, v);
+    }
+    if let Some(scope) = scopes.into_iter().next() {
+        for (k, v) in scope {
+            state.named_vars.insert(k, v);
         }
     }
 }

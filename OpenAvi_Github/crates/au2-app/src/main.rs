@@ -276,24 +276,40 @@ mod tests {
         let out_frame40 = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| panels::preview::ui(ui, &mut st));
         });
-        let has_stroke_or_mesh = out_frame40.shapes.iter().any(|cs| {
-            matches!(&cs.shape, egui::epaint::Shape::LineSegment { .. } | egui::epaint::Shape::Path(_) | egui::epaint::Shape::Mesh(_))
-        });
-        assert!(has_stroke_or_mesh, "frame 40: 枠線図形（ライン幅）が正常にストローク/メッシュ描画されていること");
+        let mesh_count_f40 = out_frame40
+            .shapes
+            .iter()
+            .filter(|cs| matches!(&cs.shape, egui::epaint::Shape::Mesh(_)))
+            .count();
+        assert!(
+            mesh_count_f40 > 0 && out_frame40.shapes.len() > 15,
+            "frame 40: 枠線図形やテキストメッシュが正常に描画されていること (meshes={mesh_count_f40}, total_shapes={})",
+            out_frame40.shapes.len()
+        );
 
         // 2. カメラ制御・グロー・加算合成がアクティブな各フレームでプレビュー描画が正常に出力されるか検証
-        for f in [400u32, 500, 1000, 2800, 3000, 5200, 5600, 6000] {
+        for f in [10u32, 40, 200, 400, 500, 1000, 2800, 3000, 5200, 5600, 6000] {
             st.frame = f;
             let out = ctx.run(egui::RawInput::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| panels::preview::ui(ui, &mut st));
             });
-            let mut shapes_count = 0usize;
+            let mut content_shapes = 0usize;
             for cs in &out.shapes {
-                if let egui::epaint::Shape::Mesh(_) | egui::epaint::Shape::Circle(_) | egui::epaint::Shape::Rect(_) | egui::epaint::Shape::LineSegment { .. } = &cs.shape {
-                    shapes_count += 1;
+                if matches!(
+                    &cs.shape,
+                    egui::epaint::Shape::Mesh(_)
+                        | egui::epaint::Shape::Circle(_)
+                        | egui::epaint::Shape::Path(_)
+                        | egui::epaint::Shape::Text(_)
+                ) {
+                    content_shapes += 1;
                 }
             }
-            assert!(shapes_count > 0, "frame {f}: カメラ制御下のプレビューに描画プリミティブが出力されていること");
+            assert!(
+                content_shapes > 0 && out.shapes.len() > 12,
+                "frame {f}: プレビューに実オブジェクトの描画プリミティブが出力されていること (content_shapes={content_shapes}, total={})",
+                out.shapes.len()
+            );
         }
     }
 

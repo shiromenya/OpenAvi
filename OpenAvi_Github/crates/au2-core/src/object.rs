@@ -204,7 +204,121 @@ impl TimelineObject {
         src.push_track("目標X", Track::constant(0.0, 1));
         src.push_track("目標Y", Track::constant(0.0, 1));
         src.push_track("目標Z", Track::constant(0.0, 1));
+        src.push_track("目標レイヤー", Track::constant(0.0, 0));
+        src.push_track("傾き", Track::constant(0.0, 2));
+        src.push_track("深度ぼけ", Track::constant(0.0, 1));
+        src.push_track("視野角", Track::constant(0.0, 2));
+        src.push_track("Zバッファ/シャドウマップを有効にする", Track::constant(1.0, 0));
+        src.push_text("range", "0");
         obj.effects.push(src);
+        obj
+    }
+
+    /// 時間制御オブジェクトを生成します。
+    pub fn new_time_control(start: Frame, end: Frame) -> Self {
+        let mut obj = Self::new(start, end);
+        let mut src = Effect::new("時間制御");
+        src.push_track("位置", Track::constant(0.0, 1));
+        src.push_track("距離", Track::constant(0.0, 0));
+        src.push_track("フレーム番号指定", Track::constant(0.0, 0));
+        src.push_text("range", "0");
+        obj.effects.push(src);
+        obj
+    }
+
+    /// 音声波形表示オブジェクトを生成します。
+    pub fn new_audio_waveform(start: Frame, end: Frame) -> Self {
+        let mut obj = Self::new(start, end);
+        let mut src = Effect::new("音声波形表示");
+        src.push_track("横幅", Track::constant(240.0, 0));
+        src.push_track("高さ", Track::constant(100.0, 0));
+        src.push_track("音量", Track::constant(100.0, 1));
+        src.push_text("color", "ffffff");
+        obj.effects.push(src);
+        obj.effects.push(standard_draw_effect());
+        obj
+    }
+
+    /// シーン（サブシーン呼び出し）オブジェクトを生成します。
+    pub fn new_scene_object(start: Frame, end: Frame, scene_id: u32) -> Self {
+        let mut obj = Self::new(start, end);
+        let mut src = Effect::new("シーン");
+        src.push_track("再生位置", Track::constant(1.0, 0));
+        src.push_track("再生速度", Track::constant(100.0, 1));
+        src.push_track("ループ再生", Track::constant(0.0, 0));
+        src.push_text("scene", scene_id.to_string());
+        obj.effects.push(src);
+        obj.effects.push(standard_draw_effect());
+        obj
+    }
+
+    /// 直前オブジェクトを生成します。
+    pub fn new_previous_object(start: Frame, end: Frame) -> Self {
+        let mut obj = Self::new(start, end);
+        let src = Effect::new("直前オブジェクト");
+        obj.effects.push(src);
+        obj.effects.push(standard_draw_effect());
+        obj
+    }
+
+    /// パーティクル出力オブジェクトを生成します。
+    pub fn new_particle_output(start: Frame, end: Frame) -> Self {
+        let mut obj = Self::new(start, end);
+        let mut src = Effect::new("パーティクル出力");
+        src.push_track("出力頻度", Track::constant(15.0, 1));
+        src.push_track("出力速度", Track::constant(200.0, 1));
+        src.push_track("加速度", Track::constant(0.0, 1));
+        src.push_track("出力方向", Track::constant(0.0, 1));
+        src.push_track("拡散角度", Track::constant(180.0, 1));
+        src.push_track("透過速度", Track::constant(100.0, 1));
+        src.push_track("拡大速度", Track::constant(0.0, 1));
+        src.push_track("回転角", Track::constant(0.0, 1));
+        src.push_track("回転速度", Track::constant(0.0, 1));
+        src.push_track("重力", Track::constant(0.0, 1));
+        src.push_track("生存時間", Track::constant(2.0, 2));
+        src.push_text("color", "ffffff");
+        obj.effects.push(src);
+        obj.effects.push(standard_draw_effect());
+        obj
+    }
+
+    /// カスタムオブジェクトを生成します。
+    pub fn new_custom_object(start: Frame, end: Frame, script_name: &str) -> Self {
+        let mut obj = Self::new(start, end);
+        let mut src = Effect::new("カスタムオブジェクト");
+        src.push_track("track0", Track::constant(100.0, 2));
+        src.push_track("track1", Track::constant(50.0, 2));
+        src.push_track("track2", Track::constant(20.0, 2));
+        src.push_track("track3", Track::constant(0.0, 2));
+        src.push_track("check0", Track::constant(0.0, 0));
+        src.push_text("type", "0");
+        src.push_text("filter", "0");
+        src.push_text("name", script_name);
+        src.push_text("param", "");
+        obj.effects.push(src);
+        obj.effects.push(standard_draw_effect());
+        obj
+    }
+
+    /// シーンチェンジ（フィルタオブジェクト）を生成します。
+    pub fn new_scene_change(start: Frame, end: Frame, sc_name: &str, sc_type: i32) -> Self {
+        let mut obj = Self::new(start, end);
+        let mut src = Effect::new("シーンチェンジ");
+        src.push_track("track0", Track::constant(33.0, 2));
+        src.push_track("track1", Track::constant(0.0, 2));
+        src.push_track("check0", Track::constant(0.0, 0));
+        src.push_text("type", sc_type.to_string());
+        src.push_text("filter", "0");
+        src.push_text("name", sc_name);
+        src.push_text("param", "");
+        obj.effects.push(src);
+        obj
+    }
+
+    /// 任意の標準フィルタを単体フィルタオブジェクトとして生成します。
+    pub fn new_filter_object(start: Frame, end: Frame, eff: Effect) -> Self {
+        let mut obj = Self::new(start, end);
+        obj.effects.push(eff);
         obj
     }
 

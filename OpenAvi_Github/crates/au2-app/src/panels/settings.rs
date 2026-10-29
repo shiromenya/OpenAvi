@@ -65,66 +65,392 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                 ui.heading(RichText::new(obj.display_name()).strong().size(15.0));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.menu_button("＋ フィルタ効果を追加", |ui| {
-                        ui.label(RichText::new("標準内蔵フィルタ").weak().small());
-                        if ui.button("フェード").clicked() {
-                            let mut eff = Effect::new("フェード");
-                            eff.push_track("イン", Track::constant(0.50, 2));
-                            eff.push_track("アウト", Track::constant(0.50, 2));
-                            pending_effect = Some(eff);
-                            ui.close_menu();
-                        }
-                        if ui.button("縁取り").clicked() {
-                            let mut eff = Effect::new("縁取り");
-                            eff.push_track("サイズ", Track::constant(4.0, 0));
-                            eff.push_text("color", "ffffff");
-                            pending_effect = Some(eff);
-                            ui.close_menu();
-                        }
-                        if ui.button("ドロップシャドウ").clicked() {
-                            let mut eff = Effect::new("ドロップシャドウ");
-                            eff.push_track("X", Track::constant(8.0, 0));
-                            eff.push_track("Y", Track::constant(8.0, 0));
-                            eff.push_track("濃さ", Track::constant(60.0, 1));
-                            pending_effect = Some(eff);
-                            ui.close_menu();
-                        }
-                        if ui.button("グロー (発光)").clicked() {
-                            let mut eff = Effect::new("グロー");
-                            eff.push_track("強さ", Track::constant(60.0, 1));
-                            pending_effect = Some(eff);
-                            ui.close_menu();
-                        }
-                        if ui.button("色ズレ (色収差)").clicked() {
-                            let mut eff = Effect::new("色ズレ");
-                            eff.push_track("ズレ幅", Track::constant(8.0, 1));
-                            eff.push_track("角度", Track::constant(0.0, 1));
-                            pending_effect = Some(eff);
-                            ui.close_menu();
-                        }
-                        if ui.button("単色化").clicked() {
-                            let mut eff = Effect::new("単色化");
-                            eff.push_track("強さ", Track::constant(80.0, 1));
-                            eff.push_text("color", "ffcc66");
-                            pending_effect = Some(eff);
-                            ui.close_menu();
-                        }
-                        if ui.button("振動").clicked() {
-                            let mut eff = Effect::new("振動");
-                            eff.push_track("X", Track::constant(15.0, 1));
-                            eff.push_track("Y", Track::constant(15.0, 1));
-                            eff.push_track("周期", Track::constant(1.0, 1));
-                            pending_effect = Some(eff);
-                            ui.close_menu();
-                        }
-                        if !available_scripts.is_empty() {
+                        // 1. 発光・ブラー・装飾系
+                        ui.menu_button("✨ 発光・ライト・ブラー", |ui| {
+                            if ui.button("グロー").clicked() {
+                                let mut eff = Effect::new("グロー");
+                                eff.push_track("強さ", Track::constant(60.0, 1));
+                                eff.push_track("拡散", Track::constant(30.0, 0));
+                                eff.push_track("しきい値", Track::constant(50.0, 1));
+                                eff.push_track("ぼかし", Track::constant(1.0, 0));
+                                eff.push_track("光成分のみ", Track::constant(0.0, 0));
+                                eff.push_text("color", "");
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("発光").clicked() {
+                                let mut eff = Effect::new("発光");
+                                eff.push_track("強さ", Track::constant(100.0, 1));
+                                eff.push_track("拡散", Track::constant(50.0, 0));
+                                eff.push_track("しきい値", Track::constant(70.0, 1));
+                                eff.push_track("拡散速度", Track::constant(0.0, 0));
+                                eff.push_track("光成分のみ", Track::constant(0.0, 0));
+                                eff.push_text("color", "");
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("拡散光").clicked() {
+                                let mut eff = Effect::new("拡散光");
+                                eff.push_track("強さ", Track::constant(50.0, 1));
+                                eff.push_track("拡散", Track::constant(30.0, 0));
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("閃光").clicked() {
+                                let mut eff = Effect::new("閃光");
+                                eff.push_track("強さ", Track::constant(60.0, 1));
+                                eff.push_track("X", Track::constant(0.0, 1));
+                                eff.push_track("Y", Track::constant(0.0, 1));
+                                eff.push_text("color", "ffffff");
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("ライト").clicked() {
+                                let mut eff = Effect::new("ライト");
+                                eff.push_track("強さ", Track::constant(100.0, 1));
+                                eff.push_track("拡散", Track::constant(60.0, 0));
+                                eff.push_track("比率", Track::constant(0.0, 1));
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
                             ui.separator();
-                            ui.label(RichText::new("スクリプト & .auf プラグイン (32bit/64bit)").weak().small());
-                            for (kind, entry) in &available_scripts {
-                                if ui.button(&entry.display_name).clicked() {
-                                    pending_effect = Some(entry.to_effect(*kind));
+                            for blur_name in ["ぼかし", "境界ぼかし", "レンズブラー", "放射ブラー", "方向ブラー", "モーションブラー"] {
+                                if ui.button(blur_name).clicked() {
+                                    let mut eff = Effect::new(blur_name);
+                                    eff.push_track("範囲", Track::constant(10.0, 0));
+                                    pending_effect = Some(eff);
                                     ui.close_menu();
                                 }
                             }
+                        });
+
+                        // 2. 装飾・縁取り・シャドー系
+                        ui.menu_button("🖋 縁取り・シャドー・エッジ", |ui| {
+                            if ui.button("縁取り").clicked() {
+                                let mut eff = Effect::new("縁取り");
+                                eff.push_track("サイズ", Track::constant(4.0, 0));
+                                eff.push_track("ぼかし", Track::constant(5.0, 0));
+                                eff.push_text("color", "ffffff");
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("シャドー").clicked() {
+                                let mut eff = Effect::new("シャドー");
+                                eff.push_track("X", Track::constant(6.0, 1));
+                                eff.push_track("Y", Track::constant(6.0, 1));
+                                eff.push_track("濃さ", Track::constant(60.0, 1));
+                                eff.push_track("拡散", Track::constant(5.0, 0));
+                                eff.push_text("color", "000000");
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("凸エッジ").clicked() {
+                                let mut eff = Effect::new("凸エッジ");
+                                eff.push_track("幅", Track::constant(5.0, 0));
+                                eff.push_track("高さ", Track::constant(100.0, 2));
+                                eff.push_track("角度", Track::constant(-45.0, 1));
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("エッジ抽出").clicked() {
+                                let mut eff = Effect::new("エッジ抽出");
+                                eff.push_track("強さ", Track::constant(100.0, 1));
+                                eff.push_track("しきい値", Track::constant(0.0, 1));
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("シャープ").clicked() {
+                                let mut eff = Effect::new("シャープ");
+                                eff.push_track("強さ", Track::constant(100.0, 0));
+                                eff.push_track("範囲", Track::constant(3.0, 0));
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                        });
+
+                        // 3. 色調・グラデーション・キーイング系
+                        ui.menu_button("🎨 色調・グラデーション・キーイング", |ui| {
+                            if ui.button("色調補正").clicked() {
+                                let mut eff = Effect::new("色調補正");
+                                eff.push_track("明るさ", Track::constant(100.0, 1));
+                                eff.push_track("コントラスト", Track::constant(100.0, 1));
+                                eff.push_track("色相", Track::constant(0.0, 1));
+                                eff.push_track("輝度", Track::constant(100.0, 1));
+                                eff.push_track("彩度", Track::constant(100.0, 1));
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("グラデーション").clicked() {
+                                let mut eff = Effect::new("グラデーション");
+                                eff.push_track("強さ", Track::constant(100.0, 1));
+                                eff.push_track("中心X", Track::constant(0.0, 0));
+                                eff.push_track("中心Y", Track::constant(0.0, 0));
+                                eff.push_track("角度", Track::constant(0.0, 1));
+                                eff.push_track("幅", Track::constant(100.0, 0));
+                                eff.push_text("color", "ffffff");
+                                eff.push_text("color2", "000000");
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("単色化").clicked() {
+                                let mut eff = Effect::new("単色化");
+                                eff.push_track("強さ", Track::constant(100.0, 1));
+                                eff.push_track("輝度を保持する", Track::constant(1.0, 0));
+                                eff.push_text("color", "ffcc66");
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("色ずれ (色収差)").clicked() {
+                                let mut eff = Effect::new("色ずれ");
+                                eff.push_track("ずれ幅", Track::constant(5.0, 0));
+                                eff.push_track("角度", Track::constant(0.0, 1));
+                                eff.push_track("強さ", Track::constant(100.0, 0));
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("反転").clicked() {
+                                let mut eff = Effect::new("反転");
+                                eff.push_track("上下反転", Track::constant(0.0, 0));
+                                eff.push_track("左右反転", Track::constant(0.0, 0));
+                                eff.push_track("輝度反転", Track::constant(0.0, 0));
+                                eff.push_track("色相反転", Track::constant(0.0, 0));
+                                eff.push_track("透明度反転", Track::constant(0.0, 0));
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                            for key_name in ["クロマキー", "カラーキー", "ルミナンスキー", "特定色域変換", "拡張色設定"] {
+                                if ui.button(key_name).clicked() {
+                                    let mut eff = Effect::new(key_name);
+                                    eff.push_track("しきい値", Track::constant(50.0, 0));
+                                    pending_effect = Some(eff);
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+
+                        // 4. クリッピング・マスク・ワイプ・フェード
+                        ui.menu_button("✂ フェード・ワイプ・マスク・クリッピング", |ui| {
+                            if ui.button("フェード").clicked() {
+                                let mut eff = Effect::new("フェード");
+                                eff.push_track("イン", Track::constant(0.50, 2));
+                                eff.push_track("アウト", Track::constant(0.50, 2));
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("ワイプ").clicked() {
+                                let mut eff = Effect::new("ワイプ");
+                                eff.push_track("イン", Track::constant(0.50, 2));
+                                eff.push_track("アウト", Track::constant(0.50, 2));
+                                eff.push_track("ぼかし", Track::constant(10.0, 0));
+                                eff.push_track("反転(イン)", Track::constant(0.0, 0));
+                                eff.push_track("反転(アウト)", Track::constant(0.0, 0));
+                                eff.push_text("type", "0");
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("マスク").clicked() {
+                                let mut eff = Effect::new("マスク");
+                                eff.push_track("X", Track::constant(0.0, 1));
+                                eff.push_track("Y", Track::constant(0.0, 1));
+                                eff.push_track("回転", Track::constant(0.0, 2));
+                                eff.push_track("サイズ", Track::constant(100.0, 0));
+                                eff.push_track("縦横比", Track::constant(0.0, 1));
+                                eff.push_track("ぼかし", Track::constant(0.0, 0));
+                                eff.push_track("マスクの反転", Track::constant(0.0, 0));
+                                eff.push_track("元のサイズに合わせる", Track::constant(0.0, 0));
+                                eff.push_text("type", "1");
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("クリッピング").clicked() {
+                                let mut eff = Effect::new("クリッピング");
+                                eff.push_track("上", Track::constant(0.0, 0));
+                                eff.push_track("下", Track::constant(0.0, 0));
+                                eff.push_track("左", Track::constant(0.0, 0));
+                                eff.push_track("右", Track::constant(0.0, 0));
+                                eff.push_track("中心の位置を変更", Track::constant(0.0, 0));
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("斜めクリッピング").clicked() {
+                                let mut eff = Effect::new("斜めクリッピング");
+                                eff.push_track("中心X", Track::constant(0.0, 0));
+                                eff.push_track("中心Y", Track::constant(0.0, 0));
+                                eff.push_track("角度", Track::constant(0.0, 1));
+                                eff.push_track("ぼかし", Track::constant(1.0, 0));
+                                eff.push_track("幅", Track::constant(0.0, 0));
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                        });
+
+                        // 5. 変形・配置・歪み・基本効果
+                        ui.menu_button("📐 変形・配置・歪み・基本効果", |ui| {
+                            if ui.button("振動").clicked() {
+                                let mut eff = Effect::new("振動");
+                                eff.push_track("X", Track::constant(15.0, 1));
+                                eff.push_track("Y", Track::constant(15.0, 1));
+                                eff.push_track("Z", Track::constant(0.0, 1));
+                                eff.push_track("周期", Track::constant(1.0, 0));
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("極座標変換").clicked() {
+                                let mut eff = Effect::new("極座標変換");
+                                eff.push_track("中心幅", Track::constant(0.0, 0));
+                                eff.push_track("拡大率", Track::constant(100.0, 1));
+                                eff.push_track("回転", Track::constant(0.0, 1));
+                                eff.push_track("渦巻", Track::constant(0.0, 2));
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("画像ループ").clicked() {
+                                let mut eff = Effect::new("画像ループ");
+                                eff.push_track("横回数", Track::constant(3.0, 0));
+                                eff.push_track("縦回数", Track::constant(3.0, 0));
+                                eff.push_track("速度X", Track::constant(0.0, 1));
+                                eff.push_track("速度Y", Track::constant(0.0, 1));
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("オブジェクト分割").clicked() {
+                                let mut eff = Effect::new("オブジェクト分割");
+                                eff.push_track("横分割数", Track::constant(2.0, 0));
+                                eff.push_track("縦分割数", Track::constant(2.0, 0));
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("ミラー").clicked() {
+                                let mut eff = Effect::new("ミラー");
+                                eff.push_track("透明度", Track::constant(30.0, 1));
+                                eff.push_track("減衰", Track::constant(50.0, 1));
+                                eff.push_track("境目調整", Track::constant(0.0, 0));
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("ラスター").clicked() {
+                                let mut eff = Effect::new("ラスター");
+                                eff.push_track("横幅", Track::constant(50.0, 0));
+                                eff.push_track("高さ", Track::constant(50.0, 0));
+                                eff.push_track("周期", Track::constant(1.0, 2));
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("波紋").clicked() {
+                                let mut eff = Effect::new("波紋");
+                                eff.push_track("中心X", Track::constant(0.0, 0));
+                                eff.push_track("中心Y", Track::constant(0.0, 0));
+                                eff.push_track("幅", Track::constant(30.0, 0));
+                                eff.push_track("高さ", Track::constant(20.0, 0));
+                                eff.push_track("速度", Track::constant(100.0, 0));
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("ディスプレイスメントマップ").clicked() {
+                                let mut eff = Effect::new("ディスプレイスメントマップ");
+                                eff.push_track("変形X", Track::constant(20.0, 1));
+                                eff.push_track("変形Y", Track::constant(20.0, 1));
+                                eff.push_track("サイズ", Track::constant(200.0, 0));
+                                eff.push_track("ぼかし", Track::constant(5.0, 0));
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("ノイズ").clicked() {
+                                let mut eff = Effect::new("ノイズ");
+                                eff.push_track("強さ", Track::constant(50.0, 1));
+                                eff.push_track("速度X", Track::constant(0.0, 1));
+                                eff.push_track("速度Y", Track::constant(0.0, 1));
+                                eff.push_track("変化速度", Track::constant(10.0, 1));
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("モザイク").clicked() {
+                                let mut eff = Effect::new("モザイク");
+                                eff.push_track("サイズ", Track::constant(16.0, 0));
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                            if ui.button("座標").clicked() {
+                                let mut eff = Effect::new("座標");
+                                eff.push_track("X", Track::constant(0.0, 1));
+                                eff.push_track("Y", Track::constant(0.0, 1));
+                                eff.push_track("Z", Track::constant(0.0, 1));
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("拡大率").clicked() {
+                                let mut eff = Effect::new("拡大率");
+                                eff.push_track("拡大率", Track::constant(100.0, 2));
+                                eff.push_track("X", Track::constant(100.0, 2));
+                                eff.push_track("Y", Track::constant(100.0, 2));
+                                eff.push_track("Z", Track::constant(100.0, 2));
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("透明度").clicked() {
+                                let mut eff = Effect::new("透明度");
+                                eff.push_track("透明度", Track::constant(0.0, 1));
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("回転").clicked() {
+                                let mut eff = Effect::new("回転");
+                                eff.push_track("X", Track::constant(0.0, 2));
+                                eff.push_track("Y", Track::constant(0.0, 2));
+                                eff.push_track("Z", Track::constant(0.0, 2));
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("リサイズ").clicked() {
+                                let mut eff = Effect::new("リサイズ");
+                                eff.push_track("拡大率", Track::constant(100.0, 2));
+                                eff.push_track("X", Track::constant(100.0, 2));
+                                eff.push_track("Y", Track::constant(100.0, 2));
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("ローテーション").clicked() {
+                                let mut eff = Effect::new("ローテーション");
+                                eff.push_track("90度回転", Track::constant(1.0, 0));
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                            if ui.button("領域拡張").clicked() {
+                                let mut eff = Effect::new("領域拡張");
+                                eff.push_track("上", Track::constant(20.0, 0));
+                                eff.push_track("下", Track::constant(20.0, 0));
+                                eff.push_track("左", Track::constant(20.0, 0));
+                                eff.push_track("右", Track::constant(20.0, 0));
+                                pending_effect = Some(eff);
+                                ui.close_menu();
+                            }
+                        });
+
+                        // 6. アニメーション効果 / スクリプト / .auf プラグイン
+                        if !available_scripts.is_empty() {
+                            ui.separator();
+                            ui.menu_button("🎬 アニメーション効果 (標準 & スクリプト)", |ui| {
+                                for (kind, entry) in &available_scripts {
+                                    if *kind == au2_plugin::PluginKind::AnmScript {
+                                        if ui.button(&entry.display_name).clicked() {
+                                            pending_effect = Some(entry.to_effect(*kind));
+                                            ui.close_menu();
+                                        }
+                                    }
+                                }
+                            });
+                            ui.menu_button("🎥 カメラ効果 / 外部プラグイン (.auf)", |ui| {
+                                for (kind, entry) in &available_scripts {
+                                    if *kind != au2_plugin::PluginKind::AnmScript {
+                                        if ui.button(&entry.display_name).clicked() {
+                                            pending_effect = Some(entry.to_effect(*kind));
+                                            ui.close_menu();
+                                        }
+                                    }
+                                }
+                            });
                         }
                     });
                 });

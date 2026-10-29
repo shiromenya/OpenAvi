@@ -126,7 +126,16 @@ impl Effect {
 
     /// トラックを相対フレームで評価します。存在しなければ `default`。
     pub fn eval(&self, key: &str, frame: Frame, default: f64) -> f64 {
-        self.track(key).map(|t| t.evaluate(frame)).unwrap_or(default)
+        match self.param(key) {
+            Some(ParamValue::Track(t)) => t.evaluate(frame),
+            Some(ParamValue::Text(s)) => s
+                .split(',')
+                .next()
+                .and_then(|v| v.trim().parse::<f64>().ok())
+                .filter(|v| v.is_finite())
+                .unwrap_or(default),
+            None => default,
+        }
     }
 
     pub fn push_track(&mut self, key: impl Into<String>, track: Track) {

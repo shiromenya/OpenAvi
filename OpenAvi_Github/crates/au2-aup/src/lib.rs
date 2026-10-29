@@ -53,6 +53,8 @@ pub enum AupError {
 pub struct AupDocument {
     pub version: String,
     pub scene: Scene,
+    /// マルチシーン（Root = 0, Scene 1..N）のマップ
+    pub scenes: BTreeMap<u32, Scene>,
     pub cursor_frame: Frame,
     pub warnings: Vec<String>,
 }
@@ -762,9 +764,13 @@ pub fn parse_aup2_str(text: &str) -> Result<AupDocument, AupError> {
         scene.settings.length = content_end;
     }
 
+    let mut scenes = BTreeMap::new();
+    scenes.insert(0, scene.clone());
+
     Ok(AupDocument {
         version,
         scene,
+        scenes,
         cursor_frame,
         warnings,
     })
@@ -1322,9 +1328,12 @@ pub fn parse_aup_bytes(bytes: &[u8]) -> Result<AupDocument, AupError> {
             let data_start = len_offset + 4;
             if data_start + len <= bytes.len() {
                 let doc = parse_exo_bytes(&bytes[data_start..data_start + len])?;
+                let mut scenes = BTreeMap::new();
+                scenes.insert(0, doc.scene.clone());
                 return Ok(AupDocument {
                     version,
                     scene: doc.scene,
+                    scenes,
                     cursor_frame: 0,
                     warnings: doc.warnings,
                 });
@@ -1374,9 +1383,13 @@ pub fn parse_aup_bytes(bytes: &[u8]) -> Result<AupDocument, AupError> {
         }
     }
 
+    let mut scenes = BTreeMap::new();
+    scenes.insert(0, scene.clone());
+
     Ok(AupDocument {
         version,
         scene,
+        scenes,
         cursor_frame: 0,
         warnings,
     })

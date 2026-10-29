@@ -2,7 +2,7 @@ use std::path::Path;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let default_path = r"C:\Users\user\Desktop\goot time pf.aup";
+    let default_path = r"C:\Users\user\.gemini\antigravity\scratch\openavi\samples\target_test.aup";
     let target = args.get(1).map(|s| s.as_str()).unwrap_or(default_path);
 
     if !Path::new(target).exists() {
@@ -15,54 +15,113 @@ fn main() {
 
     println!("=== AUP Inspection ===");
     println!("File: {}", target);
-    println!("Version: {}", doc.version);
-    println!(
-        "Settings: {}x{} @ {:.2} fps, length={} frames",
-        doc.scene.settings.width,
-        doc.scene.settings.height,
-        doc.scene.settings.frame_rate.as_f64(),
-        doc.scene.settings.length,
-    );
-    println!("Layers: {}", doc.scene.layers.len());
-    println!("Total objects: {}", doc.scene.object_count());
-
-    let legacy_paths = au2_aup::extract_media_paths_from_binary(&data);
-    println!("Extracted legacy paths count: {}", legacy_paths.len());
-    for p in &legacy_paths {
-        println!("  extracted: {}", p);
+    println!("Scenes count: {}", doc.scenes.len());
+    for (sc_id, sc) in &doc.scenes {
+        println!(
+            "  Scene {}: '{}' ({}x{} @ {:.2}fps, len={}), objects={}",
+            sc_id,
+            sc.name,
+            sc.settings.width,
+            sc.settings.height,
+            sc.settings.frame_rate.as_f64(),
+            sc.settings.length,
+            sc.object_count()
+        );
     }
 
-    // 0x2e77f0 付近の hex ダンプ
-    if data.len() >= 0x2e7830 {
-        let slice = &data[0x2e77f0..0x2e7830];
-        let hex = slice.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
-        let ascii = slice.iter().map(|&b| if b >= 32 && b <= 126 { b as char } else { '.' }).collect::<String>();
-        println!("0x2e77f0: {} | {}", hex, ascii);
-    }
+    let mut eff_counts = std::collections::BTreeMap::new();
+    let mut script_details = std::collections::BTreeSet::new();
+    let mut special_samples = std::collections::BTreeMap::<String, Vec<String>>::new();
 
-    let mut audio_objects = Vec::new();
-    for layer in &doc.scene.layers {
-        for obj in &layer.objects {
-            if obj.audio {
-                audio_objects.push(obj);
-            } else if let Some(src) = obj.source() {
-                if matches!(src.kind, au2_core::EffectKind::AudioFile) {
-                    audio_objects.push(obj);
+    for (sc_id, sc) in &doc.scenes {
+        for (li, layer) in sc.layers.iter().enumerate() {
+            for obj in &layer.objects {
+                for eff in &obj.effects {
+                    *eff_counts.entry(eff.name.clone()).or_insert(0usize) += 1;
+                    if matches!(
+                        eff.name.as_str(),
+                        "アニメーション効果"
+                            | "カスタムオブジェクト"
+                            | "カメラ効果"
+                            | "スクリプト(カメラ制御)"
+                            | "シーンチェンジ"
+                    ) {
+                        script_details.insert(format!(
+                            "[sc={}] {}: name={:?}, type={:?}, filter={:?}, param={:?}",
+                            sc_id,
+                            eff.name,
+                            eff.text("name"),
+                            eff.text("type"),
+                            eff.text("filter"),
+                            eff.text("param")
+                        ));
+                    }
+                    if matches!(
+                        eff.name.as_str(),
+                        "ワイプ"
+                            | "マスク"
+                            | "シーンチェンジ"
+                            | "オブジェクト分割"
+                            | "極座標変換"
+                            | "画像ループ"
+                            | "ラスター"
+                            | "ディスプレイスメントマップ"
+                            | "シャドー(カメラ制御)"
+                            | "グループ制御"
+                            | "シーン"
+                            | "カスタムオブジェクト"
+                    ) {
+                        let list = special_samples.entry(eff.name.clone()).or_default();
+                        if list.len() < 5 {
+                            list.push(format!(
+                                "sc={} L{} ({}..={}) cat={:?} params={:?}",
+                                sc_id,
+                                li + 1,
+                                obj.frame_start,
+                                obj.frame_end,
+                                obj.category(),
+                                eff.params
+                            ));
+                        }
+                    }
                 }
             }
         }
     }
 
-    println!("Audio objects count: {}", audio_objects.len());
-    for (idx, obj) in audio_objects.iter().take(20).enumerate() {
-        println!(
-            "[{}] range={}..={} audio_flag={}",
-            idx, obj.frame_start, obj.frame_end, obj.audio
-        );
-        for eff in &obj.effects {
-            println!("   eff: {} (kind={:?})", eff.name, eff.kind);
-            for p in &eff.params {
-                println!("     param {}: {:?}", p.key, p.value);
+    println!("\n=== Effect Counts Across All Scenes ===");
+    for (k, v) in &eff_counts {
+        println!("  {:30}: {}", k, v);
+    }
+
+    println!("\n=== Script / SceneChange Details ===");
+    for s in &script_details {
+        println!("  {}", s);
+    }
+
+    println!("\n=== First 40 Objects in Root Scene ===");
+    for (li, layer) in doc.scene.layers.iter().enumerate() {
+        for obj in &layer.objects {
+            if obj.frame_start < 1500 {
+                let eff_summary: Vec<String> = obj
+                    .effects
+                    .iter()
+                    .map(|e| {
+                        let sub = e.text("name").unwrap_or("");
+                        let col = e.text("color").unwrap_or("");
+                        let ty = e.text("type").unwrap_or("");
+                        format!("{}[en={},name={},ty={},col={}]", e.name, e.enabled, sub, ty, col)
+                    })
+                    .collect();
+                println!(
+                    "  L{:02} ({:4}..={:4}) clip={} cam={}: {}",
+                    li + 1,
+                    obj.frame_start,
+                    obj.frame_end,
+                    obj.clipping,
+                    obj.camera_target,
+                    eff_summary.join(" -> ")
+                );
             }
         }
     }

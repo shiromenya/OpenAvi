@@ -401,6 +401,51 @@ impl OpenAviApp {
                         ui.close_menu();
                     }
                 });
+
+                // マルチシーン切り替えセレクタ（Root / Scene 1..N）
+                if self.st.scenes.len() > 1 {
+                    ui.separator();
+                    let cur_name = self.st.scene.name.clone();
+                    let scene_list: Vec<(u32, String, usize)> = self
+                        .st
+                        .scenes
+                        .iter()
+                        .map(|(&id, sc)| (id, sc.name.clone(), sc.object_count()))
+                        .collect();
+                    let mut switch_to: Option<u32> = None;
+                    ui.menu_button(
+                        egui::RichText::new(format!("🎬 シーン: {}", cur_name))
+                            .strong()
+                            .color(Color32::from_rgb(147, 197, 253)),
+                        |ui| {
+                            for (sc_id, sc_name, cnt) in scene_list {
+                                let is_cur = sc_name == cur_name;
+                                if ui
+                                    .selectable_label(is_cur, format!("{} ({} オブジェクト)", sc_name, cnt))
+                                    .clicked()
+                                {
+                                    switch_to = Some(sc_id);
+                                    ui.close_menu();
+                                }
+                            }
+                        },
+                    );
+                    if let Some(target_id) = switch_to {
+                        // 現在のシーンの変更を scenes マップに書き戻してから切り替え
+                        for sc in self.st.scenes.values_mut() {
+                            if sc.name == cur_name {
+                                *sc = self.st.scene.clone();
+                                break;
+                            }
+                        }
+                        if let Some(next_sc) = self.st.scenes.get(&target_id).cloned() {
+                            self.st.scene = next_sc;
+                            self.st.selected = None;
+                            self.st.set_frame(0);
+                            self.st.status = format!("シーン「{}」に切り替えました", self.st.scene.name);
+                        }
+                    }
+                }
             });
         });
     }

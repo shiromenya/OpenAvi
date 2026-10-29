@@ -190,7 +190,7 @@ fn parse_segment(
         layer,
         chain: flag("chain"),
         group: h.get("group").and_then(|v| v.trim().parse().ok()),
-        clipping: flag("clipping"),
+        clipping: flag("clipping") || h.get("overlay").map(|v| v.trim() == "0").unwrap_or(false),
         camera: flag("camera"),
         audio: flag("audio"),
         extra,
@@ -267,7 +267,13 @@ pub(crate) fn interpolation_from_code(code: u32, script: Option<String>, param: 
 }
 
 /// 数値トラックとして扱わない設定キー（`file`, `color`, `font`, `blend` など英小文字・`_` 始まり）。
+/// ただしスクリプトや汎用エフェクトの `track0`〜`track63` および `check0`〜`check47` は数値トラックとして扱う。
 pub(crate) fn is_setting_key(key: &str) -> bool {
+    if let Some(rest) = key.strip_prefix("track").or_else(|| key.strip_prefix("check")) {
+        if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+    }
     key.chars().next().map_or(true, |c| c.is_ascii_lowercase() || c == '_')
 }
 

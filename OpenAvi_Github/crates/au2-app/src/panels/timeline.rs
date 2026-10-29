@@ -1043,6 +1043,14 @@ fn context_menu_ui(ui: &mut egui::Ui, st: &mut EditorState) {
                 st.add_object_at(target.layer, TimelineObject::new_shape(start, end, 3, "f5a623"));
                 ui.close_menu();
             }
+            if ui.button("五角形").clicked() {
+                st.add_object_at(target.layer, TimelineObject::new_shape(start, end, 4, "8b5cf6"));
+                ui.close_menu();
+            }
+            if ui.button("六角形").clicked() {
+                st.add_object_at(target.layer, TimelineObject::new_shape(start, end, 5, "38bdf8"));
+                ui.close_menu();
+            }
             if ui.button("星型").clicked() {
                 st.add_object_at(target.layer, TimelineObject::new_shape(start, end, 6, "ffd166"));
                 ui.close_menu();
@@ -1056,7 +1064,51 @@ fn context_menu_ui(ui: &mut egui::Ui, st: &mut EditorState) {
             st.add_object_at(target.layer, TimelineObject::new_framebuffer(start, end));
             ui.close_menu();
         }
+        if ui.button("音声波形表示").clicked() {
+            st.add_object_at(target.layer, TimelineObject::new_audio_waveform(start, end));
+            ui.close_menu();
+        }
+        if ui.button("シーン").clicked() {
+            st.add_object_at(target.layer, TimelineObject::new_scene_object(start, end, 1));
+            ui.close_menu();
+        }
+        if ui.button("直前オブジェクト").clicked() {
+            st.add_object_at(target.layer, TimelineObject::new_previous_object(start, end));
+            ui.close_menu();
+        }
+        if ui.button("パーティクル出力").clicked() {
+            st.add_object_at(target.layer, TimelineObject::new_particle_output(start, end));
+            ui.close_menu();
+        }
+        ui.menu_button("カスタムオブジェクト", |ui| {
+            for name in [
+                "集中線",
+                "走査線",
+                "カウンター",
+                "レンズフレア",
+                "雲",
+                "星",
+                "雪",
+                "雨",
+                "ランダム小物配置(カメラ制御)",
+                "ライン(移動軌跡)",
+                "扇型",
+                "多角形",
+                "周辺ボケ光量",
+                "フレア",
+                "水面",
+            ] {
+                if ui.button(name).clicked() {
+                    st.add_object_at(target.layer, TimelineObject::new_custom_object(start, end, name));
+                    ui.close_menu();
+                }
+            }
+        });
         ui.separator();
+        if ui.button("時間制御").clicked() {
+            st.add_object_at(target.layer, TimelineObject::new_time_control(start, end));
+            ui.close_menu();
+        }
         if ui.button("グループ制御").clicked() {
             st.add_object_at(target.layer, TimelineObject::new_group_control(start, end));
             ui.close_menu();
@@ -1067,12 +1119,66 @@ fn context_menu_ui(ui: &mut egui::Ui, st: &mut EditorState) {
         }
     });
 
-    // 3. フィルタオブジェクトの追加メニュー
+    // 3. フィルタオブジェクトの追加メニュー（AviUtl 拡張編集互換）
     ui.menu_button("フィルタオブジェクトの追加", |ui| {
         if ui.button("色調補正").clicked() {
             st.add_object_at(target.layer, TimelineObject::new_color_correction(start, end));
             ui.close_menu();
         }
+        for fname in [
+            "ぼかし",
+            "レンズブラー",
+            "放射ブラー",
+            "方向ブラー",
+            "グロー",
+            "発光",
+            "拡散光",
+            "閃光",
+            "ライト",
+            "モザイク",
+            "ラスター",
+            "波紋",
+            "色ずれ",
+            "単色化",
+            "グラデーション",
+            "ノイズ",
+            "ミラー",
+            "反転",
+        ] {
+            if ui.button(fname).clicked() {
+                let mut eff = au2_core::Effect::new(fname);
+                eff.push_track("強さ", au2_core::Track::constant(60.0, 1));
+                eff.push_track("範囲", au2_core::Track::constant(10.0, 0));
+                st.add_object_at(target.layer, TimelineObject::new_filter_object(start, end, eff));
+                ui.close_menu();
+            }
+        }
+        ui.separator();
+        ui.menu_button("シーンチェンジ", |ui| {
+            for (sc_name, sc_type) in [
+                ("クロスフェード", 0),
+                ("ワイプ(円)", 1),
+                ("ワイプ(四角)", 2),
+                ("ワイプ(時計)", 3),
+                ("スライス", 4),
+                ("フェードアウトイン", 14),
+                ("放射ブラー", 15),
+                ("ぼかし", 16),
+                ("発光", 0),
+                ("レンズブラー", 1),
+                ("ドア", 2),
+                ("起き上がる", 3),
+                ("リール回転", 4),
+                ("図形ワイプ", 5),
+                ("砕け散る", 8),
+                ("ページめくり", 9),
+            ] {
+                if ui.button(sc_name).clicked() {
+                    st.add_object_at(target.layer, TimelineObject::new_scene_change(start, end, sc_name, sc_type));
+                    ui.close_menu();
+                }
+            }
+        });
     });
 
     if ui.button("📂 メディアファイルを選択して配置...").clicked() {

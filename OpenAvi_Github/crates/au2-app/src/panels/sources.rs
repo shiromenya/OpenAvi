@@ -152,8 +152,23 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                     if ui.button("🖥 フレームバッファ").clicked() {
                         st.add_object_at(layer, TimelineObject::new_framebuffer(start, end));
                     }
+                    if ui.button("📊 音声波形表示").clicked() {
+                        st.add_object_at(layer, TimelineObject::new_audio_waveform(start, end));
+                    }
+                    if ui.button("✨ パーティクル出力").clicked() {
+                        st.add_object_at(layer, TimelineObject::new_particle_output(start, end));
+                    }
+                    if ui.button("🎬 シーン呼出").clicked() {
+                        st.add_object_at(layer, TimelineObject::new_scene_object(start, end, 1));
+                    }
                     if ui.button("🎨 色調補正").clicked() {
                         st.add_object_at(layer, TimelineObject::new_color_correction(start, end));
+                    }
+                    if ui.button("🎞 シーンチェンジ").clicked() {
+                        st.add_object_at(layer, TimelineObject::new_scene_change(start, end, "発光", 0));
+                    }
+                    if ui.button("⏱ 時間制御").clicked() {
+                        st.add_object_at(layer, TimelineObject::new_time_control(start, end));
                     }
                     if ui.button("📐 グループ制御").clicked() {
                         st.add_object_at(layer, TimelineObject::new_group_control(start, end));

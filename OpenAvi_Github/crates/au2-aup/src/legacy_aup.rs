@@ -65,7 +65,7 @@ pub const BUILTIN_CAM_NAMES: &[&str] = &[
     "目標サイズ固定視野角",                // 2
 ];
 
-/// 初代 AviUtl 拡張編集の組み込みシーンチェンジ一覧 (exedit.scn)
+/// 初代 AviUtl 拡張編集の組み込みシーンチェンジ一覧 (exedit.scn スクリプト)
 pub const BUILTIN_SCN_NAMES: &[&str] = &[
     "発光",                                // 0
     "レンズブラー",                        // 1
@@ -77,6 +77,33 @@ pub const BUILTIN_SCN_NAMES: &[&str] = &[
     "図形で隠す(放射)",                    // 7
     "砕け散る",                            // 8
     "ページめくり",                        // 9
+];
+
+/// 初代 AviUtl 拡張編集の組み込みシーンチェンジ種別一覧 (type=0..=22、スクリプト名が空のときに使用)
+pub const BUILTIN_SCN_TYPES: &[&str] = &[
+    "クロスフェード",                      // 0
+    "ワイプ(円)",                          // 1
+    "ワイプ(四角)",                        // 2
+    "ワイプ(時計)",                        // 3
+    "スライス",                            // 4
+    "スワップ",                            // 5
+    "スライド",                            // 6
+    "縮小回転",                            // 7
+    "押し出し(横)",                        // 8
+    "押し出し(縦)",                        // 9
+    "回転(横)",                            // 10
+    "回転(縦)",                            // 11
+    "キューブ回転(横)",                    // 12
+    "キューブ回転(縦)",                    // 13
+    "フェードアウトイン",                  // 14
+    "放射ブラー",                          // 15
+    "ぼかし",                              // 16
+    "ワイプ(横)",                          // 17
+    "ワイプ(縦)",                          // 18
+    "ロール(横)",                          // 19
+    "ロール(縦)",                          // 20
+    "ランダムライン",                      // 21
+    "ルミナンス",                          // 22
 ];
 
 /// 固定長バイナリバッファ内の先頭 null 終端（0x00）までのバイト列を Shift-JIS デコードします。
@@ -478,141 +505,182 @@ pub fn parse_legacy_aup(bytes: &[u8]) -> Result<AupDocument, AupError> {
                 cursor += base_size + ext_sum;
             }
 
-            // 編集対象のシーン（通常 Scene 0）のオブジェクトを .exo へ変換
-            let scene_objs: Vec<_> = all_objs.into_iter().filter(|o| o.scene == editing_scene).collect();
-            let mut out_obj_idx = 0;
-
-            for obj in &scene_objs {
-                let o_data = &decomp[obj.cursor..];
-                exo.push_str(&format!("[{}]\r\n", out_obj_idx));
-                exo.push_str(&format!(
-                    "start={}\r\nend={}\r\nlayer={}\r\n",
-                    obj.start_f.saturating_add(1),
-                    obj.end_f.saturating_add(1),
-                    obj.layer.saturating_add(1)
-                ));
-                if obj.group != 0 {
-                    exo.push_str(&format!("group={}\r\n", obj.group));
-                }
-
-                let media = (obj.flag & 0x0001_0000) != 0;
-                let audio = (obj.flag & 0x0002_0000) != 0;
-                let media_filter = (obj.flag & 0x0004_0000) != 0;
-                let control = (obj.flag & 0x0008_0000) != 0;
-                if media || media_filter {
-                    let clipping = (obj.flag & 0x0000_0100) != 0;
-                    exo.push_str(&format!("overlay={}\r\n", if clipping { 0 } else { 1 }));
-                }
-                if (media && !audio) || (media_filter && control) {
-                    let camera = (obj.flag & 0x0000_0200) != 0;
-                    exo.push_str(&format!("camera={}\r\n", if camera { 1 } else { 0 }));
-                }
-                if audio {
-                    exo.push_str("audio=1\r\n");
-                }
-                if obj.is_chain {
-                    exo.push_str("chain=1\r\n");
-                }
-
-                // 各エフェクトの出力
-                let mut trackbar_count = 0;
-                let mut checkbox_count = 0;
-                for eff_idx in 0..12 {
-                    let type_idx = i32::from_le_bytes(o_data[0x54 + eff_idx * 12..0x54 + eff_idx * 12 + 4].try_into().unwrap());
-                    if type_idx < 0 || type_idx as usize >= effect_types.len() {
-                        break;
-                    }
-                    let eff_type = &effect_types[type_idx as usize];
-                    let raw_ext_offset = i32::from_le_bytes(o_data[0x54 + eff_idx * 12 + 8..0x54 + eff_idx * 12 + 12].try_into().unwrap());
-                    let ext_offset = if raw_ext_offset >= 0 { raw_ext_offset as usize } else { 0 };
-                    let ext_slice = if !obj.is_chain && eff_type.ext_size > 0 && raw_ext_offset >= 0 {
-                        let avail = decomp.len().saturating_sub(obj.cursor);
-                        let start = base_size.saturating_add(ext_offset);
-                        let end = start.saturating_add(eff_type.ext_size);
-                        if end <= avail && end <= o_data.len() {
-                            &o_data[start..end]
-                        } else {
-                            &[]
-                        }
-                    } else {
-                        &[]
-                    };
-
-                    exo.push_str(&format!("[{}.{}]\r\n", out_obj_idx, eff_idx));
-                    exo.push_str(&format!("_name={}\r\n", eff_type.name));
-
-                    // トラックバー
-                    for tb_i in 0..eff_type.trackbar_num {
-                        let idx = trackbar_count + tb_i;
-                        let cur = i32::from_le_bytes(o_data[0xF8 + idx * 4..0xF8 + idx * 4 + 4].try_into().unwrap());
-                        let next = i32::from_le_bytes(o_data[0x1F8 + idx * 4..0x1F8 + idx * 4 + 4].try_into().unwrap());
-                        let trans = u32::from_le_bytes(o_data[0x2F8 + idx * 4..0x2F8 + idx * 4 + 4].try_into().unwrap());
-                        let param = if idx < param_count {
-                            i32::from_le_bytes(o_data[0x4C0 + idx * 4..0x4C0 + idx * 4 + 4].try_into().unwrap())
-                        } else {
-                            0
-                        };
-
-                        let sc_idx = (trans >> 16) as usize;
-                        let sc_name = scripts.get(sc_idx).map(|s| s.as_str());
-                        let tb = RawTrackbar {
-                            current: cur,
-                            next,
-                            transition_type: trans & 0xF,
-                            flag: trans & 0xF0,
-                            param,
-                        };
-                        let scale = get_trackbar_scale(&eff_type.name, tb_i);
-                        let tb_name = get_trackbar_name(&eff_type.name, tb_i);
-                        let val_str = trackbar_to_exo_string(&tb, scale, sc_name);
-                        exo.push_str(&format!("{}={}\r\n", tb_name, val_str));
-                    }
-                    trackbar_count += eff_type.trackbar_num;
-
-                    // チェックボックス
-                    for cb_i in 0..eff_type.checkbox_num {
-                        let idx = checkbox_count + cb_i;
-                        let val = i32::from_le_bytes(o_data[0x3F8 + idx * 4..0x3F8 + idx * 4 + 4].try_into().unwrap());
-                        let cb_name = get_checkbox_name(&eff_type.name, cb_i);
-                        if let Some(name) = cb_name {
-                            exo.push_str(&format!("{}={}\r\n", name, val));
-                        }
-                    }
-                    checkbox_count += eff_type.checkbox_num;
-
-                    // 拡張データ
-                    let mut has_file = false;
-                    if !obj.is_chain && !ext_slice.is_empty() {
-                        let prev_len = exo.len();
-                        export_ext_data(&mut exo, &eff_type.name, ext_slice);
-                        if exo[prev_len..].contains("file=") {
-                            has_file = true;
-                        }
-                    }
-                    // 拡張データ内に file= が存在しなかった場合（AviUtl本体側で読み込まれた音声・動画）
-                    if !has_file && !obj.is_chain {
-                        if eff_type.name == "音声ファイル" {
-                            if let Some(audio_p) = legacy_audio_paths.first() {
-                                exo.push_str(&format!("file={}\r\n", audio_p));
-                            }
-                        } else if eff_type.name == "動画ファイル" {
-                            if let Some(vid_p) = legacy_video_paths.first() {
-                                exo.push_str(&format!("file={}\r\n", vid_p));
-                            }
-                        }
-                    }
-                }
-
-                out_obj_idx += 1;
+            // オブジェクトが存在する全シーン（および編集対象シーン）をそれぞれ .exo 経由で Scene に変換
+            let mut target_scene_ids = std::collections::BTreeSet::new();
+            target_scene_ids.insert(editing_scene);
+            target_scene_ids.insert(0);
+            for o in &all_objs {
+                target_scene_ids.insert(o.scene);
             }
 
-            // au2_exo の高度なパース処理（イージング・中間点連結・トラック値解析）へ委譲
-            match parse_exo_str(&exo) {
-                Ok(doc) => {
-                    let mut scene = doc.scene;
+            let mut parsed_scenes = std::collections::BTreeMap::new();
+            let mut total_obj_count = 0usize;
+
+            for sc_id in target_scene_ids {
+                let scene_objs: Vec<_> = all_objs.iter().filter(|o| o.scene == sc_id).collect();
+                if scene_objs.is_empty() && sc_id != editing_scene && sc_id != 0 {
+                    continue;
+                }
+
+                let (sc_name, sc_w, sc_h, sc_len) = scenes_info
+                    .get(sc_id as usize)
+                    .map(|(n, w, h, l)| {
+                        let name = if n.is_empty() {
+                            if sc_id == 0 { "Root".to_string() } else { format!("Scene {}", sc_id) }
+                        } else {
+                            n.clone()
+                        };
+                        let w = if *w > 0 { *w } else { proj_w };
+                        let h = if *h > 0 { *h } else { proj_h };
+                        let len = if *l > 0 && *l < 10_000_000 { *l } else { proj_len };
+                        (name, w, h, len)
+                    })
+                    .unwrap_or_else(|| {
+                        let name = if sc_id == 0 { "Root".to_string() } else { format!("Scene {}", sc_id) };
+                        (name, proj_w, proj_h, proj_len)
+                    });
+
+                let mut exo = String::with_capacity(scene_objs.len() * 256 + 128);
+                exo.push_str("[exedit]\r\n");
+                exo.push_str(&format!(
+                    "width={}\r\nheight={}\r\nrate={}\r\nscale={}\r\nlength={}\r\naudio_rate={}\r\naudio_ch={}\r\n",
+                    sc_w, sc_h, aup_rate, aup_scale, sc_len, aup_audio_rate, aup_audio_ch
+                ));
+
+                for (out_obj_idx, obj) in scene_objs.iter().enumerate() {
+                    let o_data = &decomp[obj.cursor..];
+                    exo.push_str(&format!("[{}]\r\n", out_obj_idx));
+                    exo.push_str(&format!(
+                        "start={}\r\nend={}\r\nlayer={}\r\n",
+                        obj.start_f.saturating_add(1),
+                        obj.end_f.saturating_add(1),
+                        obj.layer.saturating_add(1)
+                    ));
+                    if obj.group != 0 {
+                        exo.push_str(&format!("group={}\r\n", obj.group));
+                    }
+
+                    let media = (obj.flag & 0x0001_0000) != 0;
+                    let audio = (obj.flag & 0x0002_0000) != 0;
+                    let media_filter = (obj.flag & 0x0004_0000) != 0;
+                    let control = (obj.flag & 0x0008_0000) != 0;
+                    if media || media_filter {
+                        let clipping = (obj.flag & 0x0000_0100) != 0;
+                        if clipping {
+                            exo.push_str("clipping=1\r\n");
+                        }
+                        exo.push_str(&format!("overlay={}\r\n", if clipping { 0 } else { 1 }));
+                    }
+                    if (media && !audio) || (media_filter && control) {
+                        let camera = (obj.flag & 0x0000_0200) != 0;
+                        exo.push_str(&format!("camera={}\r\n", if camera { 1 } else { 0 }));
+                    }
+                    if audio {
+                        exo.push_str("audio=1\r\n");
+                    }
+                    if obj.is_chain {
+                        exo.push_str("chain=1\r\n");
+                    }
+
+                    // 各エフェクトの出力
+                    let mut trackbar_count = 0;
+                    let mut checkbox_count = 0;
+                    for eff_idx in 0..12 {
+                        let type_idx = i32::from_le_bytes(o_data[0x54 + eff_idx * 12..0x54 + eff_idx * 12 + 4].try_into().unwrap());
+                        if type_idx < 0 || type_idx as usize >= effect_types.len() {
+                            break;
+                        }
+                        let eff_type = &effect_types[type_idx as usize];
+                        let raw_ext_offset = i32::from_le_bytes(o_data[0x54 + eff_idx * 12 + 8..0x54 + eff_idx * 12 + 12].try_into().unwrap());
+                        let ext_offset = if raw_ext_offset >= 0 { raw_ext_offset as usize } else { 0 };
+                        let ext_slice = if !obj.is_chain && eff_type.ext_size > 0 && raw_ext_offset >= 0 {
+                            let avail = decomp.len().saturating_sub(obj.cursor);
+                            let start = base_size.saturating_add(ext_offset);
+                            let end = start.saturating_add(eff_type.ext_size);
+                            if end <= avail && end <= o_data.len() {
+                                &o_data[start..end]
+                            } else {
+                                &[]
+                            }
+                        } else {
+                            &[]
+                        };
+
+                        exo.push_str(&format!("[{}.{}]\r\n", out_obj_idx, eff_idx));
+                        exo.push_str(&format!("_name={}\r\n", eff_type.name));
+
+                        // トラックバー
+                        for tb_i in 0..eff_type.trackbar_num {
+                            let idx = trackbar_count + tb_i;
+                            let cur = i32::from_le_bytes(o_data[0xF8 + idx * 4..0xF8 + idx * 4 + 4].try_into().unwrap());
+                            let next = i32::from_le_bytes(o_data[0x1F8 + idx * 4..0x1F8 + idx * 4 + 4].try_into().unwrap());
+                            let trans = u32::from_le_bytes(o_data[0x2F8 + idx * 4..0x2F8 + idx * 4 + 4].try_into().unwrap());
+                            let param = if idx < param_count {
+                                i32::from_le_bytes(o_data[0x4C0 + idx * 4..0x4C0 + idx * 4 + 4].try_into().unwrap())
+                            } else {
+                                0
+                            };
+
+                            let sc_idx = (trans >> 16) as usize;
+                            let sc_name = scripts.get(sc_idx).map(|s| s.as_str());
+                            let tb = RawTrackbar {
+                                current: cur,
+                                next,
+                                transition_type: trans & 0xF,
+                                flag: trans & 0xF0,
+                                param,
+                            };
+                            let scale = get_trackbar_scale(&eff_type.name, tb_i);
+                            let tb_name = get_trackbar_name(&eff_type.name, tb_i);
+                            let val_str = trackbar_to_exo_string(&tb, scale, sc_name);
+                            exo.push_str(&format!("{}={}\r\n", tb_name, val_str));
+                        }
+                        trackbar_count += eff_type.trackbar_num;
+
+                        // チェックボックス (0x3F8..0x4BC: 最大 48 個。0x3F8 はオブジェクトの byte_offset の場合があるため、cb_i == 0 && idx == 0 で 1 以外の巨大値は 0 として扱うか、非ゼロでも 0/1 に正規化)
+                        for cb_i in 0..eff_type.checkbox_num {
+                            let idx = checkbox_count + cb_i;
+                            let raw_val = i32::from_le_bytes(o_data[0x3F8 + idx * 4..0x3F8 + idx * 4 + 4].try_into().unwrap());
+                            // ExEdit のチェックボックス値は 0 または 1（ボタン型は 0）。
+                            // 0x3F8 に拡張データオフセット等の大きな値（>= 16）が入っている場合は 0 として正規化する
+                            let val = if raw_val == 1 { 1 } else { 0 };
+                            let cb_name = get_checkbox_name(&eff_type.name, cb_i);
+                            if let Some(name) = cb_name {
+                                exo.push_str(&format!("{}={}\r\n", name, val));
+                            }
+                        }
+                        checkbox_count += eff_type.checkbox_num;
+
+                        // 拡張データ
+                        let mut has_file = false;
+                        if !obj.is_chain && !ext_slice.is_empty() {
+                            let prev_len = exo.len();
+                            export_ext_data(&mut exo, &eff_type.name, ext_slice);
+                            if exo[prev_len..].contains("file=") {
+                                has_file = true;
+                            }
+                        }
+                        // 拡張データ内に file= が存在しなかった場合（AviUtl本体側で読み込まれた音声・動画）
+                        if !has_file && !obj.is_chain {
+                            if eff_type.name == "音声ファイル" {
+                                if let Some(audio_p) = legacy_audio_paths.first() {
+                                    exo.push_str(&format!("file={}\r\n", audio_p));
+                                }
+                            } else if eff_type.name == "動画ファイル" {
+                                if let Some(vid_p) = legacy_video_paths.first() {
+                                    exo.push_str(&format!("file={}\r\n", vid_p));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if let Ok(doc) = parse_exo_str(&exo) {
+                    let mut sc = doc.scene;
+                    sc.name = sc_name;
                     let mut max_end_frame = 0;
                     let mut obj_count = 0;
-                    for l in &scene.layers {
+                    for l in &sc.layers {
                         for o in &l.objects {
                             obj_count += 1;
                             if o.frame_end > max_end_frame && o.frame_end < 10_000_000 {
@@ -620,23 +688,31 @@ pub fn parse_legacy_aup(bytes: &[u8]) -> Result<AupDocument, AupError> {
                             }
                         }
                     }
-                    if scene.settings.length >= 10_000_000 || max_end_frame > scene.settings.length {
-                        scene.settings.length = max_end_frame.max(1800) + 30;
+                    if sc.settings.length >= 10_000_000 || max_end_frame > sc.settings.length {
+                        sc.settings.length = max_end_frame.max(1800) + 30;
                     }
-                    warnings.push(format!(
-                        "初代 AviUtl プロジェクトファイル（.aup）内の拡張編集データ（オブジェクト {} 個）を正常に復元しました",
-                        obj_count
-                    ));
-                    return Ok(AupDocument {
-                        version,
-                        scene,
-                        cursor_frame: 0,
-                        warnings,
-                    });
+                    total_obj_count += obj_count;
+                    parsed_scenes.insert(sc_id, sc);
                 }
-                Err(e) => {
-                    warnings.push(format!("拡張編集データの詳細パースに一部失敗したため基本設定のみ読み込みました: {e}"));
-                }
+            }
+
+            if let Some(main_scene) = parsed_scenes
+                .get(&editing_scene)
+                .or_else(|| parsed_scenes.get(&0))
+                .cloned()
+            {
+                warnings.push(format!(
+                    "初代 AviUtl プロジェクトファイル（.aup）内の拡張編集データ（全 {} シーン / オブジェクト {} 個）を正常に復元しました",
+                    parsed_scenes.len(),
+                    total_obj_count
+                ));
+                return Ok(AupDocument {
+                    version,
+                    scene: main_scene,
+                    scenes: parsed_scenes,
+                    cursor_frame: 0,
+                    warnings,
+                });
             }
         }
     }
@@ -651,11 +727,14 @@ pub fn parse_legacy_aup(bytes: &[u8]) -> Result<AupDocument, AupError> {
         length: aup_len,
     };
     let scene = Scene::new("Root", settings);
+    let mut scenes = std::collections::BTreeMap::new();
+    scenes.insert(0, scene.clone());
     warnings.push("初代 AviUtl プロジェクトファイル (.aup) の基本設定を読み込みました".into());
 
     Ok(AupDocument {
         version,
         scene,
+        scenes,
         cursor_frame: 0,
         warnings,
     })
@@ -672,8 +751,23 @@ fn get_trackbar_scale(eff: &str, i: usize) -> i32 {
             9..=11 => 10,
             _ => 1,
         },
-        "動画ファイル" => match i {
+        "グループ制御" => match i {
+            0..=2 => 10,
+            3..=6 => 100,
+            _ => 1,
+        },
+        "時間制御" => match i {
+            0 => 10,
+            1 => 1,
+            _ => 1,
+        },
+        "動画ファイル" | "シーン" => match i {
             0 => 1,
+            1 => 10,
+            _ => 1,
+        },
+        "音声ファイル" | "シーン(音声)" => match i {
+            0 => 100,
             1 => 10,
             _ => 1,
         },
@@ -692,25 +786,150 @@ fn get_trackbar_scale(eff: &str, i: usize) -> i32 {
             1 => 10,
             _ => 1,
         },
+        "グロー" => match i {
+            0 => 10,
+            1 => 1,
+            2 => 10,
+            3 => 1,
+            4 => 10,
+            _ => 1,
+        },
+        "発光" => match i {
+            0 => 10,
+            1 => 1,
+            2 => 10,
+            3 => 1,
+            _ => 1,
+        },
+        "拡散光" => match i {
+            0 => 10,
+            1 => 1,
+            _ => 1,
+        },
+        "閃光" => match i {
+            0..=2 => 10,
+            3 => 1,
+            4..=5 => 10,
+            _ => 1,
+        },
+        "ライト" => match i {
+            0 => 10,
+            1 => 1,
+            2 => 10,
+            _ => 1,
+        },
+        "ぼかし" | "境界ぼかし" => match i {
+            0 => 1,
+            1 => 10,
+            _ => 1,
+        },
+        "方向ブラー" => match i {
+            0 => 1,
+            1 => 10,
+            _ => 1,
+        },
         "フェード" => 100,
+        "ワイプ" => match i {
+            0..=1 => 100,
+            2 => 1,
+            _ => 1,
+        },
         "振動" => match i {
             0..=2 => 10,
             3 => 100,
             _ => 1,
         },
         "シャドー" => match i {
+            0..=2 => 10,
+            3 => 1,
+            _ => 1,
+        },
+        "凸エッジ" => match i {
+            0 => 1,
+            1 => 100,
+            2 => 1,
+            _ => 1,
+        },
+        "エッジ抽出" => match i {
             0..=1 => 10,
             _ => 1,
         },
         "色調補正" => 10,
-        "閃光" => match i {
-            4..=5 => 10,
+        "グラデーション" => match i {
+            0 => 10,
+            1..=2 => 1,
+            3 => 10,
+            4 => 1,
+            _ => 1,
+        },
+        "単色化" => 10,
+        "斜めクリッピング" => match i {
+            0..=1 => 1,
+            2 => 10,
+            3..=4 => 1,
             _ => 1,
         },
         "マスク" => match i {
             0..=1 => 10,
             2 => 100,
+            3 => 1,
             4 => 10,
+            5 => 1,
+            _ => 1,
+        },
+        "座標" => 10,
+        "拡大率" | "リサイズ" => 100,
+        "透明度" => 10,
+        "回転" => 100,
+        "ミラー" => match i {
+            0..=1 => 10,
+            2 => 1,
+            _ => 1,
+        },
+        "ラスター" => match i {
+            0..=1 => 1,
+            2 => 100,
+            _ => 1,
+        },
+        "波紋" => match i {
+            0..=3 => 1,
+            4 => 10,
+            _ => 1,
+        },
+        "画像ループ" => match i {
+            0..=1 => 1,
+            2..=3 => 10,
+            _ => 1,
+        },
+        "極座標変換" => match i {
+            0 => 1,
+            1..=2 => 10,
+            3 => 100,
+            _ => 1,
+        },
+        "ディスプレイスメントマップ" => match i {
+            0..=3 => 10,
+            4 => 100,
+            5 => 1,
+            6 => 10,
+            7 => 1,
+            _ => 1,
+        },
+        "ノイズ" => match i {
+            0..=3 => 10,
+            4..=5 => 100,
+            6 => 10,
+            _ => 1,
+        },
+        "色ずれ" => match i {
+            0 => 1,
+            1 => 10,
+            2 => 1,
+            _ => 1,
+        },
+        "パーティクル出力" => match i {
+            0..=12 => 10,
+            13 => 100,
             _ => 1,
         },
         "カメラ制御" => match i {
@@ -721,7 +940,11 @@ fn get_trackbar_scale(eff: &str, i: usize) -> i32 {
             9 => 100,
             _ => 1,
         },
-        "カメラ効果" => 100,
+        "アニメーション効果"
+        | "カスタムオブジェクト"
+        | "カメラ効果"
+        | "スクリプト(カメラ制御)"
+        | "シーンチェンジ" => 100,
         "シャドー(カメラ制御)" => match i {
             0..=2 => 10,
             3..=4 => 1,
@@ -757,7 +980,22 @@ fn get_trackbar_name(eff: &str, i: usize) -> String {
             11 => "中心Z".into(),
             _ => format!("track{}", i),
         },
-        "動画ファイル" | "音声ファイル" => match i {
+        "グループ制御" => match i {
+            0 => "X".into(),
+            1 => "Y".into(),
+            2 => "Z".into(),
+            3 => "拡大率".into(),
+            4 => "X軸回転".into(),
+            5 => "Y軸回転".into(),
+            6 => "Z軸回転".into(),
+            _ => format!("track{}", i),
+        },
+        "時間制御" => match i {
+            0 => "位置".into(),
+            1 => "距離".into(),
+            _ => format!("track{}", i),
+        },
+        "動画ファイル" | "音声ファイル" | "シーン" | "シーン(音声)" => match i {
             0 => "再生位置".into(),
             1 => "再生速度".into(),
             _ => format!("track{}", i),
@@ -783,15 +1021,61 @@ fn get_trackbar_name(eff: &str, i: usize) -> String {
             1 => "拡散".into(),
             2 => "しきい値".into(),
             3 => "ぼかし".into(),
+            4 => "比率".into(),
+            _ => format!("track{}", i),
+        },
+        "発光" => match i {
+            0 => "強さ".into(),
+            1 => "拡散".into(),
+            2 => "しきい値".into(),
+            3 => "拡散速度".into(),
             _ => format!("track{}", i),
         },
         "ぼかし" => match i {
             0 => "範囲".into(),
+            1 => "縦横比".into(),
+            2 => "光の強さ".into(),
+            _ => format!("track{}", i),
+        },
+        "境界ぼかし" => match i {
+            0 => "範囲".into(),
+            1 => "縦横比".into(),
+            _ => format!("track{}", i),
+        },
+        "放射ブラー" => match i {
+            0 => "範囲".into(),
+            1 => "X".into(),
+            2 => "Y".into(),
+            _ => format!("track{}", i),
+        },
+        "方向ブラー" => match i {
+            0 => "範囲".into(),
+            1 => "角度".into(),
+            _ => format!("track{}", i),
+        },
+        "レンズブラー" => match i {
+            0 => "範囲".into(),
+            1 => "光の強さ".into(),
+            _ => format!("track{}", i),
+        },
+        "モーションブラー" => match i {
+            0 => "間隔".into(),
+            1 => "分解能".into(),
+            _ => format!("track{}", i),
+        },
+        "モザイク" => match i {
+            0 => "サイズ".into(),
             _ => format!("track{}", i),
         },
         "フェード" => match i {
             0 => "イン".into(),
             1 => "アウト".into(),
+            _ => format!("track{}", i),
+        },
+        "ワイプ" => match i {
+            0 => "イン".into(),
+            1 => "アウト".into(),
+            2 => "ぼかし".into(),
             _ => format!("track{}", i),
         },
         "振動" => match i {
@@ -801,11 +1085,19 @@ fn get_trackbar_name(eff: &str, i: usize) -> String {
             3 => "周期".into(),
             _ => format!("track{}", i),
         },
-        "クリッピング" => match i {
+        "クリッピング" | "領域拡張" => match i {
             0 => "上".into(),
             1 => "下".into(),
             2 => "左".into(),
             3 => "右".into(),
+            _ => format!("track{}", i),
+        },
+        "斜めクリッピング" => match i {
+            0 => "中心X".into(),
+            1 => "中心Y".into(),
+            2 => "角度".into(),
+            3 => "ぼかし".into(),
+            4 => "幅".into(),
             _ => format!("track{}", i),
         },
         "縁取り" => match i {
@@ -820,12 +1112,40 @@ fn get_trackbar_name(eff: &str, i: usize) -> String {
             3 => "拡散".into(),
             _ => format!("track{}", i),
         },
+        "凸エッジ" => match i {
+            0 => "幅".into(),
+            1 => "高さ".into(),
+            2 => "角度".into(),
+            _ => format!("track{}", i),
+        },
+        "エッジ抽出" => match i {
+            0 => "強さ".into(),
+            1 => "しきい値".into(),
+            _ => format!("track{}", i),
+        },
+        "シャープ" => match i {
+            0 => "強さ".into(),
+            1 => "範囲".into(),
+            _ => format!("track{}", i),
+        },
         "色調補正" => match i {
             0 => "明るさ".into(),
             1 => "コントラスト".into(),
             2 => "色相".into(),
             3 => "輝度".into(),
             4 => "彩度".into(),
+            _ => format!("track{}", i),
+        },
+        "グラデーション" => match i {
+            0 => "強さ".into(),
+            1 => "中心X".into(),
+            2 => "中心Y".into(),
+            3 => "角度".into(),
+            4 => "幅".into(),
+            _ => format!("track{}", i),
+        },
+        "単色化" => match i {
+            0 => "強さ".into(),
             _ => format!("track{}", i),
         },
         "拡散光" => match i {
@@ -836,11 +1156,17 @@ fn get_trackbar_name(eff: &str, i: usize) -> String {
         },
         "閃光" => match i {
             0 => "強さ".into(),
-            1 => "拡散".into(),
-            2 => "しきい値".into(),
-            3 => "前景比率".into(),
+            1 => "X".into(),
+            2 => "Y".into(),
+            3 => "サイズ".into(),
             4 => "X".into(),
             5 => "Y".into(),
+            _ => format!("track{}", i),
+        },
+        "ライト" => match i {
+            0 => "強さ".into(),
+            1 => "拡散".into(),
+            2 => "比率".into(),
             _ => format!("track{}", i),
         },
         "マスク" => match i {
@@ -852,9 +1178,120 @@ fn get_trackbar_name(eff: &str, i: usize) -> String {
             5 => "ぼかし".into(),
             _ => format!("track{}", i),
         },
-        "シーン" => match i {
-            0 => "再生位置".into(),
-            1 => "再生速度".into(),
+        "座標" => match i {
+            0 => "X".into(),
+            1 => "Y".into(),
+            2 => "Z".into(),
+            _ => format!("track{}", i),
+        },
+        "拡大率" => match i {
+            0 => "拡大率".into(),
+            1 => "X".into(),
+            2 => "Y".into(),
+            3 => "Z".into(),
+            _ => format!("track{}", i),
+        },
+        "リサイズ" => match i {
+            0 => "拡大率".into(),
+            1 => "X".into(),
+            2 => "Y".into(),
+            _ => format!("track{}", i),
+        },
+        "透明度" => match i {
+            0 => "透明度".into(),
+            _ => format!("track{}", i),
+        },
+        "回転" => match i {
+            0 => "X".into(),
+            1 => "Y".into(),
+            2 => "Z".into(),
+            _ => format!("track{}", i),
+        },
+        "ローテーション" => match i {
+            0 => "90度回転".into(),
+            _ => format!("track{}", i),
+        },
+        "ミラー" => match i {
+            0 => "透明度".into(),
+            1 => "減衰".into(),
+            2 => "境目調整".into(),
+            _ => format!("track{}", i),
+        },
+        "ラスター" => match i {
+            0 => "横幅".into(),
+            1 => "高さ".into(),
+            2 => "周期".into(),
+            _ => format!("track{}", i),
+        },
+        "波紋" => match i {
+            0 => "中心X".into(),
+            1 => "中心Y".into(),
+            2 => "幅".into(),
+            3 => "高さ".into(),
+            4 => "速度".into(),
+            _ => format!("track{}", i),
+        },
+        "画像ループ" => match i {
+            0 => "横回数".into(),
+            1 => "縦回数".into(),
+            2 => "速度X".into(),
+            3 => "速度Y".into(),
+            _ => format!("track{}", i),
+        },
+        "極座標変換" => match i {
+            0 => "中心幅".into(),
+            1 => "拡大率".into(),
+            2 => "回転".into(),
+            3 => "渦巻".into(),
+            _ => format!("track{}", i),
+        },
+        "ディスプレイスメントマップ" => match i {
+            0 => "変形X".into(),
+            1 => "変形Y".into(),
+            2 => "X".into(),
+            3 => "Y".into(),
+            4 => "回転".into(),
+            5 => "サイズ".into(),
+            6 => "縦横比".into(),
+            7 => "ぼかし".into(),
+            _ => format!("track{}", i),
+        },
+        "ノイズ" => match i {
+            0 => "強さ".into(),
+            1 => "速度X".into(),
+            2 => "速度Y".into(),
+            3 => "変化速度".into(),
+            4 => "周期X".into(),
+            5 => "周期Y".into(),
+            6 => "しきい値".into(),
+            _ => format!("track{}", i),
+        },
+        "色ずれ" => match i {
+            0 => "ずれ幅".into(),
+            1 => "角度".into(),
+            2 => "強さ".into(),
+            _ => format!("track{}", i),
+        },
+        "オブジェクト分割" => match i {
+            0 => "横分割数".into(),
+            1 => "縦分割数".into(),
+            _ => format!("track{}", i),
+        },
+        "パーティクル出力" => match i {
+            0 => "X".into(),
+            1 => "Y".into(),
+            2 => "Z".into(),
+            3 => "出力頻度".into(),
+            4 => "出力速度".into(),
+            5 => "加速度".into(),
+            6 => "出力方向".into(),
+            7 => "拡散角度".into(),
+            8 => "透過速度".into(),
+            9 => "拡大速度".into(),
+            10 => "回転角".into(),
+            11 => "回転速度".into(),
+            12 => "重力".into(),
+            13 => "生存時間".into(),
             _ => format!("track{}", i),
         },
         "カメラ制御" => match i {
@@ -884,29 +1321,74 @@ fn get_trackbar_name(eff: &str, i: usize) -> String {
 
 fn get_checkbox_name(eff: &str, i: usize) -> Option<String> {
     match eff {
-        "動画ファイル" | "音声ファイル" => match i {
+        "動画ファイル" | "音声ファイル" | "シーン" | "シーン(音声)" => match i {
             0 => Some("ループ再生".into()),
             1 => Some("アルファチャンネルを読み込む".into()),
             _ => Some(format!("check{}", i)),
         },
         "画像ファイル" => Some(format!("check{}", i)),
         "テキスト" => match i {
-            0 => Some("B".into()),
-            1 => Some("I".into()),
+            0 => Some("文字毎に個別オブジェクト".into()),
+            1 => Some("移動座標上に表示する".into()),
             2 => Some("自動スクロール".into()),
+            3 => Some("B".into()),
+            4 => Some("I".into()),
+            _ => Some(format!("check{}", i)),
+        },
+        "拡張描画" => match i {
+            0 => Some("裏面を表示しない".into()),
+            _ => Some(format!("check{}", i)),
+        },
+        "グループ制御" => match i {
+            0 => Some("上位グループ制御の影響を受ける".into()),
+            1 => Some("同じグループのオブジェクトを対象にする".into()),
+            _ => Some(format!("check{}", i)),
+        },
+        "時間制御" => match i {
+            0 => Some("フレーム番号指定".into()),
+            1 => Some("ループ画像".into()),
             _ => Some(format!("check{}", i)),
         },
         "カメラ制御" => match i {
             0 => Some("Zバッファ/シャドウマップを有効にする".into()),
             _ => Some(format!("check{}", i)),
         },
-        "グロー" => match i {
-            0 => Some("光色の設定".into()),
-            1 => Some("光成分のみ".into()),
+        "グロー" | "発光" => match i {
+            0 => Some("光成分のみ".into()),
             _ => Some(format!("check{}", i)),
         },
-        "ぼかし" => match i {
-            0 => Some("光の強さを維持する".into()),
+        "ぼかし" | "レンズブラー" => match i {
+            0 => Some("サイズ固定".into()),
+            _ => Some(format!("check{}", i)),
+        },
+        "境界ぼかし" => match i {
+            0 => Some("透明度の境界をぼかす".into()),
+            _ => Some(format!("check{}", i)),
+        },
+        "クリッピング" => match i {
+            0 => Some("中心の位置を変更".into()),
+            _ => Some(format!("check{}", i)),
+        },
+        "領域拡張" => match i {
+            0 => Some("塗りつぶし".into()),
+            _ => Some(format!("check{}", i)),
+        },
+        "ワイプ" => match i {
+            0 => Some("反転(イン)".into()),
+            1 => Some("反転(アウト)".into()),
+            _ => Some(format!("check{}", i)),
+        },
+        "マスク" => match i {
+            0 => Some("マスクの反転".into()),
+            1 => Some("元のサイズに合わせる".into()),
+            _ => Some(format!("check{}", i)),
+        },
+        "単色化" => match i {
+            0 => Some("輝度を保持する".into()),
+            _ => Some(format!("check{}", i)),
+        },
+        "シャドー" => match i {
+            0 => Some("影を別オブジェクトで描画".into()),
             _ => Some(format!("check{}", i)),
         },
         "反転" => match i {
@@ -995,6 +1477,24 @@ fn export_ext_data(exo: &mut String, eff: &str, ext: &[u8]) {
         }
         "テキスト" => {
             if ext.len() >= 0x30 + 2048 {
+                let autoadjust = ext[0];
+                let soft = ext[1];
+                let monospace = ext[2];
+                let align = ext[3];
+                let spacing_x = ext[4] as i8;
+                let spacing_y = ext[5] as i8;
+                let precision = ext[6];
+                let r1 = ext[8];
+                let g1 = ext[9];
+                let b1 = ext[10];
+                let r2 = ext[12];
+                let g2 = ext[13];
+                let b2 = ext[14];
+                exo.push_str(&format!(
+                    "autoadjust={}\r\nsoft={}\r\nmonospace={}\r\nalign={}\r\nspacing_x={}\r\nspacing_y={}\r\nprecision={}\r\ncolor={:02x}{:02x}{:02x}\r\ncolor2={:02x}{:02x}{:02x}\r\n",
+                    autoadjust, soft, monospace, align, spacing_x, spacing_y, precision,
+                    r1, g1, b1, r2, g2, b2
+                ));
                 let font_name = decode_sjis_cstring(&ext[0x10..0x30]);
                 if !font_name.is_empty() {
                     exo.push_str(&format!("font={}\r\n", font_name));
@@ -1010,16 +1510,90 @@ fn export_ext_data(exo: &mut String, eff: &str, ext: &[u8]) {
                 exo.push_str(&format!("blend={}\r\n", blend));
             }
         }
-        "シーン" => {
+        "シーン" | "シーン(音声)" => {
             if ext.len() >= 4 {
                 let scene = i32::from_le_bytes(ext[0..4].try_into().unwrap());
                 exo.push_str(&format!("scene={}\r\n", scene));
             }
         }
-        "カメラ制御" => {
+        "カメラ制御" | "グループ制御" | "時間制御" => {
             if ext.len() >= 4 {
                 let range = i32::from_le_bytes(ext[0..4].try_into().unwrap());
                 exo.push_str(&format!("range={}\r\n", range));
+            }
+        }
+        "グロー" | "発光" => {
+            if ext.len() >= 4 {
+                let no_color = ext[3];
+                if no_color == 0 {
+                    exo.push_str(&format!("color={:02x}{:02x}{:02x}\r\n", ext[0], ext[1], ext[2]));
+                } else {
+                    exo.push_str("color=\r\n");
+                }
+                exo.push_str(&format!("no_color={}\r\n", no_color));
+            }
+            if ext.len() >= 8 {
+                let t = i32::from_le_bytes(ext[4..8].try_into().unwrap());
+                exo.push_str(&format!("type={}\r\n", t));
+            }
+            if ext.len() >= 12 {
+                let blend = i32::from_le_bytes(ext[8..12].try_into().unwrap());
+                exo.push_str(&format!("blend={}\r\n", blend));
+            }
+        }
+        "閃光" => {
+            if ext.len() >= 4 {
+                exo.push_str(&format!("color={:02x}{:02x}{:02x}\r\n", ext[0], ext[1], ext[2]));
+            }
+            if ext.len() >= 8 {
+                let blend = i32::from_le_bytes(ext[4..8].try_into().unwrap());
+                exo.push_str(&format!("blend={}\r\n", blend));
+            }
+        }
+        "縁取り" | "シャドー" | "単色化" => {
+            if ext.len() >= 4 {
+                exo.push_str(&format!("color={:02x}{:02x}{:02x}\r\n", ext[0], ext[1], ext[2]));
+            }
+            if ext.len() > 4 {
+                if let Some(path) = clean_file_path(&ext[4..ext.len().min(264)]) {
+                    exo.push_str(&format!("file={}\r\n", path));
+                }
+            }
+        }
+        "グラデーション" => {
+            if ext.len() >= 16 {
+                let blend = i32::from_le_bytes(ext[0..4].try_into().unwrap());
+                let no_color = ext[7];
+                let no_color2 = ext[11];
+                let grad_type = i32::from_le_bytes(ext[12..16].try_into().unwrap());
+                exo.push_str(&format!("blend={}\r\n", blend));
+                if no_color == 0 {
+                    exo.push_str(&format!("color={:02x}{:02x}{:02x}\r\n", ext[4], ext[5], ext[6]));
+                }
+                exo.push_str(&format!("no_color={}\r\n", no_color));
+                if no_color2 == 0 {
+                    exo.push_str(&format!("color2={:02x}{:02x}{:02x}\r\n", ext[8], ext[9], ext[10]));
+                }
+                exo.push_str(&format!("no_color2={}\r\n", no_color2));
+                exo.push_str(&format!("type={}\r\n", grad_type));
+            }
+        }
+        "ワイプ" | "マスク" => {
+            if ext.len() >= 4 {
+                let t = i16::from_le_bytes(ext[0..2].try_into().unwrap());
+                exo.push_str(&format!("type={}\r\n", t));
+                if ext.len() > 4 {
+                    let name = decode_sjis_cstring(&ext[4..ext.len().min(260)]);
+                    if !name.is_empty() {
+                        exo.push_str(&format!("name={}\r\n", name));
+                    }
+                }
+            }
+        }
+        "ミラー" | "色ずれ" | "ノイズ" => {
+            if ext.len() >= 4 {
+                let t = i32::from_le_bytes(ext[0..4].try_into().unwrap());
+                exo.push_str(&format!("type={}\r\n", t));
             }
         }
         _ => {
@@ -1034,7 +1608,11 @@ fn export_ext_data(exo: &mut String, eff: &str, ext: &[u8]) {
                         "アニメーション効果" => BUILTIN_ANM_NAMES.get(script_id as usize).copied().unwrap_or(""),
                         "カスタムオブジェクト" => BUILTIN_OBJ_NAMES.get(script_id as usize).copied().unwrap_or(""),
                         "カメラ効果" | "スクリプト(カメラ制御)" => BUILTIN_CAM_NAMES.get(script_id as usize).copied().unwrap_or(""),
-                        "シーンチェンジ" => BUILTIN_SCN_NAMES.get(script_id as usize).copied().unwrap_or(""),
+                        "シーンチェンジ" => BUILTIN_SCN_TYPES
+                            .get(script_id as usize)
+                            .or_else(|| BUILTIN_SCN_NAMES.get(script_id as usize))
+                            .copied()
+                            .unwrap_or("クロスフェード"),
                         _ => "",
                     }
                 } else {
