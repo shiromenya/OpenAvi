@@ -1748,7 +1748,7 @@ Y=20.00
 
     #[test]
     fn test_find_kudaketa() {
-        let path = std::path::Path::new("../../samples/target_test.aup");
+        let path = std::path::Path::new(r"C:\Users\user\Desktop\配布　1280x720_24fps_44100Hz.aup");
         if !path.exists() { return; }
         let bytes = std::fs::read(path).unwrap();
         let fp_magic = b"FilterProject 0.1\0";
@@ -1787,11 +1787,11 @@ Y=20.00
 
     #[test]
     fn test_inspect_all_effects_in_target() {
-        let path = std::path::Path::new("../../samples/target_test.aup");
+        let path = std::path::Path::new(r"C:\Users\user\Desktop\配布　1280x720_24fps_44100Hz.aup");
         if !path.exists() {
             return;
         }
-        let bytes = std::fs::read(path).expect("read target_test.aup");
+        let bytes = std::fs::read(path).expect("read target aup");
         let doc = legacy_aup::parse_legacy_aup(&bytes).expect("parse_legacy_aup should succeed");
 
         println!("=== ALL DISTINCT EFFECT NAMES IN TARGET AUP ===");

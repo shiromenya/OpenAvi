@@ -140,7 +140,7 @@ Write-Host "Created portable release archive: $zipPath"
 # 4. Install to %LOCALAPPDATA%\Programs\OpenAvi and create Desktop + Start Menu shortcuts
 $installDir = Join-Path $env:LOCALAPPDATA "Programs\OpenAvi"
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
-& robocopy $stage $installDir /E /R:1 /W:1 | Out-Null
+& robocopy $stage $installDir /MIR /R:1 /W:1 | Out-Null
 Write-Host "Installed files to: $installDir"
 
 $desktopDir = Join-Path $env:USERPROFILE "Desktop"
@@ -172,7 +172,7 @@ Copy-Item -Force $zipPath (Join-Path $desktopDir "OpenAvi-windows-x64.zip")
 
 $desktopExtract = Join-Path $desktopDir "OpenAvi-windows-x64"
 if (Test-Path $desktopExtract) {
-    & robocopy $stage $desktopExtract /E /R:1 /W:1 | Out-Null
+    & robocopy $stage $desktopExtract /MIR /R:1 /W:1 | Out-Null
     Write-Host "Updated desktop folder: $desktopExtract"
 }
 

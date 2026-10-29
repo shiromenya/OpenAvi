@@ -262,7 +262,7 @@ mod tests {
 
     #[test]
     fn test_camera_control_preview_rendering() {
-        let path = Path::new("samples/target_test.aup");
+        let path = Path::new(r"C:\Users\user\Desktop\配布　1280x720_24fps_44100Hz.aup");
         if !path.exists() {
             return;
         }
@@ -315,19 +315,11 @@ mod tests {
 
     #[test]
     fn test_goot_time_full_ui_and_playback() {
-        let p1 = Path::new("samples/goot time pf.aup");
-        let p2 = Path::new("../../samples/goot time pf.aup");
-        let p3 = Path::new(r"C:\Users\user\.gemini\antigravity\scratch\openavi\samples\goot time pf.aup");
-        let path = if p1.exists() {
-            p1
-        } else if p2.exists() {
-            p2
-        } else if p3.exists() {
-            p3
-        } else {
-            println!("File not found, skipping: p1={:?}, p2={:?}, p3={:?}", p1.exists(), p2.exists(), p3.exists());
+        let path = Path::new(r"C:\Users\user\Desktop\goot time pf.aup");
+        if !path.exists() {
+            println!("File not found, skipping: {:?}", path);
             return;
-        };
+        }
 
         println!("Loading goot time pf.aup...");
         let mut st = state::EditorState::default();
