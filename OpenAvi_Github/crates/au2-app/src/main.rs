@@ -407,4 +407,58 @@ mod tests {
 
         println!("All UI tests passed successfully!");
     }
+
+    #[test]
+    fn test_mayamaid_aup_preview_and_scenes_if_present() {
+        let mayamaid_path = std::path::Path::new(r"C:\Users\user\Desktop\mayamaid.aup");
+        if !mayamaid_path.exists() {
+            eprintln!("mayamaid.aup not found on Desktop, skipping test.");
+            return;
+        }
+
+        let mut st = state::EditorState::default();
+        st.load_path(mayamaid_path);
+        println!(
+            "mayamaid.aup loaded! Scenes: {}, Layers: {}, Objects: {}, Length: {}",
+            st.scenes.len(),
+            st.scene.layers.len(),
+            st.scene.object_count(),
+            st.scene.settings.length
+        );
+
+        assert!(st.scenes.len() >= 20, "mayamaid.aup should have 22 scenes, got {}", st.scenes.len());
+        assert_eq!(st.scene.settings.length, 815, "Root scene length should be 815");
+        assert!(st.scene.object_count() >= 200, "Root scene should have 228 objects");
+
+        let ctx = egui::Context::default();
+
+        // 主要な演出フレーム帯（Rootシーン）をすべてレンダリング検証
+        for f in (0..=815).step_by(5) {
+            st.frame = f;
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    panels::preview::ui(ui, &mut st);
+                    panels::timeline::ui(ui, &mut st);
+                });
+            });
+        }
+
+        // サブシーン（Scene 2: otoawase, Scene 6: parts, Scene 9: mayamaid, Scene 13: hanten3, Scene 20: wakuwaku 等）のレンダリング検証
+        let original_scene = st.scene.clone();
+        let sub_scenes: Vec<_> = st.scenes.iter().filter(|(&id, _)| id != 0).map(|(&id, sc)| (id, sc.clone())).collect();
+        for (_sc_id, sub_sc) in sub_scenes {
+            st.scene = sub_sc.clone();
+            for f in (0..sub_sc.settings.length.min(200)).step_by(10) {
+                st.frame = f;
+                let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        panels::preview::ui(ui, &mut st);
+                    });
+                });
+            }
+        }
+        st.scene = original_scene;
+
+        println!("mayamaid.aup all scenes and key frames preview rendering passed successfully!");
+    }
 }

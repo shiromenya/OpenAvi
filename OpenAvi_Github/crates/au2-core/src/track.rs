@@ -173,7 +173,8 @@ impl Track {
         // frame を含む区間 [i, i+1) を探す
         let i = keys.partition_point(|k| k.frame <= frame).saturating_sub(1).min(keys.len() - 2);
         let (a, b) = (keys[i], keys[i + 1]);
-        let t = interp.easing.apply(norm(frame, a.frame, b.frame));
+        let raw_t = norm(frame, a.frame, b.frame);
+        let t = interp.easing.apply(raw_t);
 
         match &interp.kind {
             MoveKind::Instant => a.value,
@@ -182,7 +183,82 @@ impl Track {
                 let p3 = if i + 2 < keys.len() { keys[i + 2].value } else { b.value };
                 catmull_rom(p0, a.value, b.value, p3, t)
             }
-            // TODO: 移動量指定・ランダム移動・スクリプト移動は Phase 2 以降で正確に実装
+            MoveKind::MoveAmount => {
+                // 移動量指定: start値からフレームごとの変化量で推移
+                let amount = b.value;
+                let elapsed = (frame.saturating_sub(a.frame)) as f64;
+                a.value + amount * elapsed * 0.01
+            }
+            MoveKind::Random => {
+                let interval = interp
+                    .param
+                    .as_deref()
+                    .and_then(|s| s.trim().parse::<u32>().ok())
+                    .unwrap_or(1)
+                    .max(1);
+                let step = frame / interval;
+                let r = det_rand_01(step as u64, 0x9E37_79B9);
+                lerp(a.value.min(b.value), a.value.max(b.value), r)
+            }
+            MoveKind::Script(script_name) => {
+                let sec = script_name.split('@').next().unwrap_or(script_name.as_str());
+                let param_num = interp
+                    .param
+                    .as_deref()
+                    .and_then(|s| s.trim().parse::<i32>().ok())
+                    .unwrap_or(0);
+
+                if sec.contains("イージング") || script_name.contains("イージング") {
+                    let eased_t = apply_aviutl_easing_id(param_num, raw_t);
+                    if sec.contains("補間") || sec.contains("曲線") {
+                        let p0 = if i > 0 { keys[i - 1].value } else { a.value };
+                        let p3 = if i + 2 < keys.len() { keys[i + 2].value } else { b.value };
+                        catmull_rom(p0, a.value, b.value, p3, eased_t)
+                    } else {
+                        lerp(a.value, b.value, eased_t)
+                    }
+                } else if sec.contains("減速") && !sec.contains("加減速") {
+                    let level = param_num.clamp(1, 10) as f64;
+                    let p = (level * 0.6).max(2.0);
+                    let et = 1.0 - (1.0 - raw_t).powf(p);
+                    lerp(a.value, b.value, et)
+                } else if sec.contains("加速") && !sec.contains("加減速") {
+                    let level = param_num.clamp(1, 10) as f64;
+                    let p = (level * 0.6).max(2.0);
+                    let et = raw_t.powf(p);
+                    lerp(a.value, b.value, et)
+                } else if sec.contains("加減速") {
+                    let et = apply_aviutl_easing_id(12, raw_t); // Sine InOut / Cubic InOut 相当
+                    lerp(a.value, b.value, et)
+                } else if sec.contains("補間") || sec.contains("曲線") {
+                    let p0 = if i > 0 { keys[i - 1].value } else { a.value };
+                    let p3 = if i + 2 < keys.len() { keys[i + 2].value } else { b.value };
+                    catmull_rom(p0, a.value, b.value, p3, t)
+                } else if sec.contains("反復") || sec.contains("ピンポン") {
+                    let freq = param_num.max(1) as f64;
+                    let wave = ((raw_t * freq * std::f64::consts::PI).sin()).abs();
+                    lerp(a.value, b.value, wave)
+                } else if sec.contains("カクカク") || sec.contains("コマ落ち") {
+                    let step = param_num.max(2) as u32;
+                    let q_frame = (frame / step) * step;
+                    let qt = interp.easing.apply(norm(q_frame, a.frame, b.frame));
+                    lerp(a.value, b.value, qt)
+                } else if sec.contains("ランダム") || sec.contains("ふらふら") {
+                    let interval = (param_num.unsigned_abs()).max(1);
+                    let step = frame / interval;
+                    let frac = (frame % interval) as f64 / interval as f64;
+                    let r0 = det_rand_01(step as u64, 0x517C_C1B7);
+                    let r1 = det_rand_01((step + 1) as u64, 0x517C_C1B7);
+                    let r = if sec.contains("ふらふら") {
+                        lerp(r0, r1, frac * frac * (3.0 - 2.0 * frac))
+                    } else {
+                        r0
+                    };
+                    lerp(a.value, b.value, r)
+                } else {
+                    lerp(a.value, b.value, t)
+                }
+            }
             _ => lerp(a.value, b.value, t),
         }
     }
@@ -218,6 +294,99 @@ fn catmull_rom(p0: f64, p1: f64, p2: f64, p3: f64, t: f64) -> f64 {
     let t2 = t * t;
     let t3 = t2 * t;
     0.5 * ((2.0 * p1) + (-p0 + p2) * t + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3)
+}
+
+fn det_rand_01(step: u64, salt: u64) -> f64 {
+    let mut x = step.wrapping_add(1).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ salt;
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    x = x ^ (x >> 31);
+    (x & 0xFFFF_FFFF) as f64 / (0xFFFF_FFFFu64 as f64)
+}
+
+/// AviUtl 標準イージングスクリプト (`イージング（通常）@イージング` 等) の番号 1..=41 に対応するイージング関数。
+pub fn apply_aviutl_easing_id(id: i32, t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    if id <= 1 {
+        return t;
+    }
+    let idx = id - 2; // 0..39
+    let family = idx / 4; // 0:Quad, 1:Cubic, 2:Quart, 3:Quint, 4:Sine, 5:Expo, 6:Circ, 7:Back, 8:Elastic, 9:Bounce
+    let dir = idx % 4; // 0:In, 1:Out, 2:InOut, 3:OutIn
+
+    let ease_in = |u: f64| -> f64 {
+        let u = u.clamp(0.0, 1.0);
+        match family {
+            0 => u * u,
+            1 => u * u * u,
+            2 => u * u * u * u,
+            3 => u * u * u * u * u,
+            4 => 1.0 - (u * std::f64::consts::FRAC_PI_2).cos(),
+            5 => {
+                if u <= 0.0 {
+                    0.0
+                } else {
+                    2.0_f64.powf(10.0 * (u - 1.0))
+                }
+            }
+            6 => 1.0 - (1.0 - u * u).max(0.0).sqrt(),
+            7 => {
+                let s = 1.70158;
+                u * u * ((s + 1.0) * u - s)
+            }
+            8 => {
+                if u <= 0.0 {
+                    0.0
+                } else if u >= 1.0 {
+                    1.0
+                } else {
+                    let c4 = (2.0 * std::f64::consts::PI) / 3.0;
+                    -(2.0_f64.powf(10.0 * u - 10.0)) * ((u * 10.0 - 10.75) * c4).sin()
+                }
+            }
+            9 => 1.0 - bounce_out(1.0 - u),
+            _ => u,
+        }
+    };
+
+    let ease_out = |u: f64| -> f64 { 1.0 - ease_in(1.0 - u) };
+
+    match dir {
+        0 => ease_in(t),
+        1 => ease_out(t),
+        2 => {
+            if t < 0.5 {
+                0.5 * ease_in(t * 2.0)
+            } else {
+                0.5 + 0.5 * ease_out((t - 0.5) * 2.0)
+            }
+        }
+        3 => {
+            if t < 0.5 {
+                0.5 * ease_out(t * 2.0)
+            } else {
+                0.5 + 0.5 * ease_in((t - 0.5) * 2.0)
+            }
+        }
+        _ => t,
+    }
+}
+
+fn bounce_out(mut x: f64) -> f64 {
+    let n1 = 7.5625;
+    let d1 = 2.75;
+    if x < 1.0 / d1 {
+        n1 * x * x
+    } else if x < 2.0 / d1 {
+        x -= 1.5 / d1;
+        n1 * x * x + 0.75
+    } else if x < 2.5 / d1 {
+        x -= 2.25 / d1;
+        n1 * x * x + 0.9375
+    } else {
+        x -= 2.625 / d1;
+        n1 * x * x + 0.984375
+    }
 }
 
 #[cfg(test)]

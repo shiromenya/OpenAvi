@@ -70,9 +70,30 @@ fn main() {
                             | "グループ制御"
                             | "シーン"
                             | "カスタムオブジェクト"
+                            | "アニメーション効果"
+                            | "カメラ効果"
+                            | "カメラ制御"
+                            | "回転"
+                            | "座標"
+                            | "拡大率"
+                            | "反転"
+                            | "斜めクリッピング"
+                            | "ルミナンスキー"
+                            | "エッジ抽出"
+                            | "ノイズ"
+                            | "グラデーション"
+                            | "テキスト"
+                            | "画像ファイル"
+                            | "動画ファイル"
+                            | "音声ファイル"
                     ) {
-                        let list = special_samples.entry(eff.name.clone()).or_default();
-                        if list.len() < 5 {
+                        let key = if let Some(sub) = eff.text("name").filter(|s| !s.is_empty()) {
+                            format!("{}:{}", eff.name, sub)
+                        } else {
+                            eff.name.clone()
+                        };
+                        let list = special_samples.entry(key).or_default();
+                        if list.len() < 4 {
                             list.push(format!(
                                 "sc={} L{} ({}..={}) cat={:?} params={:?}",
                                 sc_id,
@@ -97,6 +118,46 @@ fn main() {
     println!("\n=== Script / SceneChange Details ===");
     for s in &script_details {
         println!("  {}", s);
+    }
+
+    println!("\n=== Special Samples ===");
+    for (k, list) in &special_samples {
+        println!("  [{}]:", k);
+        for item in list {
+            println!("    {}", item);
+        }
+    }
+
+    println!("\n=== Subscene Objects Summary ===");
+    for (&sc_id, sc) in &doc.scenes {
+        if sc_id == 0 {
+            continue;
+        }
+        println!("  --- Scene {} ('{}', len={}) ---", sc_id, sc.name, sc.settings.length);
+        for (li, layer) in sc.layers.iter().enumerate() {
+            for obj in &layer.objects {
+                let eff_summary: Vec<String> = obj
+                    .effects
+                    .iter()
+                    .map(|e| {
+                        let sub = e.text("name").unwrap_or("");
+                        let col = e.text("color").unwrap_or("");
+                        let ty = e.text("type").unwrap_or("");
+                        let sc_ref = e.text("scene").unwrap_or("");
+                        format!("{}[en={},name={},ty={},col={},sc={}]", e.name, e.enabled, sub, ty, col, sc_ref)
+                    })
+                    .collect();
+                println!(
+                    "    L{:02} ({:4}..={:4}) clip={} cam={}: {}",
+                    li + 1,
+                    obj.frame_start,
+                    obj.frame_end,
+                    obj.clipping,
+                    obj.camera_target,
+                    eff_summary.join(" -> ")
+                );
+            }
+        }
     }
 
     println!("\n=== First 40 Objects in Root Scene ===");

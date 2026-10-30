@@ -1277,6 +1277,107 @@ for i = 0, slices - 1 do
     end
     obj.draw(dx, dy, 0, 1, 1 - ease * 0.5)
 end
+
+@ランダム配置@ANM1
+--track0:個数,0,1000,10,1
+--track1:範囲,0,5000,200
+--track2:移動速度,0,1000,0
+--track3:回転速度,0,1000,0
+--dialog:X範囲[%],local wx=100;Y範囲[%],local wy=100;Z範囲[%],local wz=100;X回転,local kx=0;Y回転,local ky=0;Z回転,local kz=0;最小拡大率[%],local s_min=100;シード,local ran=1;
+local n = obj.num
+local is_multi = (n > 1)
+if (not is_multi) then
+    n = math.min(64, math.max(1, math.floor(obj.track0)))
+end
+local rng = obj.track1 * 0.5
+local spd = obj.track2 * 0.01
+local rspd = obj.track3 * 0.01
+local sx = (wx or rx or 100) * 0.01
+local sy = (wy or ry or 100) * 0.01
+local sz_r = (wz or rz or 0) * 0.01
+local min_s = (s_min or sz or 100)
+local base_seed = math.floor(ran or 1) * 100
+for i = 1, n do
+    local seed = base_seed + i
+    if (is_multi) then seed = base_seed - obj.index - 1 end
+    local x = (obj.rand(-1000, 1000, seed, 1) * 0.001 + math.sin(obj.time * spd + seed) * 0.2) * rng * sx
+    local y = (obj.rand(-1000, 1000, seed, 2) * 0.001 + math.cos(obj.time * spd + seed) * 0.2) * rng * sy
+    local z = (obj.rand(-1000, 1000, seed, 3) * 0.001) * rng * sz_r
+    local zm = obj.rand(min_s, 100, seed, 4) * 0.01
+    local rot_x = 0
+    local rot_y = 0
+    local rot_z = 0
+    if ((kx or dx or 0) ~= 0) then rot_x = obj.rand(0, 360, seed, 5) + obj.time * rspd * 60 end
+    if ((ky or dy or 0) ~= 0) then rot_y = obj.rand(0, 360, seed, 6) + obj.time * rspd * 60 end
+    if ((kz or dz or 0) ~= 0) then rot_z = obj.rand(0, 360, seed, 7) + obj.time * rspd * 60 end
+    if (is_multi) then
+        obj.ox = obj.ox + x
+        obj.oy = obj.oy + y
+        obj.oz = obj.oz + z
+        obj.rx = obj.rx + rot_x
+        obj.ry = obj.ry + rot_y
+        obj.rz = obj.rz + rot_z
+        obj.zoom = obj.zoom * zm
+        break
+    else
+        obj.draw(x, y, z, zm, 1, rot_x, rot_y, rot_z)
+    end
+end
+
+@一方向に並べる@ANM1
+--track0:個数,-100,100,5,1
+--track1:間隔,-2000,2000,100
+--track2:角度,-3600,3600,0
+--track3:Z間隔,-2000,2000,0
+local raw_n = obj.track0
+local n = math.min(64, math.max(1, math.floor(math.abs(raw_n))))
+local sign = 1
+if (raw_n < 0) then sign = -1 end
+local step = obj.track1 * sign
+local rad = obj.track2 * math.pi / 180
+local dz = obj.track3
+local dx = math.cos(rad) * step
+local dy = math.sin(rad) * step
+for i = 0, n - 1 do
+    obj.draw(dx * i, dy * i, dz * i, 1, 1)
+end
+
+@扇クリッピングR
+--track0:終了角,-3600,3600,360
+--track1:開始角,-3600,3600,0
+--track2:中心X,-2000,2000,0
+--track3:中心Y,-2000,2000,0
+obj.effect("扇クリッピングR", "終了角", obj.track0, "開始角", obj.track1, "中心X", obj.track2, "中心Y", obj.track3)
+
+@斜めブラインド@ANM1
+--track0:進捗,0,100,50
+--track1:幅,2,500,50
+--track2:角度,-360,360,45
+--track3:ぼかし,0,100,0
+local p = math.min(100, math.max(0, obj.track0)) * 0.01
+obj.alpha = obj.alpha * (1 - p * 0.85)
+local rad = obj.track2 * math.pi / 180
+obj.ox = obj.ox + math.cos(rad) * p * obj.track1 * 0.25
+obj.oy = obj.oy + math.sin(rad) * p * obj.track1 * 0.25
+
+@画像ループ2@ANM1
+--track0:横拡大率,1,2000,100
+--track1:縦拡大率,1,2000,100
+--track2:X速度,-2000,2000,0
+--track3:Y速度,-2000,2000,0
+local nx = math.min(12, math.max(1, math.ceil(obj.track0 / 100)))
+local ny = math.min(12, math.max(1, math.ceil(obj.track1 / 100)))
+local step_x = math.max(32, obj.w)
+local step_y = math.max(32, obj.h)
+local sx = (obj.time * obj.track2) % step_x
+local sy = (obj.time * obj.track3) % step_y
+for iy = 0, ny - 1 do
+    for ix = 0, nx - 1 do
+        local ox = (ix - (nx - 1) * 0.5) * step_x + sx
+        local oy = (iy - (ny - 1) * 0.5) * step_y + sy
+        obj.draw(ox, oy, 0, 1, 1)
+    end
+end
 "#;
 
 /// 拡張編集互換の標準カスタムオブジェクトスクリプト（クリーンルーム実装）
@@ -1527,6 +1628,54 @@ obj.draw(0, 0, 0, 1.0, math.min(1, (1 - (c_alp or 0.5) * 0.5) * intensity * puls
 obj.load("figure", "四角形", col or 0x3388ff, obj.screen_w)
 obj.oy = obj.oy + obj.track0 + math.sin(obj.time * obj.track2 * 0.2) * obj.track1
 obj.alpha = 0.55
+
+@角丸四角形@hksy
+--track0:横幅,0,4000,200
+--track1:縦幅,0,4000,200
+--track2:ライン幅,0,4000,4000
+--track3:角丸半径,0,2000,30
+--dialog:色/col,local color=0xffffff;
+local w = math.max(2, obj.track0)
+local h = math.max(2, obj.track1)
+local lw = obj.track2
+local c = color or col or 0xffffff
+local sz = math.max(w, h)
+obj.load("figure", "四角形", c, sz, lw)
+if (w >= h) then
+    obj.aspect = (h / w) - 1
+else
+    obj.aspect = 1 - (w / h)
+end
+obj.w = w
+obj.h = h
+
+@日の出
+--track0:本数,1,64,8,1
+--track1:角度幅,1,100,50
+--track2:回転,-3600,3600,0
+--track3:内半径,0,2000,0
+--dialog:色/col,local col=0xffffff;横幅,local w=1000;縦幅,local h=1000;
+local n = math.min(64, math.max(1, math.floor(obj.track0)))
+local ratio = math.min(95, math.max(5, obj.track1)) * 0.01
+local rot_deg = obj.track2
+local r_in = math.max(0, obj.track3)
+local r_out = math.max(r_in + 50, math.max(w or 1000, h or 1000) * 0.85)
+local c = col or color or 0xffffff
+local step_deg = 360 / n
+local span_deg = step_deg * ratio
+for i = 0, n - 1 do
+    local a0 = (rot_deg + i * step_deg - span_deg * 0.5) * math.pi / 180
+    local a1 = (rot_deg + i * step_deg + span_deg * 0.5) * math.pi / 180
+    local x0 = math.cos(a0) * r_in
+    local y0 = math.sin(a0) * r_in
+    local x1 = math.cos(a1) * r_in
+    local y1 = math.sin(a1) * r_in
+    local x2 = math.cos(a1) * r_out
+    local y2 = math.sin(a1) * r_out
+    local x3 = math.cos(a0) * r_out
+    local y3 = math.sin(a0) * r_out
+    obj.drawpoly(x0, y0, 0, x1, y1, 0, x2, y2, 0, x3, y3, 0)
+end
 "#;
 
 /// 拡張編集互換の標準カメラ効果スクリプト（クリーンルーム実装）
@@ -1610,6 +1759,18 @@ if (dist > 0 and cam.d > 0) then
     cam.y = cam.ty - (dy / dist) * new_dist
     cam.z = cam.tz - (dz / dist) * new_dist
     cam.d = new_d
+    obj.setoption("camera_param", cam)
+end
+
+@ParallelCamera@ParallelCamera
+--track0:基準距離,1,10000,1024
+local cam = obj.getoption("camera_param")
+local dx = cam.tx - cam.x
+local dy = cam.ty - cam.y
+local dz = cam.tz - cam.z
+local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+if (dist > 1) then
+    cam.d = dist
     obj.setoption("camera_param", cam)
 end
 "#;

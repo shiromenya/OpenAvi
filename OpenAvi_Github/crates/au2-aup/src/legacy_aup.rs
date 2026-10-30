@@ -405,11 +405,6 @@ pub fn parse_legacy_aup(bytes: &[u8]) -> Result<AupDocument, AupError> {
             let param_count: usize = if is_compact_obj { 16 } else { 64 };
             let (layer_off, scene_off) = (base_size - 8, base_size - 4);
 
-            println!(
-                "EXEDIT HEADER: ver=0x{:x}, eff_types={}, objs={}, edit_scene={}, scenes={}, layers={}, tb_scripts={}, base_size=0x{:x}",
-                exedit_version, effect_type_num, object_num, editing_scene, scene_num, layer_num, trackbar_script_num, base_size
-            );
-
             let eff_layer_size = if layer_size > 0 { layer_size } else { 76 };
             let eff_scene_size = if scene_size > 0 { scene_size } else { 220 };
 
@@ -417,15 +412,17 @@ pub fn parse_legacy_aup(bytes: &[u8]) -> Result<AupDocument, AupError> {
             cursor += layer_num * eff_layer_size;
 
             // Scenes
-            let mut scenes_info = Vec::new();
-            for _ in 0..scene_num {
+            let mut scenes_info = std::collections::HashMap::new();
+            for i in 0..scene_num {
                 if cursor + eff_scene_size <= decomp.len() {
                     let s_data = &decomp[cursor..cursor + eff_scene_size];
+                    let s_id0 = u32::from_le_bytes(s_data[0..4].try_into().unwrap());
                     let s_name = decode_sjis_cstring(&s_data[8..8 + 64]);
                     let w = u32::from_le_bytes(s_data[0x48..0x4c].try_into().unwrap());
                     let h = u32::from_le_bytes(s_data[0x4c..0x50].try_into().unwrap());
                     let max_f = u32::from_le_bytes(s_data[0x50..0x54].try_into().unwrap());
-                    scenes_info.push((s_name, w, h, max_f));
+                    let actual_sc_id = if s_id0 < 100 && (i == 0 || s_id0 > 0) { s_id0 } else { i as u32 };
+                    scenes_info.insert(actual_sc_id, (s_name, w, h, max_f));
                     cursor += eff_scene_size;
                 }
             }
@@ -459,23 +456,12 @@ pub fn parse_legacy_aup(bytes: &[u8]) -> Result<AupDocument, AupError> {
                 }
             }
 
-            let proj_w = if !scenes_info.is_empty() && scenes_info[0].1 > 0 {
-                scenes_info[0].1
-            } else {
-                aup_w
-            };
-            let proj_h = if !scenes_info.is_empty() && scenes_info[0].2 > 0 {
-                scenes_info[0].2
-            } else {
-                aup_h
-            };
-            let proj_len = if !scenes_info.is_empty() && scenes_info[0].3 > 0 && scenes_info[0].3 < 10_000_000 {
-                scenes_info[0].3
-            } else if aup_len > 0 && aup_len < 10_000_000 {
-                aup_len
-            } else {
-                1800
-            };
+            let proj_w = scenes_info.get(&0).and_then(|s| (s.1 > 0).then_some(s.1)).unwrap_or(aup_w);
+            let proj_h = scenes_info.get(&0).and_then(|s| (s.2 > 0).then_some(s.2)).unwrap_or(aup_h);
+            let proj_len = scenes_info
+                .get(&0)
+                .and_then(|s| (s.3 > 0 && s.3 < 10_000_000).then_some(s.3))
+                .unwrap_or(if aup_len > 0 && aup_len < 10_000_000 { aup_len } else { 1800 });
 
             let mut exo = String::with_capacity(decomp.len() / 4);
             exo.push_str("[exedit]\r\n");
@@ -508,7 +494,7 @@ pub fn parse_legacy_aup(bytes: &[u8]) -> Result<AupDocument, AupError> {
                     && flag != 0xFFFF_FFFF
                     && end_f != 0xFFFF_FFFF
                     && start_f <= end_f
-                    && layer < layer_num as u32;
+                    && layer < 100;
                 if is_valid && !is_chain {
                     for e in 0..12 {
                         let type_idx = i32::from_le_bytes(o_data[0x54 + e * 12..0x54 + e * 12 + 4].try_into().unwrap());
@@ -553,7 +539,7 @@ pub fn parse_legacy_aup(bytes: &[u8]) -> Result<AupDocument, AupError> {
                 }
 
                 let (sc_name, sc_w, sc_h, sc_len) = scenes_info
-                    .get(sc_id as usize)
+                    .get(&sc_id)
                     .map(|(n, w, h, l)| {
                         let name = if n.is_empty() {
                             if sc_id == 0 { "Root".to_string() } else { format!("Scene {}", sc_id) }

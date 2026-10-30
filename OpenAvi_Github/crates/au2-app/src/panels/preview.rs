@@ -475,6 +475,15 @@ pub fn apply_camera_effect(
                 cam.z = cam.tz - new_l * norm_z;
             }
         }
+        "ParallelCamera" => {
+            let x = cam.tx - cam.x;
+            let y = cam.ty - cam.y;
+            let z = cam.tz - cam.z;
+            let l = (x * x + y * y + z * z).sqrt();
+            if l > 1.0 {
+                cam.d = l;
+            }
+        }
         _ => {}
     }
 }
@@ -730,6 +739,10 @@ struct FilterVisuals {
     noise_strength: f32,
     // 反転フラグ: (flip_v, flip_h, invert_luma, invert_hue, invert_alpha)
     inversions: (bool, bool, bool, bool, bool),
+    // 扇クリッピングR: Some((start_deg, end_deg))
+    sector_clip: Option<(f32, f32)>,
+    // 縦横比オーバーライド (-1.0..=1.0)
+    aspect_override: f32,
 }
 
 /// 指定したシーン (`scene`) の `frame` における描画を実行します（サブシーン呼び出し・カメラ制御・グループ制御・時間制御・クリッピング対応）。
@@ -791,18 +804,36 @@ fn render_scene_at(
             if let Some(cam_eff) = obj.effect(&EffectKind::Camera) {
                 if cam_eff.enabled {
                     let rel = lf - obj.frame_start;
+                    let cam_x = cam_eff.eval("X", rel, 0.0);
+                    let cam_y = cam_eff.eval("Y", rel, 0.0);
+                    let cam_z = cam_eff.eval("Z", rel, -1024.0);
+                    let cam_tx = cam_eff.eval("目標X", rel, 0.0);
+                    let cam_ty = cam_eff.eval("目標Y", rel, 0.0);
+                    let cam_tz = cam_eff.eval("目標Z", rel, 0.0);
+                    let cam_fov = cam_eff.eval("視野角", rel, 0.0);
+                    let init_d = if cam_fov.abs() > 0.1 {
+                        let base_fov = (base_ctx.screen_h / (1024.0 * 2.0)).atan() * 360.0 / std::f64::consts::PI;
+                        let eff_fov = if cam_fov > 0.0 && cam_fov < 30.0 {
+                            cam_fov.clamp(1.0, 150.0)
+                        } else {
+                            (base_fov + cam_fov).clamp(1.0, 150.0)
+                        };
+                        base_ctx.screen_h / ((eff_fov * std::f64::consts::PI / 360.0).tan() * 2.0)
+                    } else {
+                        1024.0
+                    };
                     let mut cp = CameraParams {
-                        x: cam_eff.eval("X", rel, 0.0),
-                        y: cam_eff.eval("Y", rel, 0.0),
-                        z: cam_eff.eval("Z", rel, -1024.0),
-                        tx: cam_eff.eval("目標X", rel, 0.0),
-                        ty: cam_eff.eval("目標Y", rel, 0.0),
-                        tz: cam_eff.eval("目標Z", rel, 0.0),
+                        x: cam_x,
+                        y: cam_y,
+                        z: cam_z,
+                        tx: cam_tx,
+                        ty: cam_ty,
+                        tz: cam_tz,
                         rz: cam_eff.eval("傾き", rel, 0.0),
                         ux: 0.0,
                         uy: -1.0,
                         uz: 0.0,
-                        d: 1024.0,
+                        d: init_d,
                     };
 
                     for eff in &obj.effects {
@@ -856,7 +887,7 @@ fn render_scene_at(
                         }
                     }
 
-                    active_camera = Some((layer_idx, Camera3D::from_params(&cp, base_ctx.screen_h)));
+                    active_camera = Some((layer_idx, Camera3D::from_params(&cp, cam_fov)));
                     break;
                 }
             }
@@ -864,7 +895,7 @@ fn render_scene_at(
     }
 
     // 3. グループ制御 (GroupControl) の評価
-    let mut group_overrides: Vec<(usize, Option<usize>, GroupTransform)> = Vec::new();
+    let mut group_overrides: Vec<(usize, Option<usize>, bool, Option<u32>, GroupTransform)> = Vec::new();
     for (layer_idx, layer) in scene.layers.iter().enumerate() {
         if !layer.visible {
             continue;
@@ -882,6 +913,13 @@ fn render_scene_at(
                         None
                     } else {
                         Some(layer_idx + range)
+                    };
+                    let inherit_upper = gc.eval("上位グループ制御の影響を受ける", rel, gc.eval("check0", rel, 0.0)) >= 0.5;
+                    let same_group_only = gc.eval("同じグループのオブジェクトを対象にする", rel, gc.eval("check1", rel, 0.0)) >= 0.5;
+                    let req_group = if same_group_only && obj.group.unwrap_or(0) != 0 {
+                        obj.group
+                    } else {
+                        None
                     };
 
                     let mut gt = GroupTransform {
@@ -931,6 +969,16 @@ fn render_scene_at(
                             if fout > 0.0 {
                                 lua_st.alpha *= (remain / fout).min(1.0);
                             }
+                        } else if eff.name == "座標" {
+                            lua_st.ox += eff.eval("X", rel, 0.0);
+                            lua_st.oy += eff.eval("Y", rel, 0.0);
+                            lua_st.oz += eff.eval("Z", rel, 0.0);
+                        } else if eff.name == "回転" {
+                            lua_st.rx += eff.eval("X", rel, 0.0);
+                            lua_st.ry += eff.eval("Y", rel, 0.0);
+                            lua_st.rz += eff.eval("Z", rel, 0.0);
+                        } else if eff.name == "拡大率" || eff.name == "リサイズ" {
+                            lua_st.zoom *= (eff.eval("拡大率", rel, 100.0) / 100.0).max(0.0);
                         } else {
                             let _ = base_ctx.plugins.execute_effect(eff, rel, &mut lua_st);
                         }
@@ -944,25 +992,34 @@ fn render_scene_at(
                     gt.rz = lua_st.rz;
                     gt.alpha = lua_st.alpha.clamp(0.0, 1.0);
 
-                    group_overrides.push((layer_idx + 1, end_layer, gt));
+                    group_overrides.push((layer_idx + 1, end_layer, inherit_upper, req_group, gt));
                 }
             }
         }
     }
 
-    let resolve_group_transform = |layer_idx: usize| -> GroupTransform {
+    let resolve_group_transform = |layer_idx: usize, obj_group: Option<u32>| -> GroupTransform {
         let mut combined = base_ctx.group_transform.unwrap_or_default();
-        for &(start_l, end_l, ref gt) in &group_overrides {
+        for &(start_l, end_l, inherit_upper, req_group, ref gt) in &group_overrides {
             if layer_idx >= start_l && end_l.map(|e| layer_idx <= e).unwrap_or(true) {
-                let rotated = rotate_3d([combined.ox, combined.oy, combined.oz], gt.rx, gt.ry, gt.rz);
-                combined.ox = gt.ox + rotated[0] * gt.zoom;
-                combined.oy = gt.oy + rotated[1] * gt.zoom;
-                combined.oz = gt.oz + rotated[2] * gt.zoom;
-                combined.zoom *= gt.zoom;
-                combined.rx += gt.rx;
-                combined.ry += gt.ry;
-                combined.rz += gt.rz;
-                combined.alpha *= gt.alpha;
+                if let Some(rg) = req_group {
+                    if obj_group != Some(rg) {
+                        continue;
+                    }
+                }
+                if !inherit_upper {
+                    combined = *gt;
+                } else {
+                    let rotated = rotate_3d([combined.ox, combined.oy, combined.oz], gt.rx, gt.ry, gt.rz);
+                    combined.ox = gt.ox + rotated[0] * gt.zoom;
+                    combined.oy = gt.oy + rotated[1] * gt.zoom;
+                    combined.oz = gt.oz + rotated[2] * gt.zoom;
+                    combined.zoom *= gt.zoom;
+                    combined.rx += gt.rx;
+                    combined.ry += gt.ry;
+                    combined.rz += gt.rz;
+                    combined.alpha *= gt.alpha;
+                }
             }
         }
         combined
@@ -985,7 +1042,7 @@ fn render_scene_at(
                 continue;
             }
             let rel = lf - obj.frame_start;
-            let gt = resolve_group_transform(layer_idx);
+            let gt = resolve_group_transform(layer_idx, obj.group);
             let pass = if active_camera.is_some() && obj.camera_target {
                 1u8
             } else if layer_idx < cam_layer {
@@ -1539,6 +1596,12 @@ fn draw_object_sub(
                 | "方向ブラー"
                 | "レンズブラー"
                 | "放射ブラー"
+                | "座標"
+                | "拡大率"
+                | "透明度"
+                | "回転"
+                | "エッジ抽出"
+                | "ルミナンスキー"
         ) && eff.text("name").is_none();
 
         let ran_lua = if is_builtin_filter {
@@ -1790,6 +1853,29 @@ fn draw_object_sub(
                     fx.inversions.4 || ia,
                 );
             }
+            "エッジ抽出" => {
+                let str_val = eff.eval("強さ", rel, 100.0) as f32;
+                if str_val > 10.0 {
+                    fx.inner_hollow_ratio = fx.inner_hollow_ratio.max(0.85);
+                    if let Some(c) = eff.text("color").and_then(parse_color) {
+                        fx.tint_color = Some((c, 0.9));
+                    }
+                }
+            }
+            "ルミナンスキー" => {
+                let thresh = eff.eval("基準輝度", rel, 2000.0) as f32;
+                if thresh > 3800.0 {
+                    lua_st.alpha *= 0.85;
+                }
+            }
+            "ディスプレイスメントマップ" => {
+                let dx = eff.eval("変形X", rel, 0.0);
+                let dy = eff.eval("変形Y", rel, 0.0);
+                let shift = (dx.hypot(dy) * 0.15) as f32;
+                if shift > 0.5 {
+                    fx.chroma_shift = fx.chroma_shift.max(shift.min(18.0));
+                }
+            }
             _ => {
                 if !ran_lua && eff.name == "アニメーション効果" {
                     let script_name = eff.text("name").unwrap_or_default();
@@ -1868,8 +1954,17 @@ fn draw_object_sub(
                     fx.inner_hollow_ratio = fx.inner_hollow_ratio.max((sz / (approx_size as f32).max(1.0)).clamp(0.1, 0.96));
                 }
             }
+            "扇クリッピングR" => {
+                let end_deg = fcall.params.get("終了角").map(|v| v.as_num() as f32).unwrap_or(360.0);
+                let start_deg = fcall.params.get("開始角").map(|v| v.as_num() as f32).unwrap_or(0.0);
+                fx.sector_clip = Some((start_deg, end_deg));
+            }
             _ => {}
         }
+    }
+
+    if lua_st.aspect.abs() > 0.001 {
+        fx.aspect_override = lua_st.aspect as f32;
     }
 
     let gt = ctx.group_transform.unwrap_or_default();
@@ -2320,32 +2415,43 @@ fn draw_single_instance(
                 } else {
                     fx.inner_hollow_ratio
                 };
+                let (w_mult, h_mult) = if fx.aspect_override.abs() > 0.001 {
+                    let a = fx.aspect_override.clamp(-0.98, 0.98);
+                    if a >= 0.0 {
+                        (1.0 - a, 1.0)
+                    } else {
+                        (1.0, 1.0 + a)
+                    }
+                } else {
+                    (1.0, 1.0)
+                };
 
                 let local_pts: Vec<[f32; 2]> = match fig_type.as_str() {
                     "四角形" => {
-                        let h = raw_sz * 0.5;
-                        vec![[-h, -h], [h, -h], [h, h], [-h, h]]
+                        let hw = raw_sz * 0.5 * w_mult;
+                        let hh = raw_sz * 0.5 * h_mult;
+                        vec![[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]]
                     }
                     "三角形" => (0..3).map(|i| {
                         let a = -PI / 2.0 + TAU * (i as f32) / 3.0;
-                        [a.cos() * raw_sz * 0.5, a.sin() * raw_sz * 0.5]
+                        [a.cos() * raw_sz * 0.5 * w_mult, a.sin() * raw_sz * 0.5 * h_mult]
                     }).collect(),
                     "五角形" => (0..5).map(|i| {
                         let a = -PI / 2.0 + TAU * (i as f32) / 5.0;
-                        [a.cos() * raw_sz * 0.5, a.sin() * raw_sz * 0.5]
+                        [a.cos() * raw_sz * 0.5 * w_mult, a.sin() * raw_sz * 0.5 * h_mult]
                     }).collect(),
                     "六角形" => (0..6).map(|i| {
                         let a = -PI / 2.0 + TAU * (i as f32) / 6.0;
-                        [a.cos() * raw_sz * 0.5, a.sin() * raw_sz * 0.5]
+                        [a.cos() * raw_sz * 0.5 * w_mult, a.sin() * raw_sz * 0.5 * h_mult]
                     }).collect(),
                     "星型" => (0..10).map(|i| {
                         let r = if i % 2 == 0 { raw_sz * 0.5 } else { raw_sz * 0.2 };
                         let a = -PI / 2.0 + TAU * (i as f32) / 10.0;
-                        [a.cos() * r, a.sin() * r]
+                        [a.cos() * r * w_mult, a.sin() * r * h_mult]
                     }).collect(),
                     _ => (0..24).map(|i| {
                         let a = TAU * (i as f32) / 24.0;
-                        [a.cos() * raw_sz * 0.5, a.sin() * raw_sz * 0.5]
+                        [a.cos() * raw_sz * 0.5 * w_mult, a.sin() * raw_sz * 0.5 * h_mult]
                     }).collect(),
                 };
 
@@ -2433,9 +2539,56 @@ fn draw_single_instance(
                     vec![[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]]
                 }
                 1 => {
-                    // 円 (32分割の多角形近似で3D透視投影・中抜きリングにも滑らかに対応)
+                    // 円 (32分割の多角形近似で3D透視投影・中抜きリング・扇クリッピングRにも滑らかに対応)
                     let rx = (raw_size * w_mult) / 2.0;
                     let ry = (raw_size * h_mult) / 2.0;
+                    if let Some((start_deg, end_deg)) = fx.sector_clip {
+                        let span = (end_deg - start_deg).clamp(-360.0, 360.0);
+                        if span.abs() < 0.5 {
+                            return None;
+                        }
+                        if span.abs() < 359.5 {
+                            let s_rad = (start_deg - 90.0).to_radians();
+                            let e_rad = (end_deg - 90.0).to_radians();
+                            let steps = 28usize;
+                            let r_in_ratio = inner_ratio;
+                            let mut outer_arc = Vec::with_capacity(steps + 1);
+                            let mut inner_arc = Vec::with_capacity(steps + 1);
+                            for i in 0..=steps {
+                                let t = i as f32 / steps as f32;
+                                let a = s_rad + (e_rad - s_rad) * t;
+                                outer_arc.push([a.cos() * rx, a.sin() * ry]);
+                                inner_arc.push([a.cos() * rx * r_in_ratio, a.sin() * ry * r_in_ratio]);
+                            }
+                            let proj_pts = |pts_2d: &[[f32; 2]]| -> Option<Vec<Pos2>> {
+                                if let (Some(cam), Some((w_pos, rot, r_zoom))) = (ctx.camera, transform_3d) {
+                                    project_3d_points(&cam, ctx.canvas, ctx.scale, w_pos, rot, pts_2d, r_zoom)
+                                } else {
+                                    let rot = Rot2::from_angle(angle);
+                                    Some(pts_2d.iter().map(|&[lx, ly]| center + rot * vec2(lx * k, ly * k)).collect())
+                                }
+                            };
+                            if let (Some(out_s), Some(in_s)) = (proj_pts(&outer_arc), proj_pts(&inner_arc)) {
+                                let mut mesh = Mesh::default();
+                                let n_v = out_s.len();
+                                for i in 0..n_v {
+                                    mesh.colored_vertex(out_s[i], color);
+                                    mesh.colored_vertex(in_s[i], color);
+                                }
+                                for i in 0..(n_v - 1) {
+                                    let o0 = (i * 2) as u32;
+                                    let i0 = (i * 2 + 1) as u32;
+                                    let o1 = ((i + 1) * 2) as u32;
+                                    let i1 = ((i + 1) * 2 + 1) as u32;
+                                    mesh.add_triangle(o0, o1, i0);
+                                    mesh.add_triangle(i0, o1, i1);
+                                }
+                                painter.add(Shape::mesh(mesh));
+                                return Some(Rect::from_points(&out_s));
+                            }
+                            return None;
+                        }
+                    }
                     (0..32).map(|i| {
                         let a = TAU * (i as f32) / 32.0;
                         [a.cos() * rx, a.sin() * ry]
@@ -2882,50 +3035,60 @@ fn draw_single_instance(
             if let Some(&(tex_id, [tw, th])) = ctx.textures.get(&obj.id) {
                 let size = vec2(tw as f32 * k, th as f32 * k);
                 let r = Rect::from_center_size(center, size);
+                let fh = fx.inversions.1;
+                let fv = fx.inversions.0;
                 if fx.chroma_shift > 0.5 {
                     let shift_vec = vec2(fx.chroma_angle.cos(), fx.chroma_angle.sin()) * fx.chroma_shift * ctx.scale;
-                    draw_textured_quad(
+                    draw_textured_quad_uv(
                         painter,
                         tex_id,
                         r.translate(-shift_vec),
                         angle,
                         Color32::from_rgba_unmultiplied(255, 60, 60, (alpha * 120.0) as u8),
+                        fh,
+                        fv,
                     );
-                    draw_textured_quad(
+                    draw_textured_quad_uv(
                         painter,
                         tex_id,
                         r.translate(shift_vec),
                         angle,
                         Color32::from_rgba_unmultiplied(60, 180, 255, (alpha * 120.0) as u8),
+                        fh,
+                        fv,
                     );
                 }
-                draw_textured_quad(painter, tex_id, r, angle, apply_tint(Color32::WHITE));
+                draw_textured_quad_uv(painter, tex_id, r, angle, apply_tint(Color32::WHITE), fh, fv);
                 Some(r)
             } else {
-                let size = vec2(ctx.canvas.width(), ctx.canvas.height()) * zoom;
+                // 画像・動画ファイルがローカルに存在しない場合の軽量スマート描画（画面全体の塗り潰しを防止し、キャラクター立ち絵や映像配置を視認可能にする）
+                let file_stem = src
+                    .text("file")
+                    .and_then(|p| std::path::Path::new(p).file_stem())
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Media");
+                let is_video = matches!(src.kind, EffectKind::VideoFile);
+                let (base_w, base_h) = if is_video { (360.0, 202.0) } else { (220.0, 320.0) };
+                let size = vec2(base_w * k, base_h * k);
                 let r = Rect::from_center_size(center, size);
                 let corners = rotated_rect(r, angle);
-                let placeholder_col = apply_tint(Color32::from_rgba_unmultiplied(40, 50, 70, 35));
-                fan(painter, center, &corners, placeholder_col);
+                let fill_col = apply_tint(Color32::from_rgba_unmultiplied(65, 85, 120, 42));
+                let stroke_col = apply_tint(Color32::from_rgba_unmultiplied(150, 190, 255, 130));
+                fan(painter, center, &corners, fill_col);
+                closed_stroke(painter, &corners, Stroke::new((1.5 * ctx.scale).max(1.0), stroke_col));
 
-                let is_video = matches!(src.kind, EffectKind::VideoFile);
-                if is_video && !ctx.has_ffmpeg {
-                    painter.text(
-                        center,
-                        Align2::CENTER_CENTER,
-                        format!("{}\n【動画デコーダー (FFmpeg) 未検出】\n画面上部の「FFmpeg を自動ダウンロード」を押してください", obj.display_name()),
-                        FontId::proportional((13.0 * zoom.max(0.5)).min(22.0)),
-                        Color32::from_rgb(255, 140, 140),
-                    );
-                } else if selected {
-                    painter.text(
-                        center,
-                        Align2::CENTER_CENTER,
-                        format!("{}\n{}", src.name, obj.display_name()),
-                        FontId::proportional((14.0 * zoom.max(0.5)).min(28.0)),
-                        apply_tint(Color32::LIGHT_GRAY),
-                    );
-                }
+                let label = if fx.inversions.1 {
+                    format!("{} [反転]", file_stem)
+                } else {
+                    file_stem.to_string()
+                };
+                painter.text(
+                    center,
+                    Align2::CENTER_CENTER,
+                    label,
+                    FontId::proportional((13.0 * k.max(0.4)).clamp(9.0, 22.0)),
+                    apply_tint(Color32::from_rgba_unmultiplied(235, 245, 255, 210)),
+                );
                 Some(r)
             }
         }
@@ -2943,6 +3106,16 @@ fn draw_single_instance(
             } else {
                 None
             }
+        }
+        EffectKind::FrameBuffer => {
+            if fx.chroma_shift > 0.5 {
+                let shift = (fx.chroma_shift * ctx.scale).clamp(1.0, 24.0);
+                let r_rect = Rect::from_min_max(ctx.canvas.left_top(), pos2(ctx.canvas.left() + shift * 1.5, ctx.canvas.bottom()));
+                let b_rect = Rect::from_min_max(pos2(ctx.canvas.right() - shift * 1.5, ctx.canvas.top()), ctx.canvas.right_bottom());
+                painter.rect_filled(r_rect, 0.0, Color32::from_rgba_unmultiplied(255, 60, 60, (alpha * 50.0) as u8));
+                painter.rect_filled(b_rect, 0.0, Color32::from_rgba_unmultiplied(60, 180, 255, (alpha * 50.0) as u8));
+            }
+            Some(ctx.canvas)
         }
         _ => {
             let sz = (src.eval("サイズ", rel, 100.0) as f32 * k).clamp(16.0 * ctx.scale, ctx.canvas.width());
@@ -2969,9 +3142,25 @@ fn draw_single_instance(
 }
 
 /// 回転・透明度付きのテクスチャ矩形を描画します。
+#[allow(dead_code)]
 fn draw_textured_quad(painter: &egui::Painter, tex_id: egui::TextureId, rect: Rect, angle: f32, tint: Color32) {
+    draw_textured_quad_uv(painter, tex_id, rect, angle, tint, false, false);
+}
+
+/// UV反転（左右・上下）対応のテクスチャ矩形描画。
+fn draw_textured_quad_uv(
+    painter: &egui::Painter,
+    tex_id: egui::TextureId,
+    rect: Rect,
+    angle: f32,
+    tint: Color32,
+    flip_h: bool,
+    flip_v: bool,
+) {
     let corners = rotated_rect(rect, angle);
-    let uvs = [pos2(0.0, 0.0), pos2(1.0, 0.0), pos2(1.0, 1.0), pos2(0.0, 1.0)];
+    let (u0, u1) = if flip_h { (1.0, 0.0) } else { (0.0, 1.0) };
+    let (v0, v1) = if flip_v { (1.0, 0.0) } else { (0.0, 1.0) };
+    let uvs = [pos2(u0, v0), pos2(u1, v0), pos2(u1, v1), pos2(u0, v1)];
     let mut mesh = Mesh::with_texture(tex_id);
     for (p, uv) in corners.into_iter().zip(uvs) {
         mesh.vertices.push(egui::epaint::Vertex { pos: p, uv, color: tint });
