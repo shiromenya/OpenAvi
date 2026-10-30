@@ -42,6 +42,7 @@ pub fn install_japanese_font(ctx: &egui::Context) -> Option<&'static str> {
     }
 
     // 3. Proportional（通常UIテキスト）と Monospace（等幅）の先頭に LINE Seed JP を配置
+    //    UI全体で統一された美しい LINE Seed JP のタイポグラフィを適用します
     let prop = fonts.families.entry(FontFamily::Proportional).or_default();
     prop.insert(0, "line_seed_jp".to_owned());
     if fonts.font_data.contains_key("os_fallback") {

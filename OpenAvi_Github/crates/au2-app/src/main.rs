@@ -311,6 +311,49 @@ mod tests {
                 out.shapes.len()
             );
         }
+
+        // 3. 字幕テキストオブジェクト（「文字毎に個別オブジェクト」＋「ランダム間隔で落ちながら登場」等）の検証
+        let mut per_char_text_count = 0usize;
+        let mut vertical_text_count = 0usize;
+        for layer in &st.scene.layers {
+            for obj in &layer.objects {
+                if let Some(src) = obj.source() {
+                    if src.kind == au2_core::EffectKind::Text {
+                        if src.eval("文字毎に個別オブジェクト", 0, 0.0) > 0.5 {
+                            per_char_text_count += 1;
+                        }
+                        if src.text("align").and_then(|s| s.parse::<u8>().ok()).unwrap_or(0) >= 9 {
+                            vertical_text_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            per_char_text_count >= 60,
+            "ExEdit 0.90d3 バイナリから「文字毎に個別オブジェクト=1」が正しく復元されていること (found={per_char_text_count})"
+        );
+        assert!(
+            vertical_text_count >= 1,
+            "テキスト拡張データから縦書き align (>=9) が正しく復元されていること (found={vertical_text_count})"
+        );
+
+        // 字幕が表示されるフレーム（例: f=80, 210, 410, 660, 780, 1350, 2400, 2900）で TextShape が実際に描画されているか検証
+        for f in [80u32, 210, 410, 660, 780, 1350, 2400, 2900] {
+            st.frame = f;
+            let out = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| panels::preview::ui(ui, &mut st));
+            });
+            let text_shapes = out
+                .shapes
+                .iter()
+                .filter(|cs| matches!(&cs.shape, egui::epaint::Shape::Text(_)))
+                .count();
+            assert!(
+                text_shapes >= 8,
+                "frame {f}: 字幕の文字毎個別オブジェクトが正常に描画されていること (text_shapes={text_shapes})"
+            );
+        }
     }
 
     #[test]

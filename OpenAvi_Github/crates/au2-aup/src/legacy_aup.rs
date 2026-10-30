@@ -372,7 +372,37 @@ pub fn parse_legacy_aup(bytes: &[u8]) -> Result<AupDocument, AupError> {
             } else {
                 0x5c8
             };
-            let param_count = if base_size >= 0x5c0 { 64 } else { 16 };
+            // ExEdit 0.90〜0.91系 (base_size == 0x508) と 0.92系 (base_size == 0x5c8) のフィールドオフセット
+            // 0.90〜0.91系 (0x508):
+            //   0x0F8..0x178: track_value_left[32]  (128 bytes)
+            //   0x178..0x1F8: track_value_right[32] (128 bytes)
+            //   0x1F8..0x278: track_s[32] (default) (128 bytes)
+            //   0x278..0x2F8: track_e[32]           (128 bytes)
+            //   0x2F8..0x338: track_mode[16]        (64 bytes)
+            //   0x338..0x3F8: check_value[48]       (192 bytes)
+            //   0x3F8..0x3FC: exdata_offset         (4 bytes)
+            //   0x4BC..0x4C0: group_belong          (4 bytes)
+            //   0x4C0..0x500: track_param[16]       (64 bytes)
+            //   0x500..0x504: layer_set             (4 bytes)
+            //   0x504..0x508: scene_set             (4 bytes)
+            // 0.92系 (0x5C8):
+            //   0x0F8..0x1F8: track_value_left[64]  (256 bytes)
+            //   0x1F8..0x2F8: track_value_right[64] (256 bytes)
+            //   0x2F8..0x3F8: track_mode[64]        (256 bytes)
+            //   0x3F8..0x4B8: check_value[48]       (192 bytes)
+            //   0x4B8..0x4BC: exdata_offset         (4 bytes)
+            //   0x4BC..0x4C0: group_belong          (4 bytes)
+            //   0x4C0..0x5C0: track_param[64]       (256 bytes)
+            //   0x5C0..0x5C4: layer_set             (4 bytes)
+            //   0x5C4..0x5C8: scene_set             (4 bytes)
+            let is_compact_obj = base_size <= 0x540;
+            let tb_left_off: usize = 0x0F8;
+            let tb_right_off: usize = if is_compact_obj { 0x178 } else { 0x1F8 };
+            let tb_mode_off: usize = 0x2F8;
+            let cb_off: usize = if is_compact_obj { 0x338 } else { 0x3F8 };
+            let tb_param_off: usize = 0x4C0;
+            let max_tracks: usize = if is_compact_obj { 32 } else { 64 };
+            let param_count: usize = if is_compact_obj { 16 } else { 64 };
             let (layer_off, scene_off) = (base_size - 8, base_size - 4);
 
             println!(
@@ -612,11 +642,18 @@ pub fn parse_legacy_aup(bytes: &[u8]) -> Result<AupDocument, AupError> {
                         // トラックバー
                         for tb_i in 0..eff_type.trackbar_num {
                             let idx = trackbar_count + tb_i;
-                            let cur = i32::from_le_bytes(o_data[0xF8 + idx * 4..0xF8 + idx * 4 + 4].try_into().unwrap());
-                            let next = i32::from_le_bytes(o_data[0x1F8 + idx * 4..0x1F8 + idx * 4 + 4].try_into().unwrap());
-                            let trans = u32::from_le_bytes(o_data[0x2F8 + idx * 4..0x2F8 + idx * 4 + 4].try_into().unwrap());
+                            if idx >= max_tracks {
+                                break;
+                            }
+                            let cur = i32::from_le_bytes(o_data[tb_left_off + idx * 4..tb_left_off + idx * 4 + 4].try_into().unwrap());
+                            let next = i32::from_le_bytes(o_data[tb_right_off + idx * 4..tb_right_off + idx * 4 + 4].try_into().unwrap());
+                            let trans = if idx < param_count {
+                                u32::from_le_bytes(o_data[tb_mode_off + idx * 4..tb_mode_off + idx * 4 + 4].try_into().unwrap())
+                            } else {
+                                0
+                            };
                             let param = if idx < param_count {
-                                i32::from_le_bytes(o_data[0x4C0 + idx * 4..0x4C0 + idx * 4 + 4].try_into().unwrap())
+                                i32::from_le_bytes(o_data[tb_param_off + idx * 4..tb_param_off + idx * 4 + 4].try_into().unwrap())
                             } else {
                                 0
                             };
@@ -637,13 +674,14 @@ pub fn parse_legacy_aup(bytes: &[u8]) -> Result<AupDocument, AupError> {
                         }
                         trackbar_count += eff_type.trackbar_num;
 
-                        // チェックボックス (0x3F8..0x4BC: 最大 48 個。0x3F8 はオブジェクトの byte_offset の場合があるため、cb_i == 0 && idx == 0 で 1 以外の巨大値は 0 として扱うか、非ゼロでも 0/1 に正規化)
+                        // チェックボックス (48 個)
                         for cb_i in 0..eff_type.checkbox_num {
                             let idx = checkbox_count + cb_i;
-                            let raw_val = i32::from_le_bytes(o_data[0x3F8 + idx * 4..0x3F8 + idx * 4 + 4].try_into().unwrap());
-                            // ExEdit のチェックボックス値は 0 または 1（ボタン型は 0）。
-                            // 0x3F8 に拡張データオフセット等の大きな値（>= 16）が入っている場合は 0 として正規化する
-                            let val = if raw_val == 1 { 1 } else { 0 };
+                            if idx >= 48 {
+                                break;
+                            }
+                            let raw_val = i32::from_le_bytes(o_data[cb_off + idx * 4..cb_off + idx * 4 + 4].try_into().unwrap());
+                            let val = if raw_val != 0 { 1 } else { 0 };
                             let cb_name = get_checkbox_name(&eff_type.name, cb_i);
                             if let Some(name) = cb_name {
                                 exo.push_str(&format!("{}={}\r\n", name, val));
@@ -1477,13 +1515,14 @@ fn export_ext_data(exo: &mut String, eff: &str, ext: &[u8]) {
         }
         "テキスト" => {
             if ext.len() >= 0x30 + 2048 {
-                let autoadjust = ext[0];
-                let soft = ext[1];
-                let monospace = ext[2];
-                let align = ext[3];
-                let spacing_x = ext[4] as i8;
-                let spacing_y = ext[5] as i8;
-                let precision = ext[6];
+                let text_type = ext[0];
+                let autoadjust = ext[1];
+                let soft = ext[2];
+                let monospace = ext[3];
+                let align = ext[4];
+                let spacing_x = ext[5] as i8;
+                let spacing_y = ext[6] as i8;
+                let precision = ext[7];
                 let r1 = ext[8];
                 let g1 = ext[9];
                 let b1 = ext[10];
@@ -1491,8 +1530,8 @@ fn export_ext_data(exo: &mut String, eff: &str, ext: &[u8]) {
                 let g2 = ext[13];
                 let b2 = ext[14];
                 exo.push_str(&format!(
-                    "autoadjust={}\r\nsoft={}\r\nmonospace={}\r\nalign={}\r\nspacing_x={}\r\nspacing_y={}\r\nprecision={}\r\ncolor={:02x}{:02x}{:02x}\r\ncolor2={:02x}{:02x}{:02x}\r\n",
-                    autoadjust, soft, monospace, align, spacing_x, spacing_y, precision,
+                    "type={}\r\nautoadjust={}\r\nsoft={}\r\nmonospace={}\r\nalign={}\r\nspacing_x={}\r\nspacing_y={}\r\nprecision={}\r\ncolor={:02x}{:02x}{:02x}\r\ncolor2={:02x}{:02x}{:02x}\r\n",
+                    text_type, autoadjust, soft, monospace, align, spacing_x, spacing_y, precision,
                     r1, g1, b1, r2, g2, b2
                 ));
                 let font_name = decode_sjis_cstring(&ext[0x10..0x30]);

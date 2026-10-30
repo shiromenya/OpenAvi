@@ -454,15 +454,18 @@ impl OpenAviApp {
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 let s = &self.st.scene.settings;
-                ui.label(format!(
-                    "{} / {}  [{}/{}]",
+                let last = self.st.last_frame();
+                let digits = ((last + 1).max(1) as f64).log10().floor() as usize + 1;
+                ui.monospace(format!(
+                    "{} / {}  [{:>w$}/{}]",
                     s.frame_rate.timecode(self.st.frame),
-                    s.frame_rate.timecode(self.st.last_frame()),
+                    s.frame_rate.timecode(last),
                     self.st.frame + 1,
-                    self.st.last_frame() + 1
+                    last + 1,
+                    w = digits
                 ));
                 ui.separator();
-                ui.label(format!("{}x{} {:.3}fps", s.width, s.height, s.frame_rate.as_f64()));
+                ui.monospace(format!("{}x{} {:.3}fps", s.width, s.height, s.frame_rate.as_f64()));
                 ui.separator();
                 if !self.st.warnings.is_empty() {
                     ui.colored_label(Color32::YELLOW, format!("⚠ 警告 {}", self.st.warnings.len()))

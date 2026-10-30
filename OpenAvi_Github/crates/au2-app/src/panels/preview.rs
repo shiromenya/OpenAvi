@@ -21,8 +21,8 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     let total_h = ui.available_height().floor();
     ui.set_max_width(total_w);
 
-    // 下部のシークバー＆再生コントロール領域の高さ（マージン込みで約 84px）を残して上部にプレビューキャンバスを配置
-    let control_height = 84.0_f32;
+    // 下部のシークバー＆再生コントロール領域の高さ（76px 固定）を残して上部にプレビューキャンバスを配置
+    let control_height = 76.0_f32;
     let preview_h = (total_h - control_height).max(64.0);
     let preview_size = vec2(total_w.max(64.0), preview_h);
 
@@ -92,12 +92,22 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
 
     render_scene_at(&ctx, &st.scene, frame, st.selected);
 
-    painter.text(
+    let last = st.last_frame();
+    let total_digits = ((last + 1).max(1) as f64).log10().floor() as usize + 1;
+    let overlay_str = format!(
+        "{} / frame {:>width$}",
+        st.scene.settings.frame_rate.timecode(frame),
+        frame + 1,
+        width = total_digits
+    );
+    draw_fixed_pitch_text(
+        &painter,
         canvas.left_top() + vec2(6.0, 4.0),
         Align2::LEFT_TOP,
-        format!("{} / frame {}", st.scene.settings.frame_rate.timecode(frame), frame + 1),
-        FontId::monospace(12.0),
+        &overlay_str,
+        FontId::proportional(12.0),
         Color32::from_white_alpha(160),
+        7.2,
     );
 
     // 3. 動画プレビュー下部にシークバーと再生コントロールボタンを配置
@@ -105,132 +115,190 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     bottom_transport_bar(ui, st);
 }
 
+/// プロポーショナルフォント（LINE Seed JP 等）でも、1文字ずつ等幅のセル中央に配置することで
+/// 秒数やフレーム数の数字切り替え時に横揺れ（ジッター）が起きないように描画します。
+pub fn draw_fixed_pitch_text(
+    painter: &egui::Painter,
+    start_pos: Pos2,
+    align: Align2,
+    text: &str,
+    font_id: FontId,
+    color: Color32,
+    pitch: f32,
+) -> Rect {
+    let char_count = text.chars().count();
+    let total_w = char_count as f32 * pitch;
+    let base_x = match align {
+        Align2::LEFT_TOP | Align2::LEFT_CENTER | Align2::LEFT_BOTTOM => start_pos.x,
+        Align2::CENTER_TOP | Align2::CENTER_CENTER | Align2::CENTER_BOTTOM => start_pos.x - total_w * 0.5,
+        Align2::RIGHT_TOP | Align2::RIGHT_CENTER | Align2::RIGHT_BOTTOM => start_pos.x - total_w,
+    };
+    let y = start_pos.y;
+    let cell_align = match align {
+        Align2::LEFT_TOP | Align2::CENTER_TOP | Align2::RIGHT_TOP => Align2::CENTER_TOP,
+        Align2::LEFT_CENTER | Align2::CENTER_CENTER | Align2::RIGHT_CENTER => Align2::CENTER_CENTER,
+        Align2::LEFT_BOTTOM | Align2::CENTER_BOTTOM | Align2::RIGHT_BOTTOM => Align2::CENTER_BOTTOM,
+    };
+
+    for (i, ch) in text.chars().enumerate() {
+        if ch == ' ' {
+            continue;
+        }
+        let cell_cx = (base_x + (i as f32 + 0.5) * pitch).floor();
+        painter.text(pos2(cell_cx, y), cell_align, ch, font_id.clone(), color);
+    }
+    Rect::from_min_size(pos2(base_x, y), vec2(total_w, font_id.size))
+}
+
 fn bottom_transport_bar(ui: &mut egui::Ui, st: &mut EditorState) {
     let last = st.last_frame();
     let mut f = st.frame;
 
-    egui::Frame::none()
-        .fill(Color32::from_rgb(20, 22, 27))
-        .stroke(Stroke::new(1.0_f32, Color32::from_gray(38)))
-        .rounding(egui::Rounding::same(6.0))
-        .inner_margin(egui::Margin::symmetric(10.0, 6.0))
-        .show(ui, |ui| {
-            // 親 Ui へのフィードバックループ（毎フレームの幅伸縮・振動）を完全に遮断
-            ui.set_max_width(ui.available_width().floor());
+    // トランスポートバー全体の外枠を完全な整数ピクセル座標で確保し、内部のレイアウト計算による横揺れを物理的にゼロにする
+    let bar_w = ui.available_width().floor().max(120.0);
+    let bar_h = 68.0_f32;
+    let (bar_rect, _) = ui.allocate_exact_size(vec2(bar_w, bar_h), Sense::hover());
 
-            // 1段目：シークバー
-            ui.horizontal(|ui| {
-                ui.spacing_mut().slider_width = (ui.available_width() - 8.0).floor().max(80.0);
-                if ui
-                    .add(egui::Slider::new(&mut f, 0..=last).show_value(false))
-                    .on_hover_text("シークバー（ドラッグで再生位置を移動）")
-                    .changed()
-                {
-                    st.set_frame(f);
-                }
-            });
+    ui.painter().rect(
+        bar_rect,
+        egui::Rounding::same(6.0),
+        Color32::from_rgb(20, 22, 27),
+        Stroke::new(1.0_f32, Color32::from_gray(38)),
+    );
 
-            ui.add_space(3.0);
+    let inner = bar_rect.shrink2(vec2(10.0, 6.0));
 
-            // 2段目：プロ仕様 3 カラムレイアウト（秒数・フレーム変化時も再生ボタンが一切揺れない完全固定幅設計）
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
+    // 1段目：シークバー（上段 24px 固定領域）
+    let row1_rect = Rect::from_min_size(inner.min, vec2(inner.width(), 22.0));
+    let mut row1_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(row1_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    row1_ui.spacing_mut().slider_width = (row1_rect.width() - 4.0).floor().max(60.0);
+    if row1_ui
+        .add(egui::Slider::new(&mut f, 0..=last).show_value(false))
+        .on_hover_text("シークバー（ドラッグで再生位置を移動）")
+        .changed()
+    {
+        st.set_frame(f);
+    }
 
-                let rate = st.scene.settings.frame_rate;
-                let tc = rate.timecode(st.frame);
+    // 2段目：タイムコード＆再生コントロールボタン（下段 26px 固定領域、各要素のX座標を完全固定）
+    let row2_top = (inner.bottom() - 26.0).floor();
+    let row2_rect = Rect::from_min_size(pos2(inner.left().floor(), row2_top), vec2(inner.width().floor(), 26.0));
 
-                // タイムコード＆フレーム数表示エリアを固定幅 (190px) に固定し、数字が変わっても右側のボタン群が一切揺れないようにする
-                ui.allocate_ui_with_layout(
-                    vec2(190.0, 24.0),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
-                        let tc_badge = egui::Button::new(
-                            egui::RichText::new("TC")
-                                .monospace()
-                                .size(10.0)
-                                .strong()
-                                .color(Color32::from_rgb(147, 197, 253)),
-                        )
-                        .fill(Color32::from_rgb(28, 34, 46))
-                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(45, 60, 90)))
-                        .min_size(vec2(26.0, 24.0));
-                        ui.add(tc_badge);
+    let rate = st.scene.settings.frame_rate;
+    let tc = rate.timecode(st.frame);
+    let total_digits = ((last + 1).max(1) as f64).log10().floor() as usize + 1;
+    let frame_str = format!("({:>width$} / {} F)", st.frame + 1, last + 1, width = total_digits);
 
-                        ui.label(
-                            egui::RichText::new(&tc)
-                                .monospace()
-                                .size(13.0)
-                                .strong()
-                                .color(Color32::from_rgb(240, 244, 252)),
-                        );
-                        ui.label(
-                            egui::RichText::new(format!("({} / {} F)", st.frame + 1, last + 1))
-                                .monospace()
-                                .size(11.0)
-                                .color(Color32::from_gray(140)),
-                        );
-                    },
-                );
+    // 左カラム（タイムコード表示）：完全固定座標で直接描画し、文字の増減によるレイアウト再計算を一切発生させない
+    let tc_badge_rect = Rect::from_min_size(pos2(row2_rect.left(), row2_rect.top() + 1.0), vec2(26.0, 24.0));
+    ui.painter().rect(
+        tc_badge_rect,
+        egui::Rounding::same(4.0),
+        Color32::from_rgb(28, 34, 46),
+        Stroke::new(1.0_f32, Color32::from_rgb(45, 60, 90)),
+    );
+    ui.painter().text(
+        tc_badge_rect.center(),
+        Align2::CENTER_CENTER,
+        "TC",
+        FontId::monospace(10.0),
+        Color32::from_rgb(147, 197, 253),
+    );
 
-                ui.separator();
+    let tc_text_x = (tc_badge_rect.right() + 6.0).floor();
+    let center_y = row2_rect.center().y.floor();
+    draw_fixed_pitch_text(
+        ui.painter(),
+        pos2(tc_text_x, center_y),
+        Align2::LEFT_CENTER,
+        &tc,
+        FontId::proportional(13.0),
+        Color32::from_rgb(240, 244, 252),
+        8.0,
+    );
+    let frame_text_x = (tc_text_x + 12.0 * 8.0 + 8.0).floor();
+    draw_fixed_pitch_text(
+        ui.painter(),
+        pos2(frame_text_x, center_y),
+        Align2::LEFT_CENTER,
+        &frame_str,
+        FontId::proportional(11.0),
+        Color32::from_gray(145),
+        7.0,
+    );
 
-                let nav_btn = |ui: &mut egui::Ui, text: &'static str, tip: &'static str| -> egui::Response {
-                    ui.add(
-                        egui::Button::new(egui::RichText::new(text).size(12.0).color(Color32::from_gray(225)))
-                            .min_size(vec2(28.0, 24.0)),
-                    )
-                    .on_hover_text(tip)
-                };
+    // 区切り線（左端から 220px の完全固定位置）
+    let sep_x = (row2_rect.left() + 220.0).floor();
+    ui.painter().line_segment(
+        [pos2(sep_x, row2_rect.top() + 3.0), pos2(sep_x, row2_rect.bottom() - 3.0)],
+        Stroke::new(1.0_f32, Color32::from_gray(45)),
+    );
 
-                if nav_btn(ui, "⏮", "先頭フレームへ (Home)").clicked() {
-                    st.set_frame(0);
-                }
-                if nav_btn(ui, "◀", "1 コマ戻る (←)").clicked() {
-                    st.step(-1);
-                }
+    // 中央カラム（再生・コマ送りボタン群）：開始X座標を (sep_x + 10.0) に完全固定
+    let btn_start_x = (sep_x + 10.0).floor();
+    let btn_area_w = (row2_rect.right() - btn_start_x).max(10.0);
+    let btn_rect = Rect::from_min_size(pos2(btn_start_x, row2_rect.top()), vec2(btn_area_w, 26.0));
+    let mut btn_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(btn_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    btn_ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
 
-                // 再生ボタンも固定幅 (96px) の領域に配置し、「再生」「一時停止」の文字数差でも右側ボタンがブレない
-                ui.allocate_ui_with_layout(
-                    vec2(96.0, 24.0),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        let (play_label, play_color) = if st.playing {
-                            ("⏸ 一時停止", Color32::from_rgb(220, 38, 38))
-                        } else {
-                            ("▶ 再生", Color32::from_rgb(37, 99, 235))
-                        };
-                        let play_btn = egui::Button::new(
-                            egui::RichText::new(play_label).strong().size(12.0).color(Color32::WHITE),
-                        )
-                        .fill(play_color)
-                        .min_size(vec2(96.0, 24.0));
-                        if ui.add(play_btn).on_hover_text("再生 / 一時停止 (Space)").clicked() {
-                            st.toggle_play();
-                        }
-                    },
-                );
+    let nav_btn = |ui: &mut egui::Ui, text: &'static str, tip: &'static str| -> egui::Response {
+        ui.add_sized(
+            vec2(28.0, 24.0),
+            egui::Button::new(egui::RichText::new(text).size(12.0).color(Color32::from_gray(225))),
+        )
+        .on_hover_text(tip)
+    };
 
-                if nav_btn(ui, "▶|", "1 コマ進む (→)").clicked() {
-                    st.step(1);
-                }
-                if nav_btn(ui, "⏭", "最終フレームへ (End)").clicked() {
-                    st.set_frame(last);
-                }
+    if nav_btn(&mut btn_ui, "⏮", "先頭フレームへ (Home)").clicked() {
+        st.set_frame(0);
+    }
+    if nav_btn(&mut btn_ui, "◀", "1 コマ戻る (←)").clicked() {
+        st.step(-1);
+    }
 
-                // 右端の解像度表示：十分な余白（110px 以上）がある時のみ描画し、左側のボタン群と決して衝突させない
-                if ui.available_width() >= 110.0 {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let s = &st.scene.settings;
-                        ui.label(
-                            egui::RichText::new(format!("{}×{}  {:.0}fps", s.width, s.height, s.frame_rate.as_f64()))
-                                .size(11.0)
-                                .color(Color32::from_gray(145)),
-                        );
-                    });
-                }
-            });
-        });
+    let (play_label, play_color) = if st.playing {
+        ("⏸ 一時停止", Color32::from_rgb(220, 38, 38))
+    } else {
+        ("▶ 再生", Color32::from_rgb(37, 99, 235))
+    };
+    let play_btn = egui::Button::new(
+        egui::RichText::new(play_label).strong().size(12.0).color(Color32::WHITE),
+    )
+    .fill(play_color);
+    if btn_ui
+        .add_sized(vec2(96.0, 24.0), play_btn)
+        .on_hover_text("再生 / 一時停止 (Space)")
+        .clicked()
+    {
+        st.toggle_play();
+    }
+
+    if nav_btn(&mut btn_ui, "▶|", "1 コマ進む (→)").clicked() {
+        st.step(1);
+    }
+    if nav_btn(&mut btn_ui, "⏭", "最終フレームへ (End)").clicked() {
+        st.set_frame(last);
+    }
+
+    // 右端の解像度表示（十分な余白がある時のみ右端固定座標に描画）
+    if row2_rect.width() >= 540.0 {
+        let s = &st.scene.settings;
+        ui.painter().text(
+            pos2(row2_rect.right().floor(), center_y),
+            Align2::RIGHT_CENTER,
+            format!("{}×{}  {:.0}fps", s.width, s.height, s.frame_rate.as_f64()),
+            FontId::monospace(11.0),
+            Color32::from_gray(145),
+        );
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1068,6 +1136,211 @@ fn u32_to_color32(rgb: u32) -> Color32 {
     Color32::from_rgb(r, g, b)
 }
 
+/// AviUtl テキストの1文字レイアウト要素（キャンバス座標系 `1280x720` 等におけるオブジェクト原点からのローカルオフセット）
+#[derive(Debug, Clone)]
+struct TextCharLayout {
+    ch: String,
+    local_x: f32,
+    local_y: f32,
+    color_override: Option<Color32>,
+}
+
+/// AviUtl テキスト制御タグ（`<#rrggbb>`, `<s...>`, `<r...>`, `<w...>`, `<p...>` 等）を解析しつつ、
+/// `表示速度`・`align` (0..17 横書き/縦書き)・`spacing_x`・`spacing_y`・`monospace` に従った文字配置と全体境界を計算します。
+fn layout_aviutl_text(
+    ctx: &DrawCtx,
+    src: &au2_core::Effect,
+    rel: Frame,
+) -> (Vec<TextCharLayout>, f32) {
+    let raw_text = src.text("text").unwrap_or_default().replace("\r\n", "\n");
+    if raw_text.is_empty() {
+        return (Vec::new(), 0.0);
+    }
+
+    let raw_size = src.eval("サイズ", rel, 34.0).max(1.0) as f32;
+    let speed = src.eval("表示速度", rel, 0.0);
+    let time_sec = rel as f64 / ctx.fps.max(1.0);
+    let max_visible_chars = if speed > 0.0 {
+        Some((time_sec * speed).floor().max(0.0) as usize)
+    } else {
+        None
+    };
+
+    let align = src
+        .text("align")
+        .and_then(|s| s.trim().parse::<u8>().ok())
+        .unwrap_or(0);
+    let spacing_x = src
+        .text("spacing_x")
+        .and_then(|s| s.trim().parse::<i32>().ok())
+        .map(|v| (v as i8) as f32)
+        .unwrap_or(0.0);
+    let spacing_y = src
+        .text("spacing_y")
+        .and_then(|s| s.trim().parse::<i32>().ok())
+        .map(|v| (v as i8) as f32)
+        .unwrap_or(0.0);
+    let monospace = src
+        .text("monospace")
+        .and_then(|s| s.trim().parse::<u8>().ok())
+        .unwrap_or(0)
+        != 0;
+
+    // 制御タグ (<#rrggbb> 等) の解析と行分割
+    let mut lines: Vec<Vec<(char, Option<Color32>)>> = vec![Vec::new()];
+    let mut current_color: Option<Color32> = None;
+    let mut visible_count = 0usize;
+    let chars: Vec<char> = raw_text.chars().collect();
+    let mut idx = 0;
+    while idx < chars.len() {
+        if let Some(limit) = max_visible_chars {
+            if visible_count >= limit {
+                break;
+            }
+        }
+        let c = chars[idx];
+        if c == '<' {
+            if let Some(close_rel) = chars[idx + 1..].iter().position(|&x| x == '>') {
+                let tag: String = chars[idx + 1..idx + 1 + close_rel].iter().collect();
+                let tag_trim = tag.trim();
+                if let Some(hex) = tag_trim.strip_prefix('#') {
+                    if hex.is_empty() {
+                        current_color = None;
+                    } else if hex.len() >= 6 {
+                        if let Some(col) = parse_color(&hex[..6]) {
+                            current_color = Some(col);
+                        }
+                    }
+                    idx += close_rel + 2;
+                    continue;
+                } else if tag_trim.starts_with('s')
+                    || tag_trim.starts_with('r')
+                    || tag_trim.starts_with('w')
+                    || tag_trim.starts_with('c')
+                    || tag_trim.starts_with('p')
+                {
+                    idx += close_rel + 2;
+                    continue;
+                }
+            }
+        }
+        if c == '\n' {
+            lines.push(Vec::new());
+        } else {
+            if let Some(last_line) = lines.last_mut() {
+                last_line.push((c, current_color));
+            }
+            visible_count += 1;
+        }
+        idx += 1;
+    }
+
+    // 末尾の空行が改行由来でない場合は維持しつつ、各文字のキャンバス幅を算出
+    let measure_font_sz = 32.0_f32;
+    let char_canvas_width = |ch: char| -> f32 {
+        if monospace {
+            return raw_size;
+        }
+        if ch == ' ' {
+            return raw_size * 0.35;
+        }
+        if ch == '　' {
+            return raw_size * 0.92;
+        }
+        let g = ctx.painter.layout_no_wrap(
+            ch.to_string(),
+            FontId::proportional(measure_font_sz),
+            Color32::WHITE,
+        );
+        let ratio = (g.size().x / measure_font_sz).clamp(0.3, 1.25);
+        raw_size * ratio
+    };
+
+    let mut out = Vec::new();
+    let mut max_bottom_y: f32;
+
+    if align < 9 {
+        // 横書き (align 0..8)
+        let h_align = align % 3; // 0: 左寄, 1: 中央, 2: 右寄
+        let v_align = (align / 3) % 3; // 0: 上, 1: 中, 2: 下
+        let num_lines = lines.len().max(1);
+        let line_step_y = (raw_size + spacing_y).max(1.0);
+        let total_h = num_lines as f32 * raw_size + (num_lines.saturating_sub(1)) as f32 * spacing_y;
+        let start_y = match v_align {
+            0 => 0.0,
+            1 => -total_h * 0.5,
+            _ => -total_h,
+        };
+        max_bottom_y = start_y + total_h;
+
+        for (row_idx, line) in lines.iter().enumerate() {
+            if line.is_empty() {
+                continue;
+            }
+            let widths: Vec<f32> = line.iter().map(|&(ch, _)| char_canvas_width(ch)).collect();
+            let line_w: f32 = widths.iter().sum::<f32>()
+                + (line.len().saturating_sub(1) as f32) * spacing_x;
+            let start_x = match h_align {
+                0 => 0.0,
+                1 => -line_w * 0.5,
+                _ => -line_w,
+            };
+            let cy = start_y + row_idx as f32 * line_step_y + raw_size * 0.5;
+            let mut cursor_x = start_x;
+            for ((ch, col_ov), w) in line.iter().zip(widths.into_iter()) {
+                let cx = cursor_x + w * 0.5;
+                out.push(TextCharLayout {
+                    ch: ch.to_string(),
+                    local_x: cx,
+                    local_y: cy,
+                    color_override: *col_ov,
+                });
+                cursor_x += w + spacing_x;
+            }
+        }
+    } else {
+        // 縦書き (align 9..17)
+        let v_align = (align - 9) % 3; // 0: 上寄, 1: 中央, 2: 下寄
+        let h_align = ((align - 9) / 3) % 3; // 0: 右, 1: 中, 2: 左
+        let num_cols = lines.len().max(1);
+        let col_step_x = (raw_size + spacing_x).max(1.0);
+        let char_step_y = (raw_size + spacing_y).max(1.0);
+        let total_w = num_cols as f32 * raw_size + (num_cols.saturating_sub(1)) as f32 * spacing_x;
+        let col0_cx = match h_align {
+            0 => -raw_size * 0.5,
+            1 => total_w * 0.5 - raw_size * 0.5,
+            _ => total_w - raw_size * 0.5,
+        };
+        max_bottom_y = raw_size * 0.5;
+
+        for (col_idx, line) in lines.iter().enumerate() {
+            if line.is_empty() {
+                continue;
+            }
+            let n_chars = line.len();
+            let col_h = n_chars as f32 * raw_size + (n_chars.saturating_sub(1)) as f32 * spacing_y;
+            let start_y = match v_align {
+                0 => 0.0,
+                1 => -col_h * 0.5,
+                _ => -col_h,
+            };
+            max_bottom_y = max_bottom_y.max(start_y + col_h);
+            let cx = col0_cx - col_idx as f32 * col_step_x;
+            for (char_row, (ch, col_ov)) in line.iter().enumerate() {
+                let cy = start_y + char_row as f32 * char_step_y + raw_size * 0.5;
+                out.push(TextCharLayout {
+                    ch: ch.to_string(),
+                    local_x: cx,
+                    local_y: cy,
+                    color_override: *col_ov,
+                });
+            }
+        }
+    }
+
+    (out, max_bottom_y)
+}
+
 fn draw_object(ctx: &DrawCtx, layer_idx: usize, obj: &TimelineObject, rel: Frame, selected: bool) -> Option<Rect> {
     let Some(src) = obj.source() else { return None };
     if !src.enabled {
@@ -1082,6 +1355,89 @@ fn draw_object(ctx: &DrawCtx, layer_idx: usize, obj: &TimelineObject, rel: Frame
         _ => return None,
     }
 
+    // テキストの「文字毎に個別オブジェクト (`check0` = 1)」が有効な場合、
+    // 各文字を個別のサブオブジェクト (`obj.index = 0..N-1`, `obj.num = N`) としてエフェクト評価・描画する
+    if matches!(src.kind, EffectKind::Text) {
+        let is_split = src.eval("文字毎に個別オブジェクト", rel, src.eval("check0", rel, 0.0)) >= 0.5;
+        if is_split {
+            let (chars_layout, _) = layout_aviutl_text(ctx, src, rel);
+            if chars_layout.is_empty() {
+                return None;
+            }
+            let display_on_moving = src.eval("移動座標上に表示する", rel, src.eval("check1", rel, 0.0)) >= 0.5;
+            let raw_size = src.eval("サイズ", rel, 34.0).max(1.0);
+            let total_num = chars_layout.len() as i64;
+            let mut combined: Option<Rect> = None;
+            for (idx, item) in chars_layout.iter().enumerate() {
+                if item.ch == " " || item.ch == "　" {
+                    continue;
+                }
+                let init_ox = if display_on_moving { 0.0 } else { item.local_x as f64 };
+                let init_oy = if display_on_moving { 0.0 } else { item.local_y as f64 };
+                let single_char = TextCharLayout {
+                    ch: item.ch.clone(),
+                    local_x: 0.0,
+                    local_y: 0.0,
+                    color_override: item.color_override,
+                };
+                if let Some(b) = draw_object_sub(
+                    ctx,
+                    layer_idx,
+                    obj,
+                    src,
+                    rel,
+                    idx as i64,
+                    total_num,
+                    init_ox,
+                    init_oy,
+                    raw_size,
+                    Some(&single_char),
+                    false,
+                ) {
+                    combined = Some(combined.map(|prev| prev.union(b)).unwrap_or(b));
+                }
+            }
+            if selected {
+                if let Some(b) = combined {
+                    ctx.painter.rect_stroke(b.expand(2.0), 0.0, Stroke::new(1.0_f32, Color32::from_rgb(255, 200, 0)));
+                }
+            }
+            return combined;
+        }
+    }
+
+    let approx_size = src.eval("サイズ", rel, 100.0).max(16.0);
+    draw_object_sub(
+        ctx,
+        layer_idx,
+        obj,
+        src,
+        rel,
+        0,
+        1,
+        0.0,
+        0.0,
+        approx_size,
+        None,
+        selected,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_object_sub(
+    ctx: &DrawCtx,
+    layer_idx: usize,
+    obj: &TimelineObject,
+    src: &au2_core::Effect,
+    rel: Frame,
+    sub_index: i64,
+    sub_num: i64,
+    init_ox: f64,
+    init_oy: f64,
+    approx_size: f64,
+    single_text_char: Option<&TextCharLayout>,
+    selected: bool,
+) -> Option<Rect> {
     // 標準描画 / 拡張描画パラメータ
     let draw = obj
         .effect(&EffectKind::StandardDraw)
@@ -1103,13 +1459,13 @@ fn draw_object(ctx: &DrawCtx, layer_idx: usize, obj: &TimelineObject, rel: Frame
     let time_sec = rel as f64 / ctx.fps.max(1.0);
     let total_sec = obj.length() as f64 / ctx.fps.max(1.0);
 
-    let approx_size = src.eval("サイズ", rel, 100.0).max(16.0);
-
     // Lua スクリプト実行ステートの初期化
     let mut lua_st = LuaObjState {
         x: base_x,
         y: base_y,
         z: base_z,
+        ox: init_ox,
+        oy: init_oy,
         rx: base_rx,
         ry: base_ry,
         rz: base_rz,
@@ -1125,6 +1481,8 @@ fn draw_object(ctx: &DrawCtx, layer_idx: usize, obj: &TimelineObject, rel: Frame
         frame: rel as i64,
         totalframe: obj.length() as i64,
         layer: (layer_idx + 1) as i64,
+        index: sub_index,
+        num: sub_num,
         screen_w: ctx.screen_w,
         screen_h: ctx.screen_h,
         framerate: ctx.fps,
@@ -1645,7 +2003,11 @@ fn draw_object(ctx: &DrawCtx, layer_idx: usize, obj: &TimelineObject, rel: Frame
             let inst_alpha = (dc.alpha * gt.alpha).clamp(0.0, 1.0) as f32;
             let prim = dc.primitive.as_ref().or(lua_st.loaded_primitive.as_ref());
             let inst_transform_3d = if obj.camera_target {
-                Some(([inst_raw_x, inst_raw_y, inst_raw_z], [inst_raw_rx, inst_raw_ry, inst_raw_rz]))
+                Some((
+                    [inst_raw_x, inst_raw_y, inst_raw_z],
+                    [inst_raw_rx, inst_raw_ry, inst_raw_rz],
+                    inst_raw_zoom as f32,
+                ))
             } else {
                 None
             };
@@ -1669,6 +2031,7 @@ fn draw_object(ctx: &DrawCtx, layer_idx: usize, obj: &TimelineObject, rel: Frame
                 prim,
                 &inst_fx,
                 inst_transform_3d,
+                single_text_char,
                 selected,
             ) {
                 combined_bounds = Some(combined_bounds.map(|prev| prev.union(b)).unwrap_or(b));
@@ -1687,7 +2050,7 @@ fn draw_object(ctx: &DrawCtx, layer_idx: usize, obj: &TimelineObject, rel: Frame
     }
 
     let transform_3d = if obj.camera_target {
-        Some(([raw_x, raw_y, raw_z], [raw_rx, raw_ry, raw_rz]))
+        Some(([raw_x, raw_y, raw_z], [raw_rx, raw_ry, raw_rz], raw_zoom as f32))
     } else {
         None
     };
@@ -1718,6 +2081,7 @@ fn draw_object(ctx: &DrawCtx, layer_idx: usize, obj: &TimelineObject, rel: Frame
                         lua_st.loaded_primitive.as_ref(),
                         &tile_fx,
                         transform_3d,
+                        single_text_char,
                         false,
                     ) {
                         loop_bounds = Some(loop_bounds.map(|prev| prev.union(b)).unwrap_or(b));
@@ -1746,6 +2110,7 @@ fn draw_object(ctx: &DrawCtx, layer_idx: usize, obj: &TimelineObject, rel: Frame
         lua_st.loaded_primitive.as_ref(),
         &fx,
         transform_3d,
+        single_text_char,
         selected,
     );
 
@@ -1850,7 +2215,8 @@ fn draw_single_instance(
     alpha: f32,
     loaded_prim: Option<&LuaLoadedPrimitive>,
     fx: &FilterVisuals,
-    transform_3d: Option<([f64; 3], [f64; 3])>,
+    transform_3d: Option<([f64; 3], [f64; 3], f32)>,
+    single_text_char: Option<&TextCharLayout>,
     selected: bool,
 ) -> Option<Rect> {
     let center = ctx.canvas.center() + vec2(x, y) * ctx.scale;
@@ -1932,11 +2298,13 @@ fn draw_single_instance(
         Color32::from_rgba_unmultiplied(r as u8, g as u8, b as u8, c.a()).gamma_multiply(eff_alpha)
     };
 
-    // ドロップシャドウの背面描画
-    if let Some(sh_off) = fx.shadow_offset {
-        let sh_center = center + sh_off * ctx.scale;
-        let sh_col = Color32::from_black_alpha((fx.shadow_alpha * alpha * 180.0) as u8);
-        painter.circle_filled(sh_center, 45.0 * k, sh_col);
+    // ドロップシャドウの背面描画（テキストはグリフ単位の正確なシャドーを描画するため除外）
+    if !matches!(src.kind, EffectKind::Text) {
+        if let Some(sh_off) = fx.shadow_offset {
+            let sh_center = center + sh_off * ctx.scale;
+            let sh_col = Color32::from_black_alpha((fx.shadow_alpha * alpha * 180.0) as u8);
+            painter.circle_filled(sh_center, 45.0 * k, sh_col);
+        }
     }
 
     // カスタムオブジェクト (.obj) 等で `obj.load("figure", ...)` や `obj.mes(...)` が実行された場合
@@ -1981,8 +2349,8 @@ fn draw_single_instance(
                     }).collect(),
                 };
 
-                let outer_screen = if let (Some(cam), Some((w_pos, rot))) = (ctx.camera, transform_3d) {
-                    project_3d_points(&cam, ctx.canvas, ctx.scale, w_pos, rot, &local_pts, zoom / ctx.scale)
+                let outer_screen = if let (Some(cam), Some((w_pos, rot, r_zoom))) = (ctx.camera, transform_3d) {
+                    project_3d_points(&cam, ctx.canvas, ctx.scale, w_pos, rot, &local_pts, r_zoom)
                 } else {
                     let rot = Rot2::from_angle(angle);
                     Some(local_pts.iter().map(|&[lx, ly]| center + rot * vec2(lx * k, ly * k)).collect())
@@ -1991,8 +2359,8 @@ fn draw_single_instance(
 
                 let inner_screen = if inner_ratio > 0.01 {
                     let inner_local: Vec<[f32; 2]> = local_pts.iter().map(|&[lx, ly]| [lx * inner_ratio, ly * inner_ratio]).collect();
-                    if let (Some(cam), Some((w_pos, rot))) = (ctx.camera, transform_3d) {
-                        project_3d_points(&cam, ctx.canvas, ctx.scale, w_pos, rot, &inner_local, zoom / ctx.scale)
+                    if let (Some(cam), Some((w_pos, rot, r_zoom))) = (ctx.camera, transform_3d) {
+                        project_3d_points(&cam, ctx.canvas, ctx.scale, w_pos, rot, &inner_local, r_zoom)
                     } else {
                         let rot = Rot2::from_angle(angle);
                         Some(inner_local.iter().map(|&[lx, ly]| center + rot * vec2(lx * k, ly * k)).collect())
@@ -2123,8 +2491,8 @@ fn draw_single_instance(
             };
 
             // 外周頂点をスクリーン座標に変換（3Dカメラ投影 or 2D平面変換）
-            let screen_pts: Option<Vec<Pos2>> = if let (Some(cam), Some((w_pos, rot))) = (ctx.camera, transform_3d) {
-                project_3d_points(&cam, ctx.canvas, ctx.scale, w_pos, rot, &local_pts, zoom / ctx.scale)
+            let screen_pts: Option<Vec<Pos2>> = if let (Some(cam), Some((w_pos, rot, r_zoom))) = (ctx.camera, transform_3d) {
+                project_3d_points(&cam, ctx.canvas, ctx.scale, w_pos, rot, &local_pts, r_zoom)
             } else {
                 let rot = Rot2::from_angle(angle);
                 Some(local_pts.iter().map(|&[lx, ly]| center + rot * vec2(lx * k, ly * k)).collect())
@@ -2140,8 +2508,8 @@ fn draw_single_instance(
                     .iter()
                     .map(|&[lx, ly]| [lx * inner_ratio, ly * inner_ratio])
                     .collect();
-                if let (Some(cam), Some((w_pos, rot))) = (ctx.camera, transform_3d) {
-                    project_3d_points(&cam, ctx.canvas, ctx.scale, w_pos, rot, &inner_local, zoom / ctx.scale)
+                if let (Some(cam), Some((w_pos, rot, r_zoom))) = (ctx.camera, transform_3d) {
+                    project_3d_points(&cam, ctx.canvas, ctx.scale, w_pos, rot, &inner_local, r_zoom)
                 } else {
                     let rot = Rot2::from_angle(angle);
                     Some(inner_local.iter().map(|&[lx, ly]| center + rot * vec2(lx * k, ly * k)).collect())
@@ -2219,59 +2587,220 @@ fn draw_single_instance(
             // epaint のフォントアトラスは巨大フォント（>100pt）でアトラス境界違反・クラッシュを起こすため、
             // フォントのラスタライズサイズは最大 96.0 に抑え、それ以上の超巨大テキストはメッシュ頂点スケーリングで安全に描画する
             let max_font_size = 96.0_f32;
-            let raw_size = (src.eval("サイズ", rel, 34.0) as f32 * k).max(1.0);
-            let (font_size, scale_up) = if raw_size > max_font_size {
-                (max_font_size, (raw_size / max_font_size).min(100.0))
+            let raw_canvas_size = src.eval("サイズ", rel, 34.0).max(1.0) as f32;
+            let scaled_raw_size = (raw_canvas_size * k).max(1.0);
+            let (font_size, scale_up) = if scaled_raw_size > max_font_size {
+                (max_font_size, (scaled_raw_size / max_font_size).min(100.0))
             } else {
-                (raw_size, 1.0)
+                (scaled_raw_size, 1.0)
             };
-            let color = apply_tint(src.text("color").and_then(parse_color).unwrap_or(Color32::WHITE));
-            let text = src.text("text").unwrap_or_default().replace("\r\n", "\n");
 
-            if fx.glow_strength > 0.01 {
-                let diff_r = (fx.glow_radius * k).clamp(4.0, 60.0);
-                let glow_alpha = (fx.glow_strength * alpha * 40.0).clamp(10.0, 150.0) as u8;
-                let gcol = fx.glow_color.unwrap_or(Color32::from_rgba_unmultiplied(255, 240, 190, glow_alpha));
-                painter.circle_filled(center, diff_r * 1.4, gcol.gamma_multiply(0.35));
+            let base_color = src.text("color").and_then(parse_color).unwrap_or(Color32::WHITE);
+            let color2 = src.text("color2").and_then(parse_color).unwrap_or(Color32::BLACK);
+            let text_type = src
+                .text("type")
+                .and_then(|s| s.trim().parse::<u8>().ok())
+                .unwrap_or(0);
+
+            // 文字レイアウトの取得（個別オブジェクト時は単一文字、非分割時は全文レイアウト）
+            let (char_items, mirror_bottom_y): (Vec<TextCharLayout>, f32) = if let Some(single) = single_text_char {
+                (vec![single.clone()], raw_canvas_size * 0.5)
+            } else {
+                layout_aviutl_text(ctx, src, rel)
+            };
+
+            if char_items.is_empty() {
+                return None;
             }
 
-            let render_safe_text = |p: &egui::Painter, target_center: Pos2, galley: std::sync::Arc<egui::epaint::Galley>, col: Color32, text_angle: f32| {
-                let unscaled_half = galley.size() / 2.0;
-                let unscaled_pos = target_center - Rot2::from_angle(text_angle) * unscaled_half;
-                let shape = egui::epaint::TextShape::new(unscaled_pos, galley, col).with_angle(text_angle);
-                if scale_up > 1.001 {
+            // 3D回転（X軸回転・Y軸回転）が設定されているか判定
+            let use_3d_mesh = if let (Some((_, rot_3d, _)), Some(_)) = (transform_3d, &ctx.camera) {
+                rot_3d[0].abs() > 0.1 || rot_3d[1].abs() > 0.1
+            } else {
+                false
+            };
+
+            // ローカルキャンバス座標 `local_off` にある1つの Galley を、3D透視変換または2D回転スケーリングで描画するクロージャ
+            let draw_galley_at = |p: &egui::Painter,
+                                  local_off: egui::Vec2,
+                                  galley: std::sync::Arc<egui::epaint::Galley>,
+                                  col: Color32,
+                                  flip_y_around: Option<f32>|
+             -> Option<Rect> {
+                let half = galley.size() * 0.5;
+                if use_3d_mesh || scale_up > 1.001 || flip_y_around.is_some() {
+                    let shape = egui::epaint::TextShape::new(Pos2::ZERO, galley.clone(), col);
                     let clipped = egui::epaint::ClippedShape {
                         clip_rect: egui::Rect::EVERYTHING,
                         shape: egui::Shape::Text(shape),
                     };
                     let primitives = p.ctx().tessellate(vec![clipped], p.ctx().pixels_per_point());
+                    let inv_k = 1.0 / k.max(0.0001);
+                    let rot2 = Rot2::from_angle(angle);
+                    let mut bounds: Option<Rect> = None;
                     for prim in primitives {
                         if let egui::epaint::Primitive::Mesh(mut mesh) = prim.primitive {
+                            let mut all_valid = true;
                             for v in &mut mesh.vertices {
-                                v.pos = target_center + (v.pos - target_center) * scale_up;
+                                v.color = col;
+                                let gx = (v.pos.x - half.x) * scale_up * inv_k;
+                                let gy = (v.pos.y - half.y) * scale_up * inv_k;
+                                let lx = local_off.x + gx;
+                                let mut ly = local_off.y + gy;
+                                if let Some(my) = flip_y_around {
+                                    ly = my * 2.0 - ly;
+                                }
+                                if use_3d_mesh {
+                                    if let (Some((w_pos, rot_3d, r_zoom)), Some(ref cam)) = (transform_3d, &ctx.camera) {
+                                        let p_rot = rotate_3d(
+                                            [(lx * r_zoom) as f64, (ly * r_zoom) as f64, 0.0],
+                                            rot_3d[0],
+                                            rot_3d[1],
+                                            rot_3d[2],
+                                        );
+                                        let pw = [
+                                            w_pos[0] + p_rot[0],
+                                            w_pos[1] + p_rot[1],
+                                            w_pos[2] + p_rot[2],
+                                        ];
+                                        if let Some((sx, sy, _, _)) = cam.project(pw) {
+                                            v.pos = ctx.canvas.center() + vec2(sx, sy) * ctx.scale;
+                                        } else {
+                                            all_valid = false;
+                                            break;
+                                        }
+                                    }
+                                } else {
+                                    v.pos = center + rot2 * (vec2(lx, ly) * k);
+                                }
                             }
-                            p.add(egui::Shape::Mesh(mesh));
+                            if all_valid && !mesh.vertices.is_empty() {
+                                let mut min_p = mesh.vertices[0].pos;
+                                let mut max_p = mesh.vertices[0].pos;
+                                for v in &mesh.vertices {
+                                    min_p = min_p.min(v.pos);
+                                    max_p = max_p.max(v.pos);
+                                }
+                                let r = Rect::from_min_max(min_p, max_p);
+                                bounds = Some(bounds.map(|b| b.union(r)).unwrap_or(r));
+                                p.add(egui::Shape::Mesh(mesh));
+                            }
                         }
                     }
+                    bounds
                 } else {
-                    p.add(shape);
+                    let rot2 = Rot2::from_angle(angle);
+                    let scaled_off: egui::Vec2 = local_off * k;
+                    let target_center = center + (rot2 * scaled_off);
+                    let unscaled_pos = target_center - (rot2 * half);
+                    let r = Rect::from_center_size(target_center, galley.size());
+                    p.add(egui::epaint::TextShape::new(unscaled_pos, galley, col).with_angle(angle));
+                    Some(r)
                 }
             };
 
-            if fx.chroma_shift > 0.5 {
-                let shift_vec = vec2(fx.chroma_angle.cos(), fx.chroma_angle.sin()) * fx.chroma_shift * ctx.scale;
-                let r_col = Color32::from_rgba_unmultiplied(255, 50, 50, (alpha * 150.0) as u8);
-                let b_col = Color32::from_rgba_unmultiplied(50, 180, 255, (alpha * 150.0) as u8);
-                let g1 = painter.layout(text.clone(), FontId::proportional(font_size), r_col, f32::INFINITY);
-                let g2 = painter.layout(text.clone(), FontId::proportional(font_size), b_col, f32::INFINITY);
-                render_safe_text(painter, center - shift_vec, g1, r_col, angle);
-                render_safe_text(painter, center + shift_vec, g2, b_col, angle);
+            let mut total_bounds: Option<Rect> = None;
+
+            for item in &char_items {
+                if item.ch == " " || item.ch == "　" {
+                    continue;
+                }
+                let item_off = vec2(item.local_x, item.local_y);
+                let main_col = apply_tint(item.color_override.unwrap_or(base_color));
+                let galley = painter.layout_no_wrap(item.ch.clone(), FontId::proportional(font_size), main_col);
+
+                // 1. グロー効果 (`fx.glow_strength`)
+                if fx.glow_strength > 0.01 {
+                    let glow_alpha = (fx.glow_strength * alpha * 38.0).clamp(8.0, 140.0) as u8;
+                    let gcol = fx
+                        .glow_color
+                        .unwrap_or(Color32::from_rgb(
+                            main_col.r().saturating_add(50),
+                            main_col.g().saturating_add(50),
+                            main_col.b().saturating_add(50),
+                        ));
+                    let gc = Color32::from_rgba_unmultiplied(gcol.r(), gcol.g(), gcol.b(), glow_alpha);
+                    let gr = (fx.glow_radius * 0.12).clamp(1.5, 8.0);
+                    for (dx, dy) in [(-gr, 0.0), (gr, 0.0), (0.0, -gr), (0.0, gr)] {
+                        let _ = draw_galley_at(painter, item_off + vec2(dx, dy), galley.clone(), gc.gamma_multiply(0.45), None);
+                    }
+                }
+                if fx.glow_only {
+                    continue;
+                }
+
+                // 2. シャドーフィルタ (`fx.shadow_offset`)
+                if let Some(sh_off) = fx.shadow_offset {
+                    let sh_col = Color32::from_black_alpha((fx.shadow_alpha * alpha * 200.0) as u8);
+                    let _ = draw_galley_at(painter, item_off + sh_off, galley.clone(), sh_col, None);
+                }
+
+                // 3. 文字装飾 (`type = 1..4`: 影付き / 縁取り) または 縁取りフィルタ (`fx.border_width`)
+                if text_type == 1 || text_type == 2 {
+                    let sh_a = if text_type == 1 { 0.85 } else { 0.45 };
+                    let d = (raw_canvas_size * 0.07).clamp(1.5, 6.0);
+                    let sc = color2.gamma_multiply(alpha * sh_a);
+                    let _ = draw_galley_at(painter, item_off + vec2(d, d), galley.clone(), sc, None);
+                } else if text_type == 3 || text_type == 4 || fx.border_width > 0.5 {
+                    let bw = if fx.border_width > 0.5 {
+                        fx.border_width
+                    } else if text_type == 3 {
+                        (raw_canvas_size * 0.065).clamp(1.5, 5.0)
+                    } else {
+                        (raw_canvas_size * 0.035).clamp(1.0, 2.5)
+                    };
+                    let bc = if fx.border_width > 0.5 {
+                        fx.border_color.unwrap_or(color2)
+                    } else {
+                        color2
+                    }
+                    .gamma_multiply(alpha);
+                    let diag = bw * 0.7;
+                    for (dx, dy) in [
+                        (-bw, 0.0),
+                        (bw, 0.0),
+                        (0.0, -bw),
+                        (0.0, bw),
+                        (-diag, -diag),
+                        (diag, -diag),
+                        (-diag, diag),
+                        (diag, diag),
+                    ] {
+                        let _ = draw_galley_at(painter, item_off + vec2(dx, dy), galley.clone(), bc, None);
+                    }
+                }
+
+                // 4. 色ズレ (`fx.chroma_shift`)
+                if fx.chroma_shift > 0.5 {
+                    let shift_canvas = vec2(fx.chroma_angle.cos(), fx.chroma_angle.sin()) * fx.chroma_shift;
+                    let r_col = Color32::from_rgba_unmultiplied(255, 50, 50, (alpha * 150.0) as u8);
+                    let b_col = Color32::from_rgba_unmultiplied(50, 180, 255, (alpha * 150.0) as u8);
+                    let _ = draw_galley_at(painter, item_off - shift_canvas, galley.clone(), r_col, None);
+                    let _ = draw_galley_at(painter, item_off + shift_canvas, galley.clone(), b_col, None);
+                }
+
+                // 5. 凸エッジ (`fx.bevel_width`)
+                if fx.bevel_width > 0.5 {
+                    let bd = (fx.bevel_width * 0.35).clamp(0.8, 3.5);
+                    let hi_col = Color32::from_white_alpha((alpha * 110.0) as u8);
+                    let lo_col = Color32::from_black_alpha((alpha * 140.0) as u8);
+                    let _ = draw_galley_at(painter, item_off + vec2(bd, bd), galley.clone(), lo_col, None);
+                    let _ = draw_galley_at(painter, item_off - vec2(bd * 0.8, bd * 0.8), galley.clone(), hi_col, None);
+                }
+
+                // 6. 本体文字描画
+                if let Some(r) = draw_galley_at(painter, item_off, galley.clone(), main_col, None) {
+                    total_bounds = Some(total_bounds.map(|b| b.union(r)).unwrap_or(r));
+                }
+
+                // 7. ミラー反射 (`fx.mirror_alpha`)
+                if fx.mirror_alpha > 0.01 {
+                    let m_col = main_col.gamma_multiply(fx.mirror_alpha * 0.45);
+                    let _ = draw_galley_at(painter, item_off, galley, m_col, Some(mirror_bottom_y));
+                }
             }
-            let galley = painter.layout(text, FontId::proportional(font_size), color, f32::INFINITY);
-            let scaled_size = galley.size() * scale_up;
-            let r = Rect::from_center_size(center, scaled_size);
-            render_safe_text(painter, center, galley, color, angle);
-            Some(r)
+
+            total_bounds
         }
         EffectKind::Scene => {
             // サブシーンオブジェクト: Scene 1..49 を再帰的にレンダリング
@@ -2534,25 +3063,6 @@ fn draw_filter_object(ctx: &DrawCtx, obj: &TimelineObject, rel: Frame) {
             }
         }
     }
-}
-
-fn polygon(center: Pos2, radius: f32, sides: usize, angle: f32) -> Vec<Pos2> {
-    (0..sides)
-        .map(|i| {
-            let a = angle - PI / 2.0 + TAU * i as f32 / sides as f32;
-            center + vec2(a.cos(), a.sin()) * radius
-        })
-        .collect()
-}
-
-fn star(center: Pos2, radius: f32, angle: f32) -> Vec<Pos2> {
-    (0..10)
-        .map(|i| {
-            let r = if i % 2 == 0 { radius } else { radius * 0.4 };
-            let a = angle - PI / 2.0 + TAU * i as f32 / 10.0;
-            center + vec2(a.cos(), a.sin()) * r
-        })
-        .collect()
 }
 
 fn rotated_rect(r: Rect, angle: f32) -> Vec<Pos2> {

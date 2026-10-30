@@ -771,316 +771,253 @@ impl PluginRegistry {
 
 /// 拡張編集互換の標準アニメーション効果スクリプト（クリーンルーム実装）
 const BUILTIN_EXEDIT_ANM: &str = r#"@震える
---track0:X,0,500,5
---track1:Y,0,500,5
---track2:Z,0,500,0
---track3:間隔,0,100,1,1
-local step = math.max(1, math.floor(obj.track3))
-local seed_frame = math.floor(obj.frame / step)
-obj.ox = obj.ox + obj.rand(-1000, 1000, 0, seed_frame) * 0.001 * obj.track0
-obj.oy = obj.oy + obj.rand(-1000, 1000, 1, seed_frame) * 0.001 * obj.track1
-obj.oz = obj.oz + obj.rand(-1000, 1000, 2, seed_frame) * 0.001 * obj.track2
+--track0:振幅,0,500,5
+--track1:角度,0,180,10
+--track2:間隔,0,100,0
+local interval = obj.track2
+if (interval <= 0) then
+    obj.ox = obj.ox + obj.rand(-obj.track0, obj.track0, 0)
+    obj.oy = obj.oy + obj.rand(-obj.track0, obj.track0, 1)
+    obj.rz = obj.rz + obj.rand(-obj.track1, obj.track1, 2)
+else
+    local step = math.max(1, math.floor(interval))
+    local seed_frame = math.floor(obj.frame / step)
+    obj.ox = obj.ox + obj.rand(-1000, 1000, 0, seed_frame) * 0.001 * obj.track0
+    obj.oy = obj.oy + obj.rand(-1000, 1000, 1, seed_frame) * 0.001 * obj.track0
+    obj.rz = obj.rz + obj.rand(-1000, 1000, 2, seed_frame) * 0.001 * obj.track1
+end
 
 @振り子
---track0:周期,0,20,1,0.01
---track1:角度,0,360,30
---track2:中心ずれ,-1000,1000,100
---check0:揺れ幅を減衰させる,0
-local t = obj.track0
-if (t > 0) then
-    local amp = obj.track1
-    if (obj.check0 and obj.totaltime > 0) then
-        local remain = math.max(0, (obj.totaltime - obj.time) / obj.totaltime)
-        amp = amp * remain * remain
-    end
-    local deg = math.sin(obj.time * math.pi * 2 / t) * amp
-    local rad = deg * math.pi / 180
-    local dy = obj.h * 0.5 * obj.track2 * 0.01
-    obj.rz = obj.rz - deg
-    obj.ox = obj.ox + math.sin(rad) * dy
-    obj.oy = obj.oy - dy + math.cos(rad) * dy
-end
+--track0:速さ,0,10,2,0.01
+--track1:角度,0,180,30
+--track2:ずらし,0,100,0
+obj.rz = obj.rz + math.sin((obj.time * obj.track0 + obj.index * obj.track2 * 0.02) * math.pi) * obj.track1
 
 @弾む
---track0:周期,0,20,1,0.01
---track1:距離,0,1000,100
---track2:歪み,0,100,50
---check0:跳ね返りを減衰させる,0
-local t = obj.track0
-if (t > 0) then
-    local dist = obj.track1
-    if (obj.check0 and obj.totaltime > 0) then
-        local rem = math.max(0, (obj.totaltime - obj.time) / obj.totaltime)
-        dist = dist * rem
-    end
-    local phase = (obj.time % t) / t
-    local h = math.sin(phase * math.pi)
-    obj.oy = obj.oy - h * dist
-end
+--track0:速さ,0.1,100,20
+--track1:高さ,0,1000,150
+--track2:角度,0,360,0
+--track3:ずらし,0,100,0
+local spd = math.max(0.1, obj.track0)
+local period = math.max(0.01, math.floor((10 / spd) * obj.framerate) / obj.framerate)
+local phase = ((obj.time / period + obj.index * obj.track3 * 0.01) % 1 - 0.5) * 2
+local bounce = (1 - phase * phase) * obj.track1
+local rad = obj.track2 * math.pi / 180
+obj.ox = obj.ox + math.sin(rad) * bounce
+obj.oy = obj.oy - math.cos(rad) * bounce
 
 @座標の拡大縮小(個別オブジェクト)
---track0:拡大率,0,5000,100
---track1:X,0,5000,100
---track2:Y,0,5000,100
---track3:Z,0,5000,100
---check0:画像の拡大縮小を行わない,0
-local s = obj.track0 * 0.01
-obj.ox = obj.ox * s * (obj.track1 * 0.01)
-obj.oy = obj.oy * s * (obj.track2 * 0.01)
-obj.oz = obj.oz * s * (obj.track3 * 0.01)
-if (not obj.check0) then
-    obj.zoom = obj.zoom * s
-end
+--track0:拡大率,0,1000,100
+--track1:中心X,-1000,1000,0
+--track2:中心Y,-1000,1000,0
+obj.ox = obj.track1 + (obj.ox - obj.track1) * obj.track0 * 0.01
+obj.oy = obj.track2 + (obj.oy - obj.track2) * obj.track0 * 0.01
 
 @画面外から登場
---track0:時間,-5,5,0.3,0.01
---track1:方向,-3600,3600,0
---track2:ランダム方向,0,360,0
---track3:間隔,0,5,0,0.01
---check0:ランダム順序,0
+--track0:時間,-5,5,0.5,0.01
+--track1:角度,-360,360,90
+--track2:数,1,16,1,1
+--check0:ランダム方向,0
 if (obj.track0 ~= 0) then
-    local ord = obj.index
-    if (obj.check0) then
-        ord = obj.rand(0, math.max(0, obj.num - 1), -1 - obj.index, 0)
-    end
-    local dur = math.abs(obj.track0)
-    local total_dur = dur + obj.track3 * math.max(0, obj.num - 1)
     local ratio = 0
-    if (obj.track0 > 0) then
-        ratio = (dur - obj.time + obj.track3 * ord) / dur
+    if (obj.track0 < 0) then
+        ratio = (obj.track0 - obj.time + obj.totaltime) / obj.track0
     else
-        ratio = (dur - obj.totaltime + obj.time - total_dur + dur + obj.track3 * ord) / dur
+        ratio = (obj.track0 - obj.time) / obj.track0
     end
-    ratio = math.min(1, math.max(0, ratio))
     if (ratio > 0) then
-        local dir = obj.track1 + obj.rand(-obj.track2 * 0.5, obj.track2 * 0.5, obj.index, 0) - 90
+        local dir = obj.track1
+        if (obj.check0) then
+            dir = (dir + obj.rand(0, 360, obj.index, 0)) % 360
+        end
         local rad = dir * math.pi / 180
-        local dist = math.sqrt(obj.screen_w * obj.screen_w + obj.screen_h * obj.screen_h) * 0.65 + math.max(obj.w, obj.h)
-        local ease = ratio * ratio
-        obj.ox = obj.ox + math.cos(rad) * dist * ease
-        obj.oy = obj.oy + math.sin(rad) * dist * ease
+        local dist = math.sqrt(obj.screen_w * obj.screen_w + obj.screen_h * obj.screen_h) * ratio
+        obj.ox = obj.ox + math.sin(rad) * dist
+        obj.oy = obj.oy - math.cos(rad) * dist
     end
 end
 
 @ランダム方向から登場
---track0:時間,-5,5,0.6,0.01
---track1:移動距離,0,5000,150
---track2:移動角度,0,1000,180
---track3:回転角度,0,1000,180
---check0:方向をZ軸方向にも広げる,0
+--track0:時間,-5,5,1.5,0.01
+--track1:回転,0,10,3
+--track2:ライト,0,100,30
+--check0:加減速,1
 if (obj.track0 ~= 0) then
-    local dur = math.abs(obj.track0)
     local ratio = 0
-    if (obj.track0 > 0) then
-        ratio = (dur - obj.time) / dur
+    if (obj.track0 < 0) then
+        ratio = (obj.track0 - obj.time + obj.totaltime) / obj.track0
     else
-        ratio = (dur - obj.totaltime + obj.time) / dur
+        ratio = (obj.track0 - obj.time) / obj.track0
     end
-    ratio = math.min(1, math.max(0, ratio))
     if (ratio > 0) then
-        local ease = ratio * ratio
-        local ang = obj.rand(0, 3600, obj.index, 10) * 0.1 * math.pi / 180
-        local turn = obj.rand(-1000, 1000, obj.index, 20) * 0.001 * obj.track2 * ease * math.pi / 180
-        local dist = (0.5 + obj.rand(0, 1000, obj.index, 30) * 0.0005) * obj.track1 * ease
-        obj.ox = obj.ox + math.cos(ang + turn) * dist
-        obj.oy = obj.oy + math.sin(ang + turn) * dist
+        local ease = ratio
         if (obj.check0) then
-            obj.oz = obj.oz + obj.rand(-1000, 1000, obj.index, 40) * 0.001 * dist
-            obj.rx = obj.rx + obj.rand(-1000, 1000, obj.index, 50) * 0.001 * obj.track3 * ease
-            obj.ry = obj.ry + obj.rand(-1000, 1000, obj.index, 60) * 0.001 * obj.track3 * ease
+            ease = ratio * ratio
         end
-        obj.rz = obj.rz + obj.rand(-1000, 1000, obj.index, 70) * 0.001 * obj.track3 * ease
-        obj.alpha = obj.alpha * math.min(1, (1 - ease) * 2)
+        local ang = obj.rand(0, 360, obj.index, 0)
+        local dist = math.sqrt(obj.screen_w * obj.screen_w + obj.screen_h * obj.screen_h) * ease
+        obj.ox = obj.ox + math.sin(ang) * dist
+        obj.oy = obj.oy - math.cos(ang) * dist
+        obj.rx = obj.rx + obj.rand(90, 360, obj.index, 1) * ease * obj.track1
+        obj.ry = obj.ry + obj.rand(90, 360, obj.index, 2) * ease * obj.track1
+        obj.rz = obj.rz + obj.rand(90, 360, obj.index, 3) * ease * obj.track1 * 2
+        obj.zoom = obj.zoom * (1 + ease)
     end
 end
 
 @拡大縮小して登場
 --track0:時間,-5,5,0.3,0.01
---track1:拡大率,0,5000,300
---track2:縦横比,-100,100,0
---track3:間隔,0,5,0.1,0.01
---check0:ランダム順序,0
+--track1:拡大率,0,800,300
+--check0:加減速,1
 if (obj.track0 ~= 0) then
-    local ord = obj.index
-    if (obj.check0) then
-        ord = obj.rand(0, math.max(0, obj.num - 1), -1 - obj.index, 0)
-    end
-    local dur = math.abs(obj.track0)
-    local total_dur = dur + obj.track3 * math.max(0, obj.num - 1)
     local ratio = 0
-    if (obj.track0 > 0) then
-        ratio = (dur - obj.time + obj.track3 * ord) / dur
+    if (obj.track0 < 0) then
+        ratio = (obj.track0 - obj.time + obj.totaltime) / obj.track0
     else
-        ratio = (dur - obj.totaltime + obj.time - total_dur + dur + obj.track3 * ord) / dur
+        ratio = (obj.track0 - obj.time) / obj.track0
     end
-    ratio = math.min(1, math.max(0, ratio))
     if (ratio > 0) then
-        local ease = ratio * ratio
-        local s = 1 + (obj.track1 * 0.01 - 1) * ease
+        local clamped = math.min(1, ratio)
+        obj.alpha = obj.alpha * math.max(0, math.cos(clamped * math.pi * 0.5))
+        local ease = clamped
+        if (obj.check0) then
+            ease = clamped * clamped
+        end
+        local s = 1 + (obj.track1 - 100) * ease * 0.01
         obj.zoom = obj.zoom * math.max(0, s)
-        obj.alpha = obj.alpha * math.max(0, 1 - ratio)
     end
 end
 
 @ランダム間隔で落ちながら登場
---track0:時間,-5,5,0.3,0.01
---track1:距離,0,5000,200
---track2:最大遅延,0,20,0.6,0.01
+--track0:時間,-5,5,0.5,0.01
+--track1:間隔,0,5,1,0.01
+--track2:距離,0,1000,400
+--check0:加減速,1
 if (obj.track0 ~= 0) then
-    local delay = obj.rand(0, 1000, obj.index, 0) * 0.001 * obj.track2
-    local dur = math.abs(obj.track0)
+    local delay = obj.rand(0, 100, obj.index, 0) * obj.track1 * 0.01
     local ratio = 0
-    if (obj.track0 > 0) then
-        ratio = (dur - obj.time + delay) / dur
+    local vy = 0
+    if (obj.track0 < 0) then
+        ratio = (obj.track0 - obj.time + obj.totaltime - delay) / obj.track0
+        vy = obj.track2
     else
-        ratio = (dur - obj.totaltime + obj.time - obj.track2 + delay) / dur
+        ratio = (obj.track0 - obj.time + delay) / obj.track0
+        vy = -obj.track2
     end
-    ratio = math.min(1, math.max(0, ratio))
-    if (ratio > 0) then
-        local ease = ratio * ratio
-        obj.oy = obj.oy - obj.track1 * ease
-        obj.alpha = obj.alpha * (1 - ease)
+    if (ratio >= 1) then
+        obj.alpha = 0
+    elseif (ratio > 0) then
+        local ease = ratio
+        if (obj.check0) then
+            ease = ratio * ratio
+        end
+        obj.alpha = obj.alpha * math.max(0, math.cos(ease * math.pi * 0.5))
+        obj.oy = obj.oy + vy * ease
     end
 end
 
 @弾んで登場
---track0:時間,-5,5,1.0,0.01
---track1:高さ,0,5000,250
---track2:回数,0,20,3,1
---track3:間隔,0,5,0.1,0.01
-if (obj.track0 ~= 0) then
-    local dur = math.abs(obj.track0)
+--track0:時間,-5,5,2,0.01
+--track1:高さ,-1000,1000,200
+--track2:回数,1,20,4,1
+local cnt = math.max(1, obj.track2)
+local dur = math.floor(obj.track0 * obj.framerate / cnt) * cnt / obj.framerate
+if (dur ~= 0) then
     local ratio = 0
-    if (obj.track0 > 0) then
-        ratio = (dur - obj.time + obj.track3 * obj.index) / dur
+    local dir_sign = 1
+    if (dur < 0) then
+        ratio = (obj.track0 - obj.time + obj.totaltime) / dur
+        dir_sign = -1
     else
-        ratio = (dur - obj.totaltime + obj.time) / dur
+        ratio = (obj.track0 - obj.time) / dur
     end
-    ratio = math.min(1, math.max(0, ratio))
-    if (ratio > 0) then
-        local b = math.abs(math.cos(ratio * math.pi * math.max(0.5, obj.track2))) * ratio * ratio
-        obj.oy = obj.oy - b * obj.track1
+    if (ratio >= 0) then
+        local span = math.sqrt(obj.screen_w * obj.screen_w + obj.screen_h * obj.screen_h)
+        obj.ox = obj.ox + span * ratio * dir_sign
+        local u = ((ratio * cnt) % 1 - 0.5) * 2
+        obj.oy = obj.oy - (1 - u * u) * obj.track1
     end
 end
 
 @広がって登場
 --track0:時間,-5,5,0.3,0.01
---track1:広がり,0,800,200
---track2:間隔,0,5,0.1,0.01
 --check0:縦方向,0
 if (obj.track0 ~= 0) then
-    local dur = math.abs(obj.track0)
     local ratio = 0
-    if (obj.track0 > 0) then
-        ratio = (dur - obj.time + obj.track2 * obj.index) / dur
+    if (obj.track0 < 0) then
+        ratio = (obj.track0 - obj.time + obj.totaltime) / obj.track0
     else
-        ratio = (dur - obj.totaltime + obj.time) / dur
+        ratio = (obj.track0 - obj.time) / obj.track0
     end
     ratio = math.min(1, math.max(0, ratio))
     if (ratio > 0) then
         local ease = 1 - ratio * ratio
         if (obj.check0) then
-            obj.effect("リサイズ", "X", 100 + (1 - ease) * obj.track1, "Y", ease * 100)
+            obj.effect("リサイズ", "X", 100, "Y", ease * 100)
         else
-            obj.effect("リサイズ", "X", ease * 100, "Y", 100 + (1 - ease) * obj.track1)
+            obj.effect("リサイズ", "X", ease * 100, "Y", 100)
         end
     end
 end
 
 @起き上がって登場
 --track0:時間,-5,5,0.6,0.01
---track1:基準位置,-100,100,100
---track2:間隔,0,5,0.1,0.01
---check0:逆回転,0
+--track1:勢い,0,8,2.0
 if (obj.track0 ~= 0) then
-    local dur = math.abs(obj.track0)
     local ratio = 0
-    if (obj.track0 > 0) then
-        ratio = (dur - obj.time + obj.track2 * obj.index) / dur
+    if (obj.track0 < 0) then
+        ratio = (obj.track0 - obj.time + obj.totaltime) / obj.track0
     else
-        ratio = (dur - obj.totaltime + obj.time) / dur
+        ratio = (obj.track0 - obj.time) / obj.track0
     end
-    ratio = math.min(1, math.max(0, ratio))
-    if (ratio > 0) then
-        local deg = 90 * ratio * ratio
-        if (obj.check0) then deg = -deg end
-        local piv = obj.h * obj.track1 * 0.005
-        obj.rx = obj.rx + deg
-        obj.cy = obj.cy + piv
-        obj.oy = obj.oy + piv
+    if (ratio >= 0) then
+        local ease = math.min(1, ratio * ratio)
+        obj.rx = obj.rx - 90 * ease
+        obj.oy = obj.oy + obj.h * (1 - math.cos(ease * math.pi * 0.5)) * 0.5
+        obj.oz = obj.oz + obj.h * math.sin(ease * math.pi * 0.5) * 0.5
     end
 end
 
 @何処からともなく登場
---track0:時間,-5,5,0.6,0.01
---track1:ぼかし,0,500,50
---track2:周期,0,20,1
---track3:揺れ幅,0,500,25
+--track0:時間,-5,5,0.3,0.01
+--track1:ぼかし,0,5,1.0
+--track2:位置,0,5,1.5
 if (obj.track0 ~= 0) then
-    local dur = math.abs(obj.track0)
     local ratio = 0
-    if (obj.track0 > 0) then
-        ratio = (dur - obj.time) / dur
+    if (obj.track0 < 0) then
+        ratio = (obj.track0 - obj.time + obj.totaltime) / obj.track0
     else
-        ratio = (dur - obj.totaltime + obj.time) / dur
+        ratio = (obj.track0 - obj.time) / obj.track0
     end
-    ratio = math.min(1, math.max(0, ratio))
     if (ratio > 0) then
-        local ease = ratio * ratio
-        local freq = obj.track2 * (obj.rand(0, 100, obj.index, 0) + 100) * 0.01
-        local phase = obj.rand(0, 628, obj.index, 1) * 0.01 + obj.time * freq
-        obj.ox = obj.ox + math.cos(phase) * obj.track3 * ease
-        obj.oy = obj.oy + math.sin(phase) * obj.track3 * ease
-        obj.alpha = obj.alpha * (1 - ease)
-        obj.effect("ぼかし", "範囲", ease * obj.track1)
+        local rx = obj.w * obj.track2 * 0.5
+        local ry = obj.h * obj.track2 * 0.5
+        obj.ox = obj.ox + obj.rand(-rx, rx, obj.index + 100)
+        obj.oy = obj.oy + obj.rand(-ry, ry, obj.index + 200)
+        obj.alpha = obj.alpha * (obj.rand(0, 100, obj.index + 300) * 0.01)
+        obj.effect("ぼかし", "範囲", obj.track1 * obj.w)
     end
 end
 
 @反復移動
---track0:X,0,1000,100
---track1:Y,0,1000,0
---track2:Z,0,1000,0
---track3:速度,0,2000,100
---check0:加減速移動,0
-local phase = (obj.time * obj.track3 * 0.01) % 2
-local s = 0
-if (obj.check0) then
-    s = math.sin(phase * math.pi)
-else
-    if (phase < 0.5) then s = phase * 2
-    elseif (phase < 1.5) then s = 2 - phase * 2
-    else s = phase * 2 - 4 end
-end
-obj.ox = obj.ox + s * obj.track0
-obj.oy = obj.oy + s * obj.track1
-obj.oz = obj.oz + s * obj.track2
+--track0:速さ,0.1,100,20
+--track1:距離,0,1000,100
+--track2:角度,0,360,0
+--track3:ずらし,0,100,0
+local d = math.sin((obj.time * obj.track0 + obj.index * obj.track3 * 0.2) * math.pi * 0.1) * obj.track1
+local rad = obj.track2 * math.pi / 180
+obj.ox = obj.ox + math.sin(rad) * d
+obj.oy = obj.oy - math.cos(rad) * d
 
 @座標の回転(個別オブジェクト)
---track0:X,-3600,3600,0
---track1:Y,-3600,3600,0
---track2:Z,-3600,3600,0
---track3:拡大率,0,5000,100
---check0:画像の回転を行わない,0
-local rx = obj.track0 * math.pi / 180
-local ry = obj.track1 * math.pi / 180
-local rz = obj.track2 * math.pi / 180
-local s = obj.track3 * 0.01
-local x, y, z = obj.ox, obj.oy, obj.oz
-local x1 = x * math.cos(rz) - y * math.sin(rz)
-local y1 = x * math.sin(rz) + y * math.cos(rz)
-local z1 = z * math.cos(ry) - x1 * math.sin(ry)
-local x2 = z * math.sin(ry) + x1 * math.cos(ry)
-local y2 = y1 * math.cos(rx) - z1 * math.sin(rx)
-local z2 = y1 * math.sin(rx) + z1 * math.cos(rx)
-obj.ox = x2 * s
-obj.oy = y2 * s
-obj.oz = z2 * s
-if (not obj.check0) then
-    obj.rx = obj.rx + obj.track0
-    obj.ry = obj.ry + obj.track1
-    obj.rz = obj.rz + obj.track2
-    obj.zoom = obj.zoom * s
-end
+--track0:角度,-360,360,0
+--track1:中心X,-1000,1000,0
+--track2:中心Y,-1000,1000,0
+local dx = obj.ox - obj.track1
+local dy = obj.oy - obj.track2
+local rad = obj.track0 * math.pi / 180
+obj.ox = obj.track1 + dx * math.cos(rad) - dy * math.sin(rad)
+obj.oy = obj.track2 + dx * math.sin(rad) + dy * math.cos(rad)
 
 @立方体(カメラ制御)
 --track0:サイズ,1,2000,100
