@@ -9,7 +9,9 @@ use eframe::egui::{
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 
 use crate::panels;
-use crate::state::{EditorState, SAMPLE_EXO};
+use crate::state::{
+    default_projects_dir, EditorState, NewProjectConfig, ProjectFormat, ProjectPreset, SAMPLE_EXO,
+};
 
 /// ドッキング可能なパネル。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,8 +49,242 @@ pub struct OpenAviApp {
     gpu_info: String,
     show_plugins: bool,
     show_about: bool,
-    show_unsaved_confirm: bool,
+    new_project_modal: NewProjectModalState,
     last_title: String,
+}
+
+/// 新規プロジェクト作成モーダルダイアログの状態。
+#[derive(Debug, Clone)]
+pub struct NewProjectModalState {
+    pub is_open: bool,
+    pub name: String,
+    pub dir: PathBuf,
+    pub format: ProjectFormat,
+    pub preset: ProjectPreset,
+    pub width: u32,
+    pub height: u32,
+    pub fps_num: u32,
+    pub fps_den: u32,
+    pub length_seconds: u32,
+    pub autosave_enabled: bool,
+    pub error_message: Option<String>,
+}
+
+impl Default for NewProjectModalState {
+    fn default() -> Self {
+        Self {
+            is_open: false,
+            name: "新しい動画プロジェクト".into(),
+            dir: default_projects_dir(),
+            format: ProjectFormat::Aup2,
+            preset: ProjectPreset::Fhd60p,
+            width: 1920,
+            height: 1080,
+            fps_num: 60,
+            fps_den: 1,
+            length_seconds: 60,
+            autosave_enabled: false,
+            error_message: None,
+        }
+    }
+}
+
+/// Word / モダン OS 風の美しいカプセル型トグルスイッチ UI。
+fn toggle_switch_ui(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
+    let desired_size = vec2(32.0, 18.0);
+    let (rect, mut response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    if ui.is_rect_visible(rect) {
+        let how_on = ui.ctx().animate_bool_responsive(response.id, *on);
+        let bg_fill = if *on {
+            Color32::from_rgb(37, 99, 235) // Office / Word 風の鮮やかなブルー
+        } else {
+            Color32::from_rgb(60, 64, 75)
+        };
+        let stroke_color = if response.hovered() {
+            Color32::from_rgb(147, 197, 253)
+        } else {
+            Color32::from_gray(80)
+        };
+        ui.painter().rect(
+            rect,
+            rect.height() * 0.5,
+            bg_fill,
+            Stroke::new(1.0_f32, stroke_color),
+        );
+        let radius = 0.5 * rect.height() - 2.5;
+        let x = egui::lerp(
+            (rect.left() + radius + 3.0)..=(rect.right() - radius - 3.0),
+            how_on,
+        );
+        let center = egui::pos2(x, rect.center().y);
+        ui.painter().circle_filled(center, radius, Color32::WHITE);
+    }
+    response
+}
+
+/// OS 標準の保存確認ダイアログの選択結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmResult {
+    /// 変更を保存して終了
+    Save,
+    /// 変更を保存せずに終了
+    DontSave,
+    /// キャンセル（終了を中止して作業を継続）
+    Cancel,
+}
+
+/// Windows / OS 標準の保存確認ダイアログ（「保存して終了」「保存せず終了」「キャンセル」）を表示します。
+#[cfg(windows)]
+pub fn show_native_unsaved_confirm(doc_name: &str) -> ConfirmResult {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use std::sync::atomic::{AtomicIsize, Ordering};
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn MessageBoxW(hwnd: isize, lpText: *const u16, lpCaption: *const u16, uType: u32) -> i32;
+        fn SetWindowsHookExW(
+            idHook: i32,
+            lpfn: unsafe extern "system" fn(i32, usize, isize) -> isize,
+            hmod: isize,
+            dwThreadId: u32,
+        ) -> isize;
+        fn UnhookWindowsHookEx(hhk: isize) -> i32;
+        fn CallNextHookEx(hhk: isize, nCode: i32, wParam: usize, lParam: isize) -> isize;
+        fn SetDlgItemTextW(hDlg: isize, nIDDlgItem: i32, lpString: *const u16) -> i32;
+        fn GetDlgItem(hDlg: isize, nIDDlgItem: i32) -> isize;
+        fn GetWindowRect(hWnd: isize, lpRect: *mut [i32; 4]) -> i32;
+        fn SetWindowPos(hWnd: isize, hWndInsertAfter: isize, X: i32, Y: i32, cx: i32, cy: i32, uFlags: u32) -> i32;
+        fn MapWindowPoints(hWndFrom: isize, hWndTo: isize, lpPoints: *mut [i32; 2], cPoints: u32) -> i32;
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentThreadId() -> u32;
+    }
+
+    static HOOK: AtomicIsize = AtomicIsize::new(0);
+
+    unsafe extern "system" fn cbt_hook_proc(n_code: i32, w_param: usize, l_param: isize) -> isize {
+        const HCBT_ACTIVATE: i32 = 5;
+        const IDYES: i32 = 6;
+        const IDNO: i32 = 7;
+        const IDCANCEL: i32 = 2;
+        const SWP_NOZORDER: u32 = 0x0004;
+        const SWP_NOACTIVATE: u32 = 0x0010;
+
+        if n_code == HCBT_ACTIVATE {
+            let hwnd = w_param as isize;
+
+            let to_w = |s: &str| -> Vec<u16> {
+                OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+            };
+
+            let s_yes = to_w("保存して終了(&S)");
+            let s_no = to_w("保存せず終了(&N)");
+            let s_cancel = to_w("キャンセル");
+
+            // ボタンの文面を確実に「保存して終了」「保存せず終了」「キャンセル」に変更
+            SetDlgItemTextW(hwnd, IDYES, s_yes.as_ptr());
+            SetDlgItemTextW(hwnd, IDNO, s_no.as_ptr());
+            SetDlgItemTextW(hwnd, IDCANCEL, s_cancel.as_ptr());
+
+            // ボタン幅を 112px に拡張して日本語テキストが綺麗に収まるよう等間隔に配置
+            let h_yes = GetDlgItem(hwnd, IDYES);
+            let h_no = GetDlgItem(hwnd, IDNO);
+            let h_cancel = GetDlgItem(hwnd, IDCANCEL);
+
+            if h_yes != 0 && h_no != 0 && h_cancel != 0 {
+                let mut r_dlg = [0i32; 4];
+                let mut r_yes = [0i32; 4];
+                let mut r_cancel = [0i32; 4];
+                GetWindowRect(hwnd, &mut r_dlg);
+                GetWindowRect(h_yes, &mut r_yes);
+                GetWindowRect(h_cancel, &mut r_cancel);
+
+                let dlg_width = r_dlg[2] - r_dlg[0];
+                let btn_w = 112i32;
+                let btn_h = (r_yes[3] - r_yes[1]).max(26);
+                let gap = 10i32;
+                let total_btns_w = btn_w * 3 + gap * 2;
+
+                let required_dlg_w = (total_btns_w + 50).max(dlg_width);
+                if required_dlg_w > dlg_width {
+                    let dlg_h = r_dlg[3] - r_dlg[1];
+                    SetWindowPos(hwnd, 0, r_dlg[0] - (required_dlg_w - dlg_width) / 2, r_dlg[1], required_dlg_w, dlg_h, SWP_NOZORDER | SWP_NOACTIVATE);
+                }
+
+                let mut pt_yes = [r_yes[0], r_yes[1]];
+                MapWindowPoints(0, hwnd, &mut pt_yes, 1);
+                let btn_y = pt_yes[1];
+
+                let mut pt_cancel = [r_cancel[2], r_cancel[1]];
+                MapWindowPoints(0, hwnd, &mut pt_cancel, 1);
+                let right_edge = pt_cancel[0].max(required_dlg_w - 24);
+
+                let x_cancel = right_edge - btn_w;
+                let x_no = x_cancel - gap - btn_w;
+                let x_yes = x_no - gap - btn_w;
+
+                SetWindowPos(h_yes, 0, x_yes, btn_y, btn_w, btn_h, SWP_NOZORDER | SWP_NOACTIVATE);
+                SetWindowPos(h_no, 0, x_no, btn_y, btn_w, btn_h, SWP_NOZORDER | SWP_NOACTIVATE);
+                SetWindowPos(h_cancel, 0, x_cancel, btn_y, btn_w, btn_h, SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+        }
+
+        let hhk = HOOK.load(Ordering::SeqCst);
+        CallNextHookEx(hhk, n_code, w_param, l_param)
+    }
+
+    let to_wide = |s: &str| -> Vec<u16> {
+        OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    };
+
+    let title = to_wide("OpenAvi");
+    let instruction = to_wide(&format!("「{doc_name}」への変更内容を保存しますか？\n\n保存せずに終了すると、編集内容はすべて失われます。"));
+
+    const WH_CBT: i32 = 5;
+    const MB_YESNOCANCEL: u32 = 0x00000003;
+    const MB_ICONWARNING: u32 = 0x00000030;
+    const MB_TOPMOST: u32 = 0x00040000;
+    const IDYES: i32 = 6;
+    const IDNO: i32 = 7;
+
+    // 現在のスレッドに CBT フックを設置してボタンテキストを確実に変更
+    let thread_id = unsafe { GetCurrentThreadId() };
+    let hhk = unsafe { SetWindowsHookExW(WH_CBT, cbt_hook_proc, 0, thread_id) };
+    HOOK.store(hhk, Ordering::SeqCst);
+
+    let ret = unsafe { MessageBoxW(0, instruction.as_ptr(), title.as_ptr(), MB_YESNOCANCEL | MB_ICONWARNING | MB_TOPMOST) };
+
+    if hhk != 0 {
+        unsafe { UnhookWindowsHookEx(hhk) };
+        HOOK.store(0, Ordering::SeqCst);
+    }
+
+    match ret {
+        IDYES => ConfirmResult::Save,
+        IDNO => ConfirmResult::DontSave,
+        _ => ConfirmResult::Cancel,
+    }
+}
+
+#[cfg(not(windows))]
+pub fn show_native_unsaved_confirm(doc_name: &str) -> ConfirmResult {
+    let res = rfd::MessageDialog::new()
+        .set_title("OpenAvi")
+        .set_description(&format!("「{doc_name}」への変更内容を保存しますか？"))
+        .set_buttons(rfd::MessageButtons::YesNoCancel)
+        .show();
+    match res {
+        rfd::MessageDialogResult::Yes => ConfirmResult::Save,
+        rfd::MessageDialogResult::No => ConfirmResult::DontSave,
+        _ => ConfirmResult::Cancel,
+    }
 }
 
 fn default_dock() -> DockState<Tab> {
@@ -60,6 +296,7 @@ fn default_dock() -> DockState<Tab> {
     dock
 }
 
+const SC_NEW: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::N);
 const SC_OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
 const SC_IMPORT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::I);
 const SC_SAVE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
@@ -125,7 +362,7 @@ impl OpenAviApp {
             gpu_info,
             show_plugins: false,
             show_about: false,
-            show_unsaved_confirm: false,
+            new_project_modal: NewProjectModalState::default(),
             last_title: String::new(),
         }
     }
@@ -211,11 +448,14 @@ impl TabViewer for Viewer<'_> {
 
 impl eframe::App for OpenAviApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // ウィンドウ閉じる要求 (Alt+F4 や [X] ボタン) を検知し、未保存の変更がある場合は確認ダイアログを表示
+        // ウィンドウ閉じる要求 (Alt+F4 や [X] ボタン) を検知
         if ctx.input(|i| i.viewport().close_requested()) {
             if self.st.dirty {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                self.show_unsaved_confirm = true;
+                self.handle_close_request();
+            } else {
+                self.st.audio.stop();
+                std::process::exit(0);
             }
         }
 
@@ -237,6 +477,10 @@ impl eframe::App for OpenAviApp {
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
         for path in dropped {
             self.st.load_path(&path);
+        }
+
+        if ctx.input_mut(|i| i.consume_shortcut(&SC_NEW)) {
+            self.new_project_modal.is_open = true;
         }
 
         handle_shortcuts(ctx, &mut self.st);
@@ -283,8 +527,8 @@ impl eframe::App for OpenAviApp {
                 });
         }
 
-        // 保存確認モーダルダイアログ
-        self.unsaved_confirm_dialog(ctx);
+        // 新規プロジェクト事前設定モーダルダイアログ
+        self.new_project_dialog(ctx);
     }
 }
 
@@ -292,9 +536,40 @@ impl OpenAviApp {
     fn menu_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
+                // Word 風の自動保存トグルスイッチ (メニュー左端)
+                ui.horizontal(|ui| {
+                    ui.add_space(2.0);
+                    toggle_switch_ui(ui, &mut self.st.autosave.enabled);
+                    let label_color = if self.st.autosave.enabled {
+                        Color32::from_rgb(147, 197, 253)
+                    } else {
+                        Color32::from_gray(160)
+                    };
+                    let text = if self.st.autosave.enabled {
+                        RichText::new("自動保存: ON").color(label_color).strong().size(12.0)
+                    } else {
+                        RichText::new("自動保存: OFF").color(label_color).size(12.0)
+                    };
+                    if ui.add(egui::Label::new(text).sense(egui::Sense::click())).clicked() {
+                        self.st.autosave.enabled = !self.st.autosave.enabled;
+                    }
+                    if self.st.autosave.enabled {
+                        ui.weak("（編集時に即時上書き）")
+                            .on_hover_text("有効時: レイヤーやオブジェクトの変更があるたびに、プロジェクトファイルへ自動上書き保存されます。");
+                    }
+                    ui.add_space(6.0);
+                });
+                ui.separator();
+
                 ui.menu_button("ファイル", |ui| {
-                    if ui.button("📄 新規プロジェクト").clicked() {
-                        self.st.new_scene();
+                    if ui
+                        .add(
+                            egui::Button::new("📄 新規プロジェクト...")
+                                .shortcut_text(ctx.format_shortcut(&SC_NEW)),
+                        )
+                        .clicked()
+                    {
+                        self.new_project_modal.is_open = true;
                         ui.close_menu();
                     }
                     ui.separator();
@@ -350,10 +625,12 @@ impl OpenAviApp {
                     }
                     ui.separator();
                     if ui.button("終了").clicked() {
+                        ui.close_menu();
                         if self.st.dirty {
-                            self.show_unsaved_confirm = true;
+                            self.handle_close_request();
                         } else {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            self.st.audio.stop();
+                            std::process::exit(0);
                         }
                     }
                 });
@@ -677,24 +954,12 @@ impl OpenAviApp {
         closed
     }
 
-    /// 未保存の変更があるままアプリを終了しようとした際の確認ダイアログ。
-    fn unsaved_confirm_dialog(&mut self, ctx: &egui::Context) {
-        if !self.show_unsaved_confirm {
-            return;
+    /// アプリケーション終了要求時の保存確認処理（OS 標準のメッセージボックスを表示）。
+    fn handle_close_request(&mut self) {
+        if !self.st.dirty {
+            self.st.audio.stop();
+            std::process::exit(0);
         }
-
-        // 半透明の暗い背景オーバーレイ（画面全体のクリックをガード）
-        egui::Area::new(egui::Id::new("unsaved_backdrop"))
-            .interactable(true)
-            .order(egui::Order::Middle)
-            .fixed_pos([0.0, 0.0])
-            .show(ctx, |ui| {
-                let screen_rect = ctx.screen_rect();
-                ui.painter().rect_filled(screen_rect, 0.0, Color32::from_black_alpha(150));
-            });
-
-        let mut close_modal = false;
-        let mut do_exit = false;
 
         let doc_name = self
             .st
@@ -704,57 +969,297 @@ impl OpenAviApp {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "無題のプロジェクト".to_string());
 
-        egui::Window::new("保存の確認")
-            .id(egui::Id::new("unsaved_confirm_window"))
+        match show_native_unsaved_confirm(&doc_name) {
+            ConfirmResult::Save => {
+                if self.st.save_project() {
+                    self.st.audio.stop();
+                    std::process::exit(0);
+                }
+            }
+            ConfirmResult::DontSave => {
+                self.st.dirty = false;
+                self.st.audio.stop();
+                std::process::exit(0);
+            }
+            ConfirmResult::Cancel => {
+                // 保存も終了もせず、編集作業を継続
+            }
+        }
+    }
+
+    /// 新規プロジェクト立ち上げ時の名前・形式・プリセット・自動保存の事前設定ダイアログ。
+    fn new_project_dialog(&mut self, ctx: &egui::Context) {
+        if !self.new_project_modal.is_open {
+            return;
+        }
+
+        // 半透明の暗い背景オーバーレイ（画面全体のクリックをガード）
+        egui::Area::new(egui::Id::new("new_project_backdrop"))
+            .interactable(true)
+            .order(egui::Order::Middle)
+            .fixed_pos([0.0, 0.0])
+            .show(ctx, |ui| {
+                let screen_rect = ctx.screen_rect();
+                ui.painter().rect_filled(screen_rect, 0.0, Color32::from_black_alpha(160));
+            });
+
+        let mut close_modal = false;
+        let mut do_create = false;
+
+        egui::Window::new("📄 新規プロジェクトの作成")
+            .id(egui::Id::new("new_project_modal_window"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .order(egui::Order::Foreground)
-            .fixed_size([440.0, 150.0])
+            .fixed_size([540.0, 520.0])
             .show(ctx, |ui| {
-                ui.spacing_mut().item_spacing = vec2(10.0, 12.0);
+                ui.spacing_mut().item_spacing = vec2(10.0, 10.0);
 
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("⚠").size(32.0).color(Color32::from_rgb(250, 204, 21)));
+                    ui.label(RichText::new("🎬").size(28.0).color(Color32::from_rgb(96, 165, 250)));
                     ui.vertical(|ui| {
-                        ui.strong(RichText::new("変更内容が保存されていません").size(15.0));
-                        ui.label(format!("「{}」への変更を保存しますか？", doc_name));
-                        ui.weak("保存せずに終了すると、編集内容はすべて失われます。");
+                        ui.strong(RichText::new("新規プロジェクトの設定").size(15.0));
+                        ui.weak("プロジェクト名とファイル形式、および自動保存を設定して編集を開始します。");
                     });
                 });
 
                 ui.separator();
 
+                // 1. プロジェクト基本情報（名前・保存先フォルダー・形式）
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(20, 22, 27))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_gray(38)))
+                    .rounding(egui::Rounding::same(6.0))
+                    .inner_margin(egui::Margin::same(10.0))
+                    .show(ui, |ui| {
+                        egui::Grid::new("new-proj-basic-grid")
+                            .num_columns(2)
+                            .spacing([12.0, 8.0])
+                            .show(ui, |ui| {
+                                ui.label(RichText::new("プロジェクト名:").strong());
+                                ui.horizontal(|ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.new_project_modal.name)
+                                            .hint_text("プロジェクト名を入力")
+                                            .desired_width(280.0),
+                                    );
+                                });
+                                ui.end_row();
+
+                                ui.label(RichText::new("保存先フォルダー:").strong());
+                                ui.horizontal(|ui| {
+                                    let dir_str = self.new_project_modal.dir.display().to_string();
+                                    ui.monospace(if dir_str.len() > 32 {
+                                        format!("...{}", &dir_str[dir_str.len() - 30..])
+                                    } else {
+                                        dir_str
+                                    }).on_hover_text(self.new_project_modal.dir.display().to_string());
+
+                                    if ui.button("📁 選択...").clicked() {
+                                        if let Some(folder) = rfd::FileDialog::new()
+                                            .set_directory(&self.new_project_modal.dir)
+                                            .set_title("保存先フォルダーを選択")
+                                            .pick_folder()
+                                        {
+                                            self.new_project_modal.dir = folder;
+                                        }
+                                    }
+                                });
+                                ui.end_row();
+
+                                ui.label(RichText::new("ファイル形式:").strong());
+                                ui.vertical(|ui| {
+                                    ui.radio_value(
+                                        &mut self.new_project_modal.format,
+                                        ProjectFormat::Aup2,
+                                        ProjectFormat::Aup2.label(),
+                                    );
+                                    ui.radio_value(
+                                        &mut self.new_project_modal.format,
+                                        ProjectFormat::Aup,
+                                        ProjectFormat::Aup.label(),
+                                    );
+                                    ui.radio_value(
+                                        &mut self.new_project_modal.format,
+                                        ProjectFormat::Exo,
+                                        ProjectFormat::Exo.label(),
+                                    );
+                                });
+                                ui.end_row();
+                            });
+
+                        // 保存されるフルパスのプレビュー表示
+                        let ext = self.new_project_modal.format.extension();
+                        let stem = self.new_project_modal.name.trim();
+                        let safe_name = if stem.is_empty() { "無題" } else { stem };
+                        let full_file = if safe_name.to_ascii_lowercase().ends_with(&format!(".{ext}")) {
+                            safe_name.to_string()
+                        } else {
+                            format!("{safe_name}.{ext}")
+                        };
+                        let target_display = self.new_project_modal.dir.join(&full_file);
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("保存先パス:").weak().size(11.0));
+                            ui.label(RichText::new(target_display.display().to_string()).color(Color32::from_rgb(147, 197, 253)).size(11.0));
+                        });
+                    });
+
+                // 2. 映像フォーマット（プリセット & 解像度・フレームレート）
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(20, 22, 27))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_gray(38)))
+                    .rounding(egui::Rounding::same(6.0))
+                    .inner_margin(egui::Margin::same(10.0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("映像フォーマット:").strong());
+                            ui.menu_button(self.new_project_modal.preset.label(), |ui| {
+                                for &p in &[
+                                    ProjectPreset::Fhd60p,
+                                    ProjectPreset::Fhd30p,
+                                    ProjectPreset::Hd720p,
+                                    ProjectPreset::ShortsVertical,
+                                    ProjectPreset::Uhd4k,
+                                ] {
+                                    if ui.button(p.label()).clicked() {
+                                        self.new_project_modal.preset = p;
+                                        p.apply(
+                                            &mut self.new_project_modal.width,
+                                            &mut self.new_project_modal.height,
+                                            &mut self.new_project_modal.fps_num,
+                                            &mut self.new_project_modal.fps_den,
+                                        );
+                                        ui.close_menu();
+                                    }
+                                }
+                            });
+                        });
+
+                        ui.add_space(4.0);
+                        egui::Grid::new("new-proj-video-grid")
+                            .num_columns(2)
+                            .spacing([12.0, 6.0])
+                            .show(ui, |ui| {
+                                ui.label("解像度 (幅×高):");
+                                ui.horizontal(|ui| {
+                                    if ui.add(egui::DragValue::new(&mut self.new_project_modal.width).range(16..=8192)).changed() {
+                                        self.new_project_modal.preset = ProjectPreset::Custom;
+                                    }
+                                    ui.label("×");
+                                    if ui.add(egui::DragValue::new(&mut self.new_project_modal.height).range(16..=8192)).changed() {
+                                        self.new_project_modal.preset = ProjectPreset::Custom;
+                                    }
+                                    ui.label(RichText::new("px").weak());
+                                });
+                                ui.end_row();
+
+                                ui.label("フレームレート:");
+                                ui.horizontal(|ui| {
+                                    if ui.add(egui::DragValue::new(&mut self.new_project_modal.fps_num).range(1..=240_000)).changed() {
+                                        self.new_project_modal.preset = ProjectPreset::Custom;
+                                    }
+                                    ui.label("/");
+                                    if ui.add(egui::DragValue::new(&mut self.new_project_modal.fps_den).range(1..=1001)).changed() {
+                                        self.new_project_modal.preset = ProjectPreset::Custom;
+                                    }
+                                    let fps_val = self.new_project_modal.fps_num as f64 / self.new_project_modal.fps_den.max(1) as f64;
+                                    ui.label(RichText::new(format!("= {:.3} fps", fps_val)).color(Color32::from_rgb(147, 197, 253)));
+                                });
+                                ui.end_row();
+
+                                ui.label("初期の長さ:");
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::DragValue::new(&mut self.new_project_modal.length_seconds).range(1..=36000).suffix(" 秒"));
+                                    let fps_val = self.new_project_modal.fps_num as f64 / self.new_project_modal.fps_den.max(1) as f64;
+                                    let total_frames = (self.new_project_modal.length_seconds as f64 * fps_val).round() as u64;
+                                    ui.label(RichText::new(format!("(約 {} フレーム)", total_frames)).weak());
+                                });
+                                ui.end_row();
+                            });
+                    });
+
+                // 3. 💾 自動保存設定
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(20, 22, 27))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_gray(38)))
+                    .rounding(egui::Rounding::same(6.0))
+                    .inner_margin(egui::Margin::same(10.0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut self.new_project_modal.autosave_enabled, RichText::new("💾 編集時の自動保存を有効にする").strong());
+                            if self.new_project_modal.autosave_enabled {
+                                ui.label(RichText::new("推奨").color(Color32::from_rgb(100, 220, 120)).size(11.0));
+                            }
+                        });
+                        ui.add_space(2.0);
+                        ui.weak("※ 有効時、レイヤーやオブジェクトに変更が加わるたびに自動でプロジェクトへ即座に上書き保存されます。");
+                        ui.weak("※ 画面上部のトグルスイッチからいつでもワンクリックでオン/オフを切り替えられます。");
+                    });
+
+                // エラーメッセージがある場合は表示
+                if let Some(err) = &self.new_project_modal.error_message {
+                    ui.colored_label(Color32::from_rgb(255, 120, 120), format!("⚠ {err}"));
+                }
+
+                ui.separator();
+
+                // 下部アクションボタン
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // キャンセル
+                    let create_btn = egui::Button::new(
+                        RichText::new("🚀 作成して編集を開始")
+                            .color(Color32::WHITE)
+                            .strong()
+                            .size(14.0),
+                    )
+                    .fill(Color32::from_rgb(37, 99, 235));
+
+                    if ui.add(create_btn).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
+                        do_create = true;
+                    }
+
                     if ui.button("キャンセル").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
                         close_modal = true;
-                    }
-
-                    // 保存しない
-                    if ui.add(egui::Button::new("保存しない").fill(Color32::from_rgb(180, 50, 50))).clicked() {
-                        self.st.dirty = false;
-                        close_modal = true;
-                        do_exit = true;
-                    }
-
-                    // 保存する
-                    let save_btn = egui::Button::new(RichText::new("💾 保存する").color(Color32::WHITE).strong())
-                        .fill(Color32::from_rgb(37, 99, 235));
-                    if ui.add(save_btn).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
-                        if self.st.save_project() {
-                            close_modal = true;
-                            do_exit = true;
-                        }
                     }
                 });
             });
 
-        if close_modal {
-            self.show_unsaved_confirm = false;
+        if do_create {
+            let name = self.new_project_modal.name.trim();
+            if name.is_empty() {
+                self.new_project_modal.error_message = Some("プロジェクト名を入力してください".to_string());
+            } else {
+                let fps_val = self.new_project_modal.fps_num as f64 / self.new_project_modal.fps_den.max(1) as f64;
+                let length_frames = (self.new_project_modal.length_seconds as f64 * fps_val).round().max(1.0) as u32;
+
+                let config = NewProjectConfig {
+                    name: name.to_string(),
+                    dir: self.new_project_modal.dir.clone(),
+                    format: self.new_project_modal.format,
+                    width: self.new_project_modal.width,
+                    height: self.new_project_modal.height,
+                    fps_num: self.new_project_modal.fps_num,
+                    fps_den: self.new_project_modal.fps_den,
+                    length_frames,
+                    autosave_enabled: self.new_project_modal.autosave_enabled,
+                };
+
+                match self.st.create_new_project_with_config(config) {
+                    Ok(_) => {
+                        self.new_project_modal.is_open = false;
+                        self.new_project_modal.error_message = None;
+                    }
+                    Err(e) => {
+                        self.new_project_modal.error_message = Some(e);
+                    }
+                }
+            }
         }
-        if do_exit {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+
+        if close_modal {
+            self.new_project_modal.is_open = false;
+            self.new_project_modal.error_message = None;
         }
     }
 }

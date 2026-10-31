@@ -461,4 +461,69 @@ mod tests {
 
         println!("mayamaid.aup all scenes and key frames preview rendering passed successfully!");
     }
+
+    #[test]
+    fn test_create_new_project_with_config_and_autosave() {
+        use std::time::{Duration, Instant};
+
+        let temp_dir = std::env::temp_dir().join("openavi_test_autosave");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let _ = std::fs::create_dir_all(&temp_dir);
+
+        let mut st = state::EditorState::default();
+        assert!(!st.autosave.enabled, "初期状態の自動保存はオフであること");
+
+        // 1. 新規プロジェクトの作成 (.aup2 形式、明示的に自動保存有効化)
+        let config = state::NewProjectConfig {
+            name: "test_project_autosave".into(),
+            dir: temp_dir.clone(),
+            format: state::ProjectFormat::Aup2,
+            width: 1920,
+            height: 1080,
+            fps_num: 60,
+            fps_den: 1,
+            length_frames: 1800,
+            autosave_enabled: true,
+        };
+
+        let created_path = st.create_new_project_with_config(config).expect("プロジェクト作成成功");
+        assert!(created_path.exists(), "作成されたファイルが存在すること");
+        assert_eq!(created_path.file_name().unwrap(), "test_project_autosave.aup2");
+        assert_eq!(st.file_path.as_deref(), Some(created_path.as_path()));
+        assert!(!st.dirty, "作成直後は未変更 (dirty == false)");
+        assert!(st.autosave.enabled, "自動保存が有効であること");
+
+        // 2. レイヤーに変更を加えて mark_dirty する（ドラッグやパラメータ操作直後）
+        st.scene.settings.width = 1280;
+        st.mark_dirty();
+
+        // 変更直後 (0.3秒未満) はまだデバウンス中で tick では保存されない
+        st.tick();
+        assert!(st.dirty, "デバウンス中のため直後は dirty のまま");
+        assert_eq!(st.autosave.auto_save_count, 0);
+
+        // 3. 操作完了（0.3秒以上経過）後、tick で即座に上書き保存される
+        st.autosave.dirty_since = Some(Instant::now() - Duration::from_millis(350));
+        st.tick();
+
+        assert!(!st.dirty, "変更が即座に上書き保存されて dirty == false にリセットされること");
+        assert_eq!(st.autosave.auto_save_count, 1, "自動保存カウントが 1 に増加すること");
+
+        // バックアップファイル (.bak) は生成されないこと（不要仕様）
+        let bak_path = temp_dir.join("test_project_autosave.bak");
+        assert!(!bak_path.exists(), "バックアップ (.bak) は生成されないこと");
+
+        // 4. 自動保存をオフにした場合、変更があっても自動保存されないこと
+        st.autosave.enabled = false;
+        st.scene.settings.width = 1920;
+        st.mark_dirty();
+        st.autosave.dirty_since = Some(Instant::now() - Duration::from_millis(500));
+
+        st.tick();
+        assert!(st.dirty, "自動保存無効時は変更があっても dirty のまま");
+        assert_eq!(st.autosave.auto_save_count, 1, "自動保存カウントは増加しない");
+
+        // 後片付け
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }

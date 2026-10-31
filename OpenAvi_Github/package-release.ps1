@@ -144,14 +144,17 @@ New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 Write-Host "Installed files to: $installDir"
 
 $desktopDir = Join-Path $env:USERPROFILE "Desktop"
-if (-not (Test-Path $desktopDir)) {
+$hasDesktop = try { Test-Path $desktopDir -ErrorAction SilentlyContinue } catch { $false }
+if (-not $hasDesktop) {
     $desktopDir = [Environment]::GetFolderPath("Desktop")
+    $hasDesktop = try { Test-Path $desktopDir -ErrorAction SilentlyContinue } catch { $false }
 }
 $startPrograms = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs"
 
 $ws = New-Object -ComObject WScript.Shell
 foreach ($folder in @($desktopDir, $startPrograms)) {
-    if ($folder -and (Test-Path $folder)) {
+    $folderExists = try { $folder -and (Test-Path $folder -ErrorAction SilentlyContinue) } catch { $false }
+    if ($folderExists) {
         try {
             $lnkPath = Join-Path $folder "OpenAvi.lnk"
             $lnk = $ws.CreateShortcut($lnkPath)
@@ -168,20 +171,26 @@ foreach ($folder in @($desktopDir, $startPrograms)) {
 }
 
 # 5. Sync Desktop ZIP, Desktop folder, and OpenAvi_Github folder
-Copy-Item -Force $zipPath (Join-Path $desktopDir "OpenAvi-windows-x64.zip")
+if ($hasDesktop) {
+    try {
+        Copy-Item -Force $zipPath (Join-Path $desktopDir "OpenAvi-windows-x64.zip")
 
-$desktopExtract = Join-Path $desktopDir "OpenAvi-windows-x64"
-if (Test-Path $desktopExtract) {
-    & robocopy $stage $desktopExtract /MIR /R:1 /W:1 | Out-Null
-    Write-Host "Updated desktop folder: $desktopExtract"
+        $desktopExtract = Join-Path $desktopDir "OpenAvi-windows-x64"
+        if (Test-Path $desktopExtract -ErrorAction SilentlyContinue) {
+            & robocopy $stage $desktopExtract /MIR /R:1 /W:1 | Out-Null
+            Write-Host "Updated desktop folder: $desktopExtract"
+        }
+
+        $githubDir = Join-Path $desktopDir "OpenAvi_Github"
+        if (Test-Path $githubDir -ErrorAction SilentlyContinue) {
+            & robocopy $PSScriptRoot $githubDir /MIR /XD target dist .git /XF *.pdb | Out-Null
+            Write-Host "Synced source tree to: $githubDir"
+        }
+    } catch {
+        Write-Warning "Skipped syncing to Desktop folder: $_"
+    }
 }
 
-if (Test-Path "target\debug\openavi.exe") {
+if (Test-Path "target\debug\openavi.exe" -ErrorAction SilentlyContinue) {
     Copy-Item (Join-Path $stage "openavi.exe") "target\debug\openavi.exe" -Force
-}
-
-$githubDir = Join-Path $desktopDir "OpenAvi_Github"
-if (Test-Path $githubDir) {
-    & robocopy $PSScriptRoot $githubDir /MIR /XD target dist .git /XF *.pdb | Out-Null
-    Write-Host "Synced source tree to: $githubDir"
 }

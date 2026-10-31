@@ -123,6 +123,165 @@ pub struct EditorState {
     /// FFmpeg（動画・音声デコーダー）のアプリ内ダウンロード状態
     pub ffmpeg_dl: FfmpegDownload,
     pub dirty: bool,
+    /// 自動保存設定
+    pub autosave: AutoSaveSettings,
+}
+
+/// プロジェクトの自動保存（オートセーブ）設定。
+#[derive(Debug, Clone)]
+pub struct AutoSaveSettings {
+    /// 自動保存が有効かどうか
+    pub enabled: bool,
+    /// 変更発生時のタイムスタンプ（操作完了後の即時上書き保存用デバウンス）
+    pub dirty_since: Option<Instant>,
+    /// 直近に保存された時刻
+    pub last_saved: Option<Instant>,
+    /// 直近の保存成功時刻の文字列表現 (例: "14:25:30")
+    pub last_saved_time_str: Option<String>,
+    /// セッション中の自動保存回数
+    pub auto_save_count: usize,
+}
+
+impl Default for AutoSaveSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false, // デフォルトではオフ
+            dirty_since: None,
+            last_saved: None,
+            last_saved_time_str: None,
+            auto_save_count: 0,
+        }
+    }
+}
+
+/// 新規プロジェクト作成時のファイル保存形式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectFormat {
+    /// AviUtl2 プロジェクト (*.aup2)
+    Aup2,
+    /// 初代 AviUtl プロジェクト (*.aup)
+    Aup,
+    /// 拡張編集オブジェクトファイル (*.exo)
+    Exo,
+}
+
+impl ProjectFormat {
+    pub fn extension(&self) -> &'static str {
+        match self {
+            ProjectFormat::Aup2 => "aup2",
+            ProjectFormat::Aup => "aup",
+            ProjectFormat::Exo => "exo",
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            ProjectFormat::Aup2 => "AviUtl2 プロジェクト (*.aup2) [推奨・高速・完全対応]",
+            ProjectFormat::Aup => "初代 AviUtl プロジェクト (*.aup) [クラシック互換]",
+            ProjectFormat::Exo => "拡張編集オブジェクトファイル (*.exo)",
+        }
+    }
+}
+
+/// 解像度・フレームレートのプリセット。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectPreset {
+    Fhd60p,
+    Fhd30p,
+    Hd720p,
+    ShortsVertical,
+    Uhd4k,
+    Custom,
+}
+
+impl ProjectPreset {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ProjectPreset::Fhd60p => "Full HD 1080p 60fps (1920×1080, YouTube / Twitch 推奨)",
+            ProjectPreset::Fhd30p => "Full HD 1080p 30fps (1920×1080, 標準動画)",
+            ProjectPreset::Hd720p => "HD 720p 30fps (1280×720, 軽量)",
+            ProjectPreset::ShortsVertical => "縦型ショート 60fps (1080×1920, TikTok / YouTube Shorts / Reels)",
+            ProjectPreset::Uhd4k => "4K UHD 60fps (3840×2160, 超高精細)",
+            ProjectPreset::Custom => "カスタム設定",
+        }
+    }
+
+    pub fn apply(&self, width: &mut u32, height: &mut u32, fps_num: &mut u32, fps_den: &mut u32) {
+        match self {
+            ProjectPreset::Fhd60p => {
+                *width = 1920;
+                *height = 1080;
+                *fps_num = 60;
+                *fps_den = 1;
+            }
+            ProjectPreset::Fhd30p => {
+                *width = 1920;
+                *height = 1080;
+                *fps_num = 30;
+                *fps_den = 1;
+            }
+            ProjectPreset::Hd720p => {
+                *width = 1280;
+                *height = 720;
+                *fps_num = 30;
+                *fps_den = 1;
+            }
+            ProjectPreset::ShortsVertical => {
+                *width = 1080;
+                *height = 1920;
+                *fps_num = 60;
+                *fps_den = 1;
+            }
+            ProjectPreset::Uhd4k => {
+                *width = 3840;
+                *height = 2160;
+                *fps_num = 60;
+                *fps_den = 1;
+            }
+            ProjectPreset::Custom => {}
+        }
+    }
+}
+
+/// 新規プロジェクト作成時の設定情報。
+#[derive(Debug, Clone)]
+pub struct NewProjectConfig {
+    pub name: String,
+    pub dir: PathBuf,
+    pub format: ProjectFormat,
+    pub width: u32,
+    pub height: u32,
+    pub fps_num: u32,
+    pub fps_den: u32,
+    pub length_frames: u32,
+    pub autosave_enabled: bool,
+}
+
+/// 日本標準時 (JST = UTC+9) の現在時刻文字列 "HH:MM:SS" を取得します。
+pub fn current_time_string() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let dur = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let total_secs = dur.as_secs();
+    let jst_secs = total_secs + 9 * 3600;
+    let sec = jst_secs % 60;
+    let min = (jst_secs / 60) % 60;
+    let hour = (jst_secs / 3600) % 24;
+    format!("{:02}:{:02}:{:02}", hour, min, sec)
+}
+
+/// デフォルトの動画プロジェクト保存先ディレクトリ。
+pub fn default_projects_dir() -> PathBuf {
+    if let Some(user) = std::env::var_os("USERPROFILE") {
+        let p = PathBuf::from(&user).join("Videos").join("OpenAvi");
+        if p.exists() || std::fs::create_dir_all(&p).is_ok() {
+            return p;
+        }
+        let doc = PathBuf::from(&user).join("Documents").join("OpenAvi");
+        if doc.exists() || std::fs::create_dir_all(&doc).is_ok() {
+            return doc;
+        }
+    }
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 /// FFmpeg アプリ内ダウンロードの進行状態。
@@ -196,6 +355,7 @@ impl Default for EditorState {
             resolved_paths: HashMap::new(),
             ffmpeg_dl: FfmpegDownload::Idle,
             dirty: false,
+            autosave: AutoSaveSettings::default(),
         }
     }
 }
@@ -296,6 +456,7 @@ impl EditorState {
     }
 
     /// 再生中なら経過時間からフレームを進め、音声を完全同期再生します（末尾でループ）。
+    /// また、設定に応じてプロジェクトの自動保存（オートセーブ）を定期実行します。
     pub fn tick(&mut self) {
         if self.playing {
             if let Some((origin, start)) = self.play_origin {
@@ -311,6 +472,138 @@ impl EditorState {
         } else {
             self.audio.stop();
         }
+
+        // 編集変更がある場合の自動保存チェック
+        self.autosave_tick();
+    }
+
+    /// 編集変更が発生したことを記録し、自動保存のデバウンスタイマーを開始します。
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+        if self.autosave.dirty_since.is_none() {
+            self.autosave.dirty_since = Some(Instant::now());
+        }
+    }
+
+    /// 自動保存のチェック・実行。
+    /// 有効時は、レイヤーやパラメータに変更が生じる（dirty == true）たびに
+    /// 操作直後（0.3秒後）に自動でプロジェクトファイルへ即座に上書き保存します。
+    pub fn autosave_tick(&mut self) {
+        if !self.autosave.enabled || !self.dirty {
+            self.autosave.dirty_since = None;
+            return;
+        }
+        let Some(path) = self.file_path.clone() else {
+            return;
+        };
+
+        // 変更検知の初回時刻を記録
+        let dirty_at = *self.autosave.dirty_since.get_or_insert_with(Instant::now);
+
+        // 変更直後 0.3 秒静止（ドラッグや入力完了直後）したら即座に上書き保存
+        if dirty_at.elapsed() >= std::time::Duration::from_millis(300) {
+            match self.write_to_path(&path) {
+                Ok(()) => {
+                    self.autosave.auto_save_count += 1;
+                    self.autosave.dirty_since = None;
+                    let time_str = self.autosave.last_saved_time_str.as_deref().unwrap_or("");
+                    let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    self.status = format!("変更を自動保存しました ({fname}) [{time_str}]");
+                    log::info!("[自動保存] {time_str}: {}", path.display());
+                }
+                Err(e) => {
+                    self.status = format!("[自動保存失敗] {e}");
+                    log::warn!("[自動保存失敗] {e}");
+                }
+            }
+        }
+    }
+
+    /// プロジェクトデータを指定のパスへ書き出し、保存ステータスを更新します。
+    pub fn write_to_path(&mut self, path: &Path) -> Result<(), String> {
+        let is_legacy_aup = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("aup"));
+        let is_exo = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("exo"));
+
+        let bytes = if is_legacy_aup {
+            au2_aup::write_aup_bytes(&self.scene)
+        } else if is_exo {
+            au2_exo::write_exo_bytes(&self.scene, self.encoding)
+        } else {
+            au2_aup::write_aup2_bytes(&self.scene, Some(path), self.frame)
+        };
+
+        std::fs::write(path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+        self.dirty = false;
+        self.autosave.dirty_since = None;
+        self.autosave.last_saved = Some(Instant::now());
+        self.autosave.last_saved_time_str = Some(current_time_string());
+        Ok(())
+    }
+
+    /// 事前設定ダイアログで指定された名前・形式・プリセット・自動保存フラグで新規プロジェクトを作成します。
+    pub fn create_new_project_with_config(&mut self, config: NewProjectConfig) -> Result<PathBuf, String> {
+        let ext = config.format.extension();
+        let file_name = if config.name.to_ascii_lowercase().ends_with(&format!(".{ext}")) {
+            config.name.clone()
+        } else {
+            format!("{}.{ext}", config.name)
+        };
+        let target_path = config.dir.join(file_name);
+
+        if let Err(e) = std::fs::create_dir_all(&config.dir) {
+            return Err(format!("保存先フォルダの作成に失敗しました: {e}"));
+        }
+
+        let mut settings = SceneSettings::default();
+        settings.width = config.width;
+        settings.height = config.height;
+        settings.frame_rate = au2_core::Rational::new(config.fps_num, config.fps_den);
+        settings.length = config.length_frames;
+
+        let plugins = self.plugins.clone();
+        let sources = std::mem::take(&mut self.sources);
+        *self = Self {
+            scene: Scene::new("Root", settings),
+            scenes: std::collections::BTreeMap::new(),
+            file_path: Some(target_path.clone()),
+            encoding: TextEncoding::Utf8,
+            frame: 0,
+            playing: false,
+            play_origin: None,
+            selected: None,
+            status: format!("新規プロジェクトを作成しました: {}", target_path.display()),
+            warnings: Vec::new(),
+            timeline: TimelineView::default(),
+            plugins,
+            media: MediaCache::new(),
+            audio: AudioEngine::new(),
+            sources,
+            selected_source: None,
+            static_textures: HashMap::new(),
+            stream_textures: HashMap::new(),
+            resolved_paths: HashMap::new(),
+            ffmpeg_dl: FfmpegDownload::Idle,
+            dirty: false,
+            autosave: AutoSaveSettings {
+                enabled: config.autosave_enabled,
+                dirty_since: None,
+                last_saved: Some(Instant::now()),
+                last_saved_time_str: Some(current_time_string()),
+                auto_save_count: 0,
+            },
+        };
+
+        if let Err(e) = self.write_to_path(&target_path) {
+            return Err(format!("プロジェクト初期ファイルの作成に失敗しました: {e}"));
+        }
+        self.dirty = false;
+        Ok(target_path)
     }
 
     /// パス解決をメモリキャッシュ経由で行い、毎フレームの OS ファイルシステム I/O を排除します。
@@ -500,6 +793,7 @@ impl EditorState {
         self.audio.sync_playback(self.playing, self.frame, fps);
     }
 
+    #[allow(dead_code)]
     pub fn new_scene(&mut self) {
         let plugins = self.plugins.clone();
         let sources = std::mem::take(&mut self.sources);
@@ -929,20 +1223,11 @@ impl EditorState {
     /// プロジェクトを保存します（保存先が決まっていれば上書き、未設定ならダイアログ）。
     pub fn save_project(&mut self) -> bool {
         if let Some(path) = self.file_path.clone() {
-            let is_legacy_aup = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| e.eq_ignore_ascii_case("aup"));
-            let bytes = if is_legacy_aup {
-                au2_aup::write_aup_bytes(&self.scene)
-            } else {
-                au2_aup::write_aup2_bytes(&self.scene, Some(&path), self.frame)
-            };
-            match std::fs::write(&path, bytes) {
+            match self.write_to_path(&path) {
                 Ok(()) => {
-                    let kind_label = if is_legacy_aup { ".aup" } else { ".aup2" };
-                    self.status = format!("プロジェクトを {} に保存しました ({kind_label})", path.display());
-                    self.dirty = false;
+                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                    let time_str = self.autosave.last_saved_time_str.as_deref().unwrap_or("");
+                    self.status = format!("プロジェクトを {} に保存しました (.{ext}) [{time_str}]", path.display());
                     true
                 }
                 Err(e) => {
@@ -971,21 +1256,12 @@ impl EditorState {
             }
         }
         if let Some(path) = dlg.save_file() {
-            let is_legacy_aup = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| e.eq_ignore_ascii_case("aup"));
-            let bytes = if is_legacy_aup {
-                au2_aup::write_aup_bytes(&self.scene)
-            } else {
-                au2_aup::write_aup2_bytes(&self.scene, Some(&path), self.frame)
-            };
-            match std::fs::write(&path, bytes) {
+            match self.write_to_path(&path) {
                 Ok(()) => {
-                    let kind_label = if is_legacy_aup { ".aup" } else { ".aup2" };
-                    self.status = format!("プロジェクトを {} に保存しました ({kind_label})", path.display());
+                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                    let time_str = self.autosave.last_saved_time_str.as_deref().unwrap_or("");
+                    self.status = format!("プロジェクトを {} に保存しました (.{ext}) [{time_str}]", path.display());
                     self.file_path = Some(path);
-                    self.dirty = false;
                     true
                 }
                 Err(e) => {
