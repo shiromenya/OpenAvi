@@ -344,6 +344,70 @@ fn finalize(segments: Vec<Segment>, scene: &mut Scene, warnings: &mut Vec<String
     }
 }
 
+/// バイト列（Shift_JIS / UTF-8 自動判別）から `.exa`（拡張編集エイリアスファイル）を読み込みます。
+pub fn parse_exa_bytes(bytes: &[u8]) -> Result<TimelineObject, ExoError> {
+    let (text, _) = encoding::decode(bytes);
+    parse_exa_str(&text)
+}
+
+/// デコード済み文字列から `.exa`（拡張編集エイリアスファイル）を読み込みます。
+pub fn parse_exa_str(text: &str) -> Result<TimelineObject, ExoError> {
+    let mut warnings = Vec::new();
+    let sections = ini::parse(text, &mut warnings);
+
+    let mut header_sec: Option<RawSection> = None;
+    let mut eff_secs: Vec<(u32, RawSection)> = Vec::new();
+
+    for s in sections {
+        let lower = s.name.to_ascii_lowercase();
+        if lower == "exedit" {
+            continue;
+        }
+        if matches!(lower.as_str(), "vo" | "ao" | "eo" | "0") {
+            header_sec = Some(s);
+        } else if let Some((prefix, idx_str)) = lower.split_once('.') {
+            if matches!(prefix, "vo" | "ao" | "eo" | "0") {
+                if let Ok(idx) = idx_str.parse::<u32>() {
+                    eff_secs.push((idx, s));
+                }
+            }
+        }
+    }
+
+    if header_sec.is_none() && eff_secs.is_empty() {
+        return Err(ExoError::MissingHeader);
+    }
+
+    let mut h = header_sec.unwrap_or_else(|| RawSection {
+        name: "0".to_string(),
+        line: 1,
+        entries: Vec::new(),
+    });
+    if h.get("start").is_none() {
+        h.entries.push(("start".into(), "1".into()));
+    }
+    if h.get("end").is_none() {
+        h.entries.push(("end".into(), "60".into()));
+    }
+    if h.get("layer").is_none() {
+        h.entries.push(("layer".into(), "1".into()));
+    }
+    if h.name.eq_ignore_ascii_case("ao") && h.get("audio").is_none() {
+        h.entries.push(("audio".into(), "1".into()));
+    }
+
+    let eff_refs: Vec<(u32, &RawSection)> = eff_secs.iter().map(|(i, s)| (*i, s)).collect();
+    let seg = parse_segment(0, &h, eff_refs, &mut warnings)?;
+    let mut scene = Scene::default();
+    finalize(vec![seg], &mut scene, &mut warnings);
+    scene
+        .layers
+        .into_iter()
+        .flat_map(|l| l.objects)
+        .next()
+        .ok_or(ExoError::MissingHeader)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,5 +439,39 @@ mod tests {
         let i = interpolation_from_code(1 | FLAG_ACCEL | FLAG_DECEL, None, None);
         assert_eq!(i.kind, MoveKind::Linear);
         assert_eq!(i.easing, Easing::EaseInOut);
+    }
+
+    #[test]
+    fn parse_exa_alias_format() {
+        let exa = "\
+[vo]
+start=1
+end=120
+overlay=1
+camera=0
+[vo.0]
+_name=図形
+サイズ=150
+縦横比=0.0
+ライン幅=4000
+type=2
+color=ff8800
+name=
+[vo.1]
+_name=標準描画
+X=10.0,50.0,7
+Y=0.0,100.0,8,15
+Z=0.0
+拡大率=100.00
+透明度=0.0
+回転=0.00
+blend=0
+";
+        let obj = parse_exa_str(exa).expect("parse .exa alias");
+        assert_eq!(obj.length(), 120);
+        assert_eq!(obj.effects.len(), 2);
+        assert_eq!(obj.effects[0].name, "図形");
+        assert_eq!(obj.effects[1].name, "標準描画");
+        assert!((obj.effects[1].eval("X", 60, 0.0) - 30.0).abs() < 1.0);
     }
 }

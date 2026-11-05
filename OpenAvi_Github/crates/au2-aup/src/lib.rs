@@ -65,6 +65,18 @@ pub struct AupDocument {
 
 /// シーンを本家 AviUtl2 の `.aup2` (UTF-8 INI 形式) テキストにシリアライズします。
 pub fn write_aup2_string(scene: &Scene, file_path: Option<&Path>, cursor_frame: Frame) -> String {
+    let mut scenes = BTreeMap::new();
+    scenes.insert(0, scene.clone());
+    write_aup2_multi_scene_string(&scenes, 0, file_path, cursor_frame)
+}
+
+/// マルチシーン (`scenes`) を本家 AviUtl2 の `.aup2` (UTF-8 INI 形式) テキストにシリアライズします。
+pub fn write_aup2_multi_scene_string(
+    scenes: &BTreeMap<u32, Scene>,
+    display_scene: u32,
+    file_path: Option<&Path>,
+    cursor_frame: Frame,
+) -> String {
     let mut out = String::new();
     let file_str = file_path
         .map(|p| p.display().to_string())
@@ -72,77 +84,147 @@ pub fn write_aup2_string(scene: &Scene, file_path: Option<&Path>, cursor_frame: 
 
     let _ = write!(
         out,
-        "[project]\r\nversion={AUP2_DEFAULT_VERSION}\r\nfile={file_str}\r\ndisplay.scene=0\r\npreview.scene=0\r\n"
+        "[project]\r\nversion={AUP2_DEFAULT_VERSION}\r\nfile={file_str}\r\ndisplay.scene={display_scene}\r\npreview.scene={display_scene}\r\n"
     );
 
-    let s = &scene.settings;
-    let fps = s.frame_rate.as_f64().max(1.0);
-    let _ = write!(
-        out,
-        "[scene.0]\r\nscene=0\r\nname={}\r\nvideo.width={}\r\nvideo.height={}\r\nvideo.rate={}\r\nvideo.scale={}\r\naudio.rate={}\r\ncursor.frame={cursor_frame}\r\ncursor.layer=0\r\npreview.frame=0\r\ndisplay.frame=0\r\ndisplay.layer=0\r\ndisplay.zoom=10000\r\ndisplay.order=0\r\ndisplay.camera=\r\ndisplay.grid.x=16,-16\r\ndisplay.grid.y=16,-16\r\ndisplay.grid.width=200\r\ndisplay.grid.height=200\r\ndisplay.grid.step=200.000000\r\ndisplay.grid.range=10000.000000\r\ndisplay.tempo.bpm=120.000000\r\ndisplay.tempo.beat=4\r\ndisplay.tempo.offset=0.000000\r\n",
-        scene.name,
-        s.width,
-        s.height,
-        s.frame_rate.num,
-        s.frame_rate.den,
-        s.audio_rate,
-    );
+    let mut layer_sec_idx = 0usize;
+    for (&scene_id, scene) in scenes {
+        let s = &scene.settings;
+        let cur = if scene_id == display_scene { cursor_frame } else { 0 };
+        let _ = write!(
+            out,
+            "[scene.{scene_id}]\r\nscene={scene_id}\r\nname={}\r\nvideo.width={}\r\nvideo.height={}\r\nvideo.rate={}\r\nvideo.scale={}\r\naudio.rate={}\r\ncursor.frame={cur}\r\ncursor.layer=0\r\npreview.frame=0\r\ndisplay.frame=0\r\ndisplay.layer=0\r\ndisplay.zoom=10000\r\ndisplay.order=0\r\ndisplay.camera=\r\ndisplay.grid.x=16,-16\r\ndisplay.grid.y=16,-16\r\ndisplay.grid.width=200\r\ndisplay.grid.height=200\r\ndisplay.grid.step=200.000000\r\ndisplay.grid.range=10000.000000\r\ndisplay.tempo.bpm=120.000000\r\ndisplay.tempo.beat=4\r\ndisplay.tempo.offset=0.000000\r\n",
+            scene.name,
+            s.width,
+            s.height,
+            s.frame_rate.num,
+            s.frame_rate.den,
+            s.audio_rate,
+        );
 
-    let mut objs: Vec<(usize, &TimelineObject)> = scene
-        .layers
-        .iter()
-        .enumerate()
-        .flat_map(|(li, l)| l.objects.iter().map(move |o| (li, o)))
-        .collect();
-    objs.sort_by_key(|(li, o)| (*li, o.frame_start));
-
-    for (index, (layer, obj)) in objs.into_iter().enumerate() {
-        let keys = obj.key_frames();
-        // 本家 AviUtl2 (.aup2) では:
-        // - layer= は 0 始まり (Layer 1 -> 0)
-        // - frame= は start,mid1,...,end のカンマ区切り 0 始まり絶対フレーム列
-        let frame_list: String = if obj.midpoints.is_empty() {
-            format!("{},{}", obj.frame_start, obj.frame_end)
-        } else {
-            let mut frames = Vec::with_capacity(obj.midpoints.len() + 2);
-            frames.push(obj.frame_start.to_string());
-            for &m in &obj.midpoints {
-                frames.push((obj.frame_start + m).to_string());
+        for (li, layer) in scene.layers.iter().enumerate() {
+            let has_name = layer.name.as_ref().is_some_and(|n| !n.is_empty());
+            if has_name || !layer.visible || layer.locked {
+                let _ = write!(out, "[layer.{layer_sec_idx}]\r\nlayer={li}\r\n");
+                if scene_id > 0 || scenes.len() > 1 {
+                    let _ = write!(out, "scene={scene_id}\r\n");
+                }
+                if let Some(name) = &layer.name {
+                    if !name.is_empty() {
+                        let _ = write!(out, "name={name}\r\n");
+                    }
+                }
+                if !layer.visible {
+                    out.push_str("hide=1\r\n");
+                }
+                if layer.locked {
+                    out.push_str("lock=1\r\n");
+                }
+                layer_sec_idx += 1;
             }
-            frames.push(obj.frame_end.to_string());
-            frames.join(",")
-        };
-
-        let _ = write!(out, "[{index}]\r\nlayer={layer}\r\nframe={frame_list}\r\n");
-        if obj.clipping {
-            out.push_str("clipping=1\r\n");
         }
-        if obj.camera_target {
-            out.push_str("camera=1\r\n");
-        }
+    }
 
-        let source_kind = obj.source().map(|e| e.kind.clone());
-        let obj_dur_sec = (obj.length() as f64) / fps;
+    let mut obj_global_idx = 0usize;
+    for (&scene_id, scene) in scenes {
+        let fps = scene.settings.frame_rate.as_f64().max(1.0);
+        let mut objs: Vec<(usize, &TimelineObject)> = scene
+            .layers
+            .iter()
+            .enumerate()
+            .flat_map(|(li, l)| l.objects.iter().map(move |o| (li, o)))
+            .collect();
+        objs.sort_by_key(|(li, o)| (*li, o.frame_start));
 
-        for (ei, eff) in obj.effects.iter().enumerate() {
-            write_aup2_effect(
+        for (layer, obj) in objs {
+            write_aup2_object_section(
                 &mut out,
-                index,
-                ei,
-                eff,
-                &source_kind,
-                &keys,
-                obj_dur_sec,
+                obj_global_idx,
+                if scene_id > 0 || scenes.len() > 1 {
+                    Some(scene_id)
+                } else {
+                    None
+                },
+                layer,
+                obj,
+                fps,
             );
+            obj_global_idx += 1;
         }
     }
 
     out
 }
 
+fn write_aup2_object_section(
+    out: &mut String,
+    index: usize,
+    scene_id: Option<u32>,
+    layer: usize,
+    obj: &TimelineObject,
+    fps: f64,
+) {
+    let keys = obj.key_frames();
+    let frame_list: String = if obj.midpoints.is_empty() {
+        format!("{},{}", obj.frame_start, obj.frame_end)
+    } else {
+        let mut frames = Vec::with_capacity(obj.midpoints.len() + 2);
+        frames.push(obj.frame_start.to_string());
+        for &m in &obj.midpoints {
+            frames.push((obj.frame_start + m).to_string());
+        }
+        frames.push(obj.frame_end.to_string());
+        frames.join(",")
+    };
+
+    let _ = write!(out, "[{index}]\r\n");
+    if let Some(sid) = scene_id {
+        if sid > 0 {
+            let _ = write!(out, "scene={sid}\r\n");
+        }
+    }
+    let _ = write!(out, "layer={layer}\r\nframe={frame_list}\r\n");
+    if obj.clipping {
+        out.push_str("clipping=1\r\n");
+    }
+    if obj.camera_target {
+        out.push_str("camera=1\r\n");
+    }
+
+    let source_kind = obj.source().map(|e| e.kind.clone());
+    let obj_dur_sec = (obj.length() as f64) / fps;
+
+    for (ei, eff) in obj.effects.iter().enumerate() {
+        write_aup2_effect(
+            out,
+            index,
+            ei,
+            eff,
+            &source_kind,
+            &keys,
+            obj_dur_sec,
+        );
+    }
+}
+
 /// シーンを `.aup2` (UTF-8 バイト列) に変換します。
 pub fn write_aup2_bytes(scene: &Scene, file_path: Option<&Path>, cursor_frame: Frame) -> Vec<u8> {
     write_aup2_string(scene, file_path, cursor_frame).into_bytes()
+}
+
+/// オブジェクト群を本家 AviUtl2 のエイリアスファイル（`.object`）文字列にシリアライズします。
+pub fn write_object_alias_string(objects: &[TimelineObject], fps: f64) -> String {
+    let mut out = String::new();
+    let fps = fps.max(1.0);
+    for (idx, obj) in objects.iter().enumerate() {
+        write_aup2_object_section(&mut out, idx, None, 0, obj, fps);
+    }
+    out
+}
+
+/// オブジェクト群をエイリアスファイル（`.object` UTF-8 バイト列）に変換します。
+pub fn write_object_alias_bytes(objects: &[TimelineObject], fps: f64) -> Vec<u8> {
+    write_object_alias_string(objects, fps).into_bytes()
 }
 
 fn write_aup2_effect(
@@ -626,8 +708,108 @@ pub fn parse_aup2_bytes(bytes: &[u8]) -> Result<AupDocument, AupError> {
     parse_aup2_str(&text)
 }
 
+/// AviUtl2 のエイリアスファイル（`.object`）バイト列を解析して [`TimelineObject`] 一覧を返します。
+pub fn parse_object_alias_bytes(bytes: &[u8]) -> Result<Vec<TimelineObject>, AupError> {
+    let text = if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        String::from_utf8_lossy(rest).into_owned()
+    } else if let Ok(s) = std::str::from_utf8(bytes) {
+        s.to_owned()
+    } else {
+        encoding_rs::SHIFT_JIS.decode(bytes).0.into_owned()
+    };
+    parse_object_alias_str(&text)
+}
+
+/// AviUtl2 のエイリアスファイル（`.object`）テキストを解析して [`TimelineObject`] 一覧を返します。
+pub fn parse_object_alias_str(text: &str) -> Result<Vec<TimelineObject>, AupError> {
+    let doc = parse_aup2_or_alias_str(text, true)?;
+    let mut objs: Vec<TimelineObject> = doc
+        .scene
+        .layers
+        .into_iter()
+        .flat_map(|l| l.objects)
+        .collect();
+    if objs.is_empty() {
+        return Err(AupError::InvalidHeader);
+    }
+    let min_start = objs.iter().map(|o| o.frame_start).min().unwrap_or(0);
+    for o in &mut objs {
+        o.frame_start -= min_start;
+        o.frame_end -= min_start;
+    }
+    Ok(objs)
+}
+
+/// AviUtl2 のファイルパス変数（`%AppInstall%`, `%AppData%`, `%Plugin%`, `%Script%`, `%Figure%`, `%Transition%` 等）を展開します。
+pub fn expand_aviutl2_path_vars(raw_path: &str) -> String {
+    if !raw_path.contains('%') {
+        return raw_path.to_string();
+    }
+    let app_install = [
+        r"C:\Users\user\Desktop\aviutl2_v2.1.16",
+        r"C:\Program Files\AviUtl2",
+    ]
+    .into_iter()
+    .find(|p| Path::new(p).exists())
+    .map(str::to_string)
+    .or_else(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(|p| p.to_string_lossy().into_owned()))
+    })
+    .unwrap_or_else(|| ".".to_string());
+
+    let app_data = [
+        r"C:\ProgramData\aviutl2",
+        &format!("{}\\data", app_install),
+    ]
+    .into_iter()
+    .find(|p| Path::new(p).exists())
+    .map(str::to_string)
+    .unwrap_or_else(|| app_install.clone());
+
+    let vars = [
+        ("%AppInstall%", app_install.clone()),
+        ("%AppData%", app_data.clone()),
+        ("%Plugin%", format!("{}\\Plugin", app_data)),
+        ("%Script%", format!("{}\\Script", app_data)),
+        ("%Default%", format!("{}\\Default", app_data)),
+        ("%Alias%", format!("{}\\Alias", app_data)),
+        ("%Preset%", format!("{}\\Preset", app_data)),
+        ("%Figure%", format!("{}\\Figure", app_data)),
+        ("%Transition%", format!("{}\\Transition", app_data)),
+        ("%Font%", format!("{}\\Font", app_data)),
+        ("%Language%", format!("{}\\Language", app_data)),
+        ("%Backup%", format!("{}\\Backup", app_data)),
+        ("%Log%", format!("{}\\Log", app_data)),
+        ("%Package%", format!("{}\\Package", app_data)),
+        ("%Batch%", format!("{}\\Batch", app_data)),
+    ];
+
+    let mut out = raw_path.to_string();
+    for (var, replacement) in vars {
+        if out.to_ascii_lowercase().contains(&var.to_ascii_lowercase()) {
+            // 大文字小文字を区別せず置換
+            let lower_out = out.to_ascii_lowercase();
+            let lower_var = var.to_ascii_lowercase();
+            if let Some(pos) = lower_out.find(&lower_var) {
+                let mut next = String::with_capacity(out.len() + replacement.len());
+                next.push_str(&out[..pos]);
+                next.push_str(&replacement);
+                next.push_str(&out[pos + var.len()..]);
+                out = next;
+            }
+        }
+    }
+    out
+}
+
 /// `.aup2` テキストを解析して [`AupDocument`] を返します。
 pub fn parse_aup2_str(text: &str) -> Result<AupDocument, AupError> {
+    parse_aup2_or_alias_str(text, false)
+}
+
+fn parse_aup2_or_alias_str(text: &str, allow_alias: bool) -> Result<AupDocument, AupError> {
     let mut warnings = Vec::new();
     let sections = parse_ini_sections(text, &mut warnings);
 
@@ -635,27 +817,54 @@ pub fn parse_aup2_str(text: &str) -> Result<AupDocument, AupError> {
     let has_scene = sections
         .iter()
         .any(|s| s.name.starts_with("scene.") || s.name.eq_ignore_ascii_case("scene"));
-    if !has_project && !has_scene {
+    let has_object_sec = sections.iter().any(|s| {
+        s.name.eq_ignore_ascii_case("Object")
+            || s.name.starts_with("Object.")
+            || s.name.parse::<u32>().is_ok()
+            || s.name
+                .split_once('.')
+                .is_some_and(|(a, b)| a.parse::<u32>().is_ok() && b.parse::<u32>().is_ok())
+    });
+
+    if !has_project && !has_scene && !(allow_alias && has_object_sec) {
         return Err(AupError::InvalidHeader);
     }
 
     let mut version = AUP2_DEFAULT_VERSION.to_string();
+    let mut display_scene: u32 = 0;
     if let Some(proj) = sections.iter().find(|s| s.name.eq_ignore_ascii_case("project")) {
         if let Some(v) = proj.get("version") {
             version = v.trim().to_string();
         }
+        if let Some(ds) = proj.get("display.scene").and_then(|v| v.trim().parse::<u32>().ok()) {
+            display_scene = ds;
+        }
     }
 
-    let mut settings = SceneSettings::default();
-    let mut scene_name = "Root".to_string();
-    let mut cursor_frame: Frame = 0;
+    let mut scenes: BTreeMap<u32, Scene> = BTreeMap::new();
+    let mut scene_cursors: BTreeMap<u32, Frame> = BTreeMap::new();
 
-    if let Some(sc) = sections
+    for sc in sections
         .iter()
-        .find(|s| s.name.starts_with("scene.") || s.name.eq_ignore_ascii_case("scene"))
+        .filter(|s| s.name.starts_with("scene.") || s.name.eq_ignore_ascii_case("scene"))
     {
+        let scene_id = sc
+            .get("scene")
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .or_else(|| sc.name.strip_prefix("scene.").and_then(|v| v.trim().parse::<u32>().ok()))
+            .unwrap_or(0);
+        let mut settings = SceneSettings::default();
+        let mut scene_name = if scene_id == 0 {
+            "Root".to_string()
+        } else {
+            format!("Scene {scene_id}")
+        };
+        let mut cur_frame: Frame = 0;
         if let Some(n) = sc.get("name") {
-            scene_name = n.trim().to_string();
+            let trimmed = n.trim();
+            if !trimmed.is_empty() {
+                scene_name = trimmed.to_string();
+            }
         }
         let mut rate = settings.frame_rate.num;
         let mut scale = settings.frame_rate.den;
@@ -694,18 +903,65 @@ pub fn parse_aup2_str(text: &str) -> Result<AupDocument, AupError> {
                 }
                 "cursor.frame" => {
                     if let Ok(x) = val.parse() {
-                        cursor_frame = x;
+                        cur_frame = x;
                     }
                 }
                 _ => {}
             }
         }
         settings.frame_rate = Rational::new(rate.max(1), scale.max(1));
+        scenes.insert(scene_id, Scene::new(scene_name, settings));
+        scene_cursors.insert(scene_id, cur_frame);
     }
 
-    let mut scene = Scene::new(scene_name, settings);
+    if scenes.is_empty() {
+        scenes.insert(0, Scene::new("Root", SceneSettings::default()));
+    }
 
-    // オブジェクトセクション [N] とエフェクトセクション [N.M] を収集
+    // [layer.N] セクションの解析（レイヤー名・表示状態・ロック状態）
+    for ls in sections.iter().filter(|s| s.name.starts_with("layer.")) {
+        let scene_id = ls
+            .get("scene")
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .unwrap_or(0);
+        let Some(layer_idx) = ls.get("layer").and_then(|v| v.trim().parse::<usize>().ok()) else {
+            continue;
+        };
+        let target_scene = scenes
+            .entry(scene_id)
+            .or_insert_with(|| Scene::new(format!("Scene {scene_id}"), SceneSettings::default()));
+        if layer_idx >= target_scene.layers.len() {
+            target_scene
+                .layers
+                .resize_with(layer_idx + 1, au2_core::Layer::default);
+        }
+        let layer = &mut target_scene.layers[layer_idx];
+        if let Some(name) = ls.get("name") {
+            let trimmed = name.trim();
+            if !trimmed.is_empty() {
+                layer.name = Some(trimmed.to_string());
+            }
+        }
+        if ls.get("hide").is_some_and(|v| v.trim() == "1")
+            || ls.get("state").is_some_and(|v| v.trim().parse::<u32>().unwrap_or(0) & 1 != 0)
+        {
+            layer.visible = false;
+        }
+        if ls.get("lock").is_some_and(|v| v.trim() == "1")
+            || ls.get("state").is_some_and(|v| v.trim().parse::<u32>().unwrap_or(0) & 2 != 0)
+        {
+            layer.locked = true;
+        }
+    }
+
+    // オブジェクトセクション [N] / [Object] / [Object.N] とエフェクトセクション [N.M] / [Object.M] / [Object.N.M] を収集
+    let has_two_level_object_prefix = sections.iter().any(|s| {
+        s.name
+            .strip_prefix("Object.")
+            .or_else(|| s.name.strip_prefix("object."))
+            .and_then(|rest| rest.split_once('.'))
+            .is_some_and(|(a, b)| a.parse::<u32>().is_ok() && b.parse::<u32>().is_ok())
+    });
     let mut headers: BTreeMap<u32, &IniSection> = BTreeMap::new();
     let mut effects: BTreeMap<u32, Vec<(u32, &IniSection)>> = BTreeMap::new();
 
@@ -717,13 +973,32 @@ pub fn parse_aup2_str(text: &str) -> Result<AupDocument, AupError> {
         {
             continue;
         }
-        let parsed = match s.name.split_once('.') {
-            None => s.name.parse::<u32>().ok().map(|n| (n, None)),
-            Some((a, b)) => a
-                .parse::<u32>()
-                .ok()
-                .zip(b.parse::<u32>().ok())
-                .map(|(n, m)| (n, Some(m))),
+        let parsed = if s.name.eq_ignore_ascii_case("Object") {
+            Some((0, None))
+        } else if let Some(rest) = s
+            .name
+            .strip_prefix("Object.")
+            .or_else(|| s.name.strip_prefix("object."))
+        {
+            if let Some((a, b)) = rest.split_once('.') {
+                a.parse::<u32>()
+                    .ok()
+                    .zip(b.parse::<u32>().ok())
+                    .map(|(n, m)| (n, Some(m)))
+            } else if has_two_level_object_prefix {
+                rest.parse::<u32>().ok().map(|n| (n, None))
+            } else {
+                rest.parse::<u32>().ok().map(|m| (0, Some(m)))
+            }
+        } else {
+            match s.name.split_once('.') {
+                None => s.name.parse::<u32>().ok().map(|n| (n, None)),
+                Some((a, b)) => a
+                    .parse::<u32>()
+                    .ok()
+                    .zip(b.parse::<u32>().ok())
+                    .map(|(n, m)| (n, Some(m))),
+            }
         };
         match parsed {
             Some((n, None)) => {
@@ -736,6 +1011,15 @@ pub fn parse_aup2_str(text: &str) -> Result<AupDocument, AupError> {
         }
     }
 
+    // エフェクトセクション [0.0], [0.1] のみで [0] ヘッダが省略されている .object ファイルにも対応
+    if headers.is_empty() && allow_alias && !effects.is_empty() {
+        for (&n, _) in &effects {
+            if let Some(first_sec) = sections.first() {
+                headers.insert(n, first_sec);
+            }
+        }
+    }
+
     // chain=1 による中間点連結および本家 .aup2 の frame=start,mid,...,end の両方に対応
     let mut pending: Option<Vec<Aup2Segment>> = None;
     for (n, h) in headers {
@@ -743,29 +1027,47 @@ pub fn parse_aup2_str(text: &str) -> Result<AupDocument, AupError> {
         if seg.chain {
             if let Some(p) = pending.as_mut() {
                 let last = p.last().unwrap();
-                if last.layer == seg.layer && last.end + 1 == seg.start {
+                if last.scene_id == seg.scene_id && last.layer == seg.layer && last.end + 1 == seg.start {
                     p.push(seg);
                     continue;
                 }
             }
         }
         if let Some(p) = pending.take() {
-            finalize_aup2_segments(p, &mut scene);
+            let sid = p[0].scene_id;
+            let target_scene = scenes
+                .entry(sid)
+                .or_insert_with(|| Scene::new(format!("Scene {sid}"), SceneSettings::default()));
+            finalize_aup2_segments(p, target_scene);
         }
         pending = Some(vec![seg]);
     }
     if let Some(p) = pending.take() {
-        finalize_aup2_segments(p, &mut scene);
+        let sid = p[0].scene_id;
+        let target_scene = scenes
+            .entry(sid)
+            .or_insert_with(|| Scene::new(format!("Scene {sid}"), SceneSettings::default()));
+        finalize_aup2_segments(p, target_scene);
     }
 
-    // シーン長がオブジェクト終端より短い場合は自動拡張
-    let content_end = scene.content_end();
-    if content_end > scene.settings.length {
-        scene.settings.length = content_end;
+    // 各シーン長がオブジェクト終端より短い場合は自動拡張
+    for sc in scenes.values_mut() {
+        let content_end = sc.content_end();
+        if content_end > sc.settings.length {
+            sc.settings.length = content_end;
+        }
     }
 
-    let mut scenes = BTreeMap::new();
-    scenes.insert(0, scene.clone());
+    let active_scene_id = if scenes.contains_key(&display_scene) {
+        display_scene
+    } else {
+        *scenes.keys().next().unwrap_or(&0)
+    };
+    let scene = scenes
+        .get(&active_scene_id)
+        .cloned()
+        .unwrap_or_default();
+    let cursor_frame = scene_cursors.get(&active_scene_id).copied().unwrap_or(0);
 
     Ok(AupDocument {
         version,
@@ -817,6 +1119,7 @@ fn parse_ini_sections(text: &str, warnings: &mut Vec<String>) -> Vec<IniSection>
 }
 
 struct Aup2Segment {
+    scene_id: u32,
     start: Frame,
     end: Frame,
     /// `frame=start,mid1,...,end` 形式で単一セクションに中間点が含まれている場合の絶対フレーム列
@@ -834,6 +1137,10 @@ fn parse_aup2_segment(
     h: &IniSection,
     mut sub_sections: Vec<(u32, &IniSection)>,
 ) -> Aup2Segment {
+    let scene_id = h
+        .get("scene")
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(0);
     // frame=start,mid,...,end 形式または start= / end= 形式の両対応
     let mut start = 0u32;
     let mut end = 60u32;
@@ -876,43 +1183,45 @@ fn parse_aup2_segment(
 
     let mut effects = Vec::new();
 
-    if let Some(inline_name) = h.get("effect.name").or_else(|| h.get("_name")) {
-        let enabled = h
-            .get("effect.disable")
-            .or_else(|| h.get("_disable"))
-            .map(|v| v.trim() != "1")
-            .unwrap_or(true);
-        let params: Vec<(String, String)> = h
-            .entries
-            .iter()
-            .filter(|(k, _)| {
-                !matches!(
-                    k.as_str(),
-                    "start"
-                        | "end"
-                        | "frame"
-                        | "focus"
-                        | "scene"
-                        | "layer"
-                        | "alpha"
-                        | "blend"
-                        | "chain"
-                        | "group"
-                        | "group.control"
-                        | "clipping"
-                        | "clipping.upper"
-                        | "camera"
-                        | "audio"
-                        | "overlay"
-                        | "effect.name"
-                        | "_name"
-                        | "effect.disable"
-                        | "_disable"
-                )
-            })
-            .cloned()
-            .collect();
-        effects.push((inline_name.to_string(), enabled, params));
+    if !h.name.contains('.') {
+        if let Some(inline_name) = h.get("effect.name").or_else(|| h.get("_name")) {
+            let enabled = h
+                .get("effect.disable")
+                .or_else(|| h.get("_disable"))
+                .map(|v| v.trim() != "1")
+                .unwrap_or(true);
+            let params: Vec<(String, String)> = h
+                .entries
+                .iter()
+                .filter(|(k, _)| {
+                    !matches!(
+                        k.as_str(),
+                        "start"
+                            | "end"
+                            | "frame"
+                            | "focus"
+                            | "scene"
+                            | "layer"
+                            | "alpha"
+                            | "blend"
+                            | "chain"
+                            | "group"
+                            | "group.control"
+                            | "clipping"
+                            | "clipping.upper"
+                            | "camera"
+                            | "audio"
+                            | "overlay"
+                            | "effect.name"
+                            | "_name"
+                            | "effect.disable"
+                            | "_disable"
+                    )
+                })
+                .cloned()
+                .collect();
+            effects.push((inline_name.to_string(), enabled, params));
+        }
     }
 
     sub_sections.sort_by_key(|(m, _)| *m);
@@ -942,6 +1251,7 @@ fn parse_aup2_segment(
     }
 
     Aup2Segment {
+        scene_id,
         start,
         end,
         inline_midpoints,
@@ -955,14 +1265,47 @@ fn parse_aup2_segment(
     }
 }
 
-fn normalize_aup2_effect_name(name: &str) -> (String, Option<&'static str>) {
+/// AviUtl2 `effect.conf` および `Default.aul2` に基づくエフェクト名の正規化。
+/// AviUtl2 では各スクリプト効果が直接 `effect.name=震える` や `effect.name=円形配置` として記述されるため、
+/// 既存のアニメーション効果・カスタムオブジェクト・カメラ効果・シーンチェンジとも相互運用できるようマッピングします。
+fn normalize_aup2_effect_name(name: &str) -> (String, Option<String>) {
     match name {
         "映像再生" => ("標準描画".into(), None),
-        "音声再生" => ("標準再生".into(), None),
-        "震える" => ("アニメーション効果".into(), Some("揺れ@OpenAvi")),
-        "点滅" => ("アニメーション効果".into(), Some("点滅@OpenAvi")),
-        "座標の回転(個別オブジェクト)" => {
-            ("アニメーション効果".into(), Some("回転@OpenAvi"))
+        "音声再生" | "基本出力" => ("標準再生".into(), None),
+        "時間制御(オブジェクト)" => ("時間制御".into(), None),
+        "グループ制御(音声)" => ("グループ制御".into(), None),
+        "パーティクル出力(カメラ制御)" => ("パーティクル出力".into(), None),
+        "ドロップシャドウ" => ("シャドー".into(), None),
+        // AviUtl2 標準アニメーション効果 (script.anm2 全26種)
+        "震える"
+        | "振り子"
+        | "弾む"
+        | "座標の拡大縮小(個別オブジェクト)"
+        | "画面外から登場"
+        | "ランダム方向から登場"
+        | "拡大縮小して登場"
+        | "ランダム間隔で落ちながら登場"
+        | "弾んで登場"
+        | "広がって登場"
+        | "起き上がって登場"
+        | "何処からともなく登場"
+        | "反復移動"
+        | "座標の回転(個別オブジェクト)"
+        | "立方体(カメラ制御)"
+        | "球体(カメラ制御)"
+        | "砕け散る"
+        | "点滅"
+        | "点滅して登場"
+        | "簡易変形"
+        | "簡易変形(カメラ制御)"
+        | "リール回転"
+        | "万華鏡"
+        | "円形配置"
+        | "ランダム配置"
+        | "起き上がり" => ("アニメーション効果".into(), Some(name.to_string())),
+        // AviUtl2 標準カメラ効果 (script.cam2)
+        "手ぶれ" | "目標中心回転" | "目標サイズ固定視野角" => {
+            ("カメラ効果".into(), Some(name.to_string()))
         }
         other => (other.to_string(), None),
     }
@@ -999,6 +1342,11 @@ fn normalize_aup2_key(eff_kind: &EffectKind, orig_eff_name: &str, key: &str) -> 
             "合成モード" => return "blend".into(),
             _ => {}
         },
+        EffectKind::GroupControl | EffectKind::Camera | EffectKind::TimeControl => {
+            if key == "対象レイヤー数" {
+                return "range".into();
+            }
+        }
         _ => match (orig_eff_name, key) {
             ("震える", "振幅") => return "track0".into(),
             ("震える", "角度") => return "track1".into(),
@@ -1011,6 +1359,9 @@ fn normalize_aup2_key(eff_kind: &EffectKind, orig_eff_name: &str, key: &str) -> 
             ("座標の回転(個別オブジェクト)", "中心X") => return "track1".into(),
             ("座標の回転(個別オブジェクト)", "中心Y") => return "track2".into(),
             (_, "コントラスト") => return "ｺﾝﾄﾗｽﾄ".into(),
+            (_, "色" | "光色" | "影色" | "縁色" | "ライン色" | "基準色") => {
+                return "color".into();
+            }
             _ => {}
         },
     }
@@ -1025,6 +1376,7 @@ fn normalize_aup2_text_value(eff_kind: &EffectKind, key: &str, raw_val: &str) ->
         (EffectKind::StandardDraw | EffectKind::ExtendedDraw, "blend") => {
             blend_aup2_to_code(raw_val).to_string()
         }
+        (_, "file" | "ファイル") => expand_aviutl2_path_vars(&unescape_aup2_text(raw_val)),
         _ => unescape_aup2_text(raw_val),
     }
 }
@@ -1041,6 +1393,9 @@ fn is_text_setting_key(key: &str) -> bool {
             | "color"
             | "color2"
             | "色"
+            | "光色"
+            | "影色"
+            | "縁色"
             | "文字色"
             | "影・縁色"
             | "文字装飾"
@@ -1073,15 +1428,29 @@ fn parse_aup2_track_values(raw: &str) -> Option<(Vec<f64>, u8, Option<Interpolat
         return Some((vec![first], prec, None));
     }
 
-    // パターン A: 本家 .aup2 形式 `v0,v1,...,vK,移動モード名,フラグ整数` (parts.len() >= 4)
-    if parts.len() >= 4 {
-        let mode_token = parts[parts.len() - 2].trim();
-        let flag_token = parts[parts.len() - 1].trim();
-        let values: Option<Vec<f64>> = parts[..parts.len() - 2]
-            .iter()
-            .map(|s| s.trim().parse::<f64>().ok().filter(|v| v.is_finite()))
-            .collect();
-        if let (Some(vals), Ok(flag_num)) = (values, flag_token.parse::<u32>()) {
+    // パターン A: 本家 .aup2 形式 `v0,v1,...,vK,移動モード名[,フラグ整数]` (parts.len() >= 3)
+    if parts.len() >= 3 {
+        let last_token = parts[parts.len() - 1].trim();
+        let last_u32 = last_token.parse::<u32>().ok();
+        let (val_slice, mode_token, flag_num) = if parts.len() >= 4
+            && last_u32.is_some()
+            && parts[parts.len() - 2].trim().parse::<f64>().is_err()
+        {
+            (&parts[..parts.len() - 2], parts[parts.len() - 2].trim(), last_u32)
+        } else if last_u32.is_none() && !last_token.contains('@') {
+            (&parts[..parts.len() - 1], last_token, Some(0u32))
+        } else {
+            (&[][..], "", None)
+        };
+        let values: Option<Vec<f64>> = (!val_slice.is_empty())
+            .then(|| {
+                val_slice
+                    .iter()
+                    .map(|s| s.trim().parse::<f64>().ok().filter(|v| v.is_finite()))
+                    .collect()
+            })
+            .flatten();
+        if let (Some(vals), Some(flag_num)) = (values, flag_num) {
             let (kind, mut easing) = match mode_token {
                 "直線移動" => (
                     if flag_num & 4 != 0 {
@@ -1749,8 +2118,7 @@ Y=20.00
     #[test]
     fn test_find_kudaketa() {
         let path = std::path::Path::new(r"C:\Users\user\Desktop\配布　1280x720_24fps_44100Hz.aup");
-        if !path.exists() { return; }
-        let bytes = std::fs::read(path).unwrap();
+        let Ok(bytes) = std::fs::read(path) else { return; };
         let fp_magic = b"FilterProject 0.1\0";
         let mut search_pos = 0;
         let mut exedit_chunk = None;
@@ -1788,10 +2156,7 @@ Y=20.00
     #[test]
     fn test_inspect_all_effects_in_target() {
         let path = std::path::Path::new(r"C:\Users\user\Desktop\配布　1280x720_24fps_44100Hz.aup");
-        if !path.exists() {
-            return;
-        }
-        let bytes = std::fs::read(path).expect("read target aup");
+        let Ok(bytes) = std::fs::read(path) else { return; };
         let doc = legacy_aup::parse_legacy_aup(&bytes).expect("parse_legacy_aup should succeed");
 
         println!("=== ALL DISTINCT EFFECT NAMES IN TARGET AUP ===");
@@ -1939,20 +2304,120 @@ Y=20.00
 
     #[test]
     fn test_parse_real_goot_time_pf_aup() {
-        let path = r"C:\Users\user\Desktop\goot time pf.aup";
-        if let Ok(bytes) = std::fs::read(path) {
-            match legacy_aup::parse_legacy_aup(&bytes) {
-                Ok(doc) => {
-                    assert!(
-                        doc.scene.object_count() >= 3000,
-                        "3000個以上の正規オブジェクトが正常に読み込めること: got {}",
-                        doc.scene.object_count()
-                    );
-                    assert_eq!(doc.scene.layers.len(), 100, "100レイヤーが存在すること");
-                    assert!(doc.scene.settings.length < 100_000, "巨大オーバーフローせず安全なフレーム長であること");
-                }
-                Err(e) => panic!("goot time pf.aup の解析でエラーが発生しました: {:?}", e),
+        let p_desktop = Path::new(r"C:\Users\user\Desktop\goot time pf.aup");
+        let p_testdata = Path::new(r"test_data\goot_time.aup");
+        let path = if p_desktop.exists() {
+            p_desktop
+        } else if p_testdata.exists() {
+            p_testdata
+        } else {
+            return;
+        };
+
+        let Ok(bytes) = std::fs::read(path) else { return; };
+
+        match legacy_aup::parse_legacy_aup(&bytes) {
+            Ok(doc) => {
+                assert!(
+                    doc.scene.object_count() >= 3000,
+                    "3000個以上の正規オブジェクトが正常に読み込めること: got {}",
+                    doc.scene.object_count()
+                );
+                assert_eq!(doc.scene.layers.len(), 100, "100レイヤーが存在すること");
+                assert!(doc.scene.settings.length < 100_000, "巨大オーバーフローせず安全なフレーム長であること");
             }
+            Err(e) => panic!("goot time pf.aup の解析でエラーが発生しました: {:?}", e),
         }
+    }
+
+    #[test]
+    fn test_aviutl2_multi_scene_and_layer_metadata_roundtrip() {
+        let mut scenes = BTreeMap::new();
+        let mut s0 = Scene::new("Root", au2_core::SceneSettings::default());
+        s0.layers[0].name = Some("メイン字幕".to_string());
+        s0.layers[1].visible = false;
+        s0.layers[2].locked = true;
+        s0.insert_object(0, TimelineObject::new_text(0, 59, "Root Scene Text"));
+        scenes.insert(0, s0);
+
+        let mut s1 = Scene::new("Scene 1", au2_core::SceneSettings::default());
+        s1.layers[0].name = Some("サブシーン背景".to_string());
+        s1.insert_object(0, TimelineObject::new_shape(0, 119, 1, "ffffff"));
+        scenes.insert(1, s1);
+
+        let aup2_str = write_aup2_multi_scene_string(&scenes, 0, None, 25);
+        assert!(aup2_str.contains("[scene.0]"));
+        assert!(aup2_str.contains("[scene.1]"));
+        assert!(aup2_str.contains("name=メイン字幕"));
+
+        let parsed = parse_aup2_str(&aup2_str).expect("parse multi-scene aup2");
+        assert_eq!(parsed.cursor_frame, 25);
+        assert_eq!(parsed.scenes.len(), 2);
+        assert_eq!(parsed.scene.layers[0].name.as_deref(), Some("メイン字幕"));
+        assert!(!parsed.scene.layers[1].visible);
+        assert!(parsed.scene.layers[2].locked);
+        assert_eq!(parsed.scene.object_count(), 1);
+        let sub_scene = parsed.scenes.get(&1).expect("scene 1 exists");
+        assert_eq!(sub_scene.name, "Scene 1");
+        assert_eq!(sub_scene.layers[0].name.as_deref(), Some("サブシーン背景"));
+        assert_eq!(sub_scene.object_count(), 1);
+    }
+
+    #[test]
+    fn test_aviutl2_object_alias_and_path_vars() {
+        let obj = TimelineObject::new_text(10, 49, "エイリアステスト");
+        let alias_str = write_object_alias_string(&[obj], 30.0);
+        assert!(alias_str.contains("[0]"));
+        assert!(alias_str.contains("[0.0]"));
+
+        let parsed_objs = parse_object_alias_str(&alias_str).expect("parse .object alias");
+        assert_eq!(parsed_objs.len(), 1);
+        assert_eq!(parsed_objs[0].length(), 40);
+        assert_eq!(parsed_objs[0].source().and_then(|s| s.text("text")), Some("エイリアステスト"));
+
+        // [Object.0] / [Object.0.0] 形式のエイリアスも解析できることを確認
+        let obj_prefix_alias = alias_str.replace("[0]", "[Object.0]").replace("[0.", "[Object.0.");
+        let parsed_prefix = parse_object_alias_str(&obj_prefix_alias).expect("parse [Object.0] alias");
+        assert_eq!(parsed_prefix.len(), 1);
+        assert_eq!(parsed_prefix[0].source().and_then(|s| s.text("text")), Some("エイリアステスト"));
+
+        let expanded = expand_aviutl2_path_vars(r"%Script%\script.anm2");
+        assert!(!expanded.contains("%Script%"));
+        assert!(expanded.ends_with(r"Script\script.anm2"));
+    }
+
+    #[test]
+    fn test_aviutl2_track_bezier_and_rotation_interp() {
+        // 1. 時間制御ベジェカーブ |vx0,vy0,vx1,vy1 (減速移動: 0,0,0.5,0)
+        let aup2 = "\
+[project]
+version=2011600
+[scene.0]
+scene=0
+width=1920
+height=1080
+rate=30
+scale=1
+[0]
+layer=0
+frame=0,60
+[0.0]
+effect.name=図形
+サイズ=100
+[0.1]
+effect.name=標準描画
+X=0.0,300.0,直線移動(時間制御)|0,0,0.5,0
+拡大率=100.00
+透明度=0.0
+Z軸回転=350.00,10.00,直線移動(回転)
+";
+        let doc = parse_aup2_str(aup2).expect("parse bezier & rotation aup2");
+        let obj = &doc.scene.layers[0].objects[0];
+        let draw = obj.effect(&EffectKind::StandardDraw).expect("StandardDraw");
+        let x_mid = draw.eval("X", 30, 0.0);
+        assert!(x_mid > 180.0 && x_mid < 260.0, "Decel bezier midpoint should be > 180: {x_mid}");
+        // 350度 -> 10度 の最短回転補間は 360度(=0度) を通る
+        let rz_mid = draw.eval("回転", 30, 0.0);
+        assert!((rz_mid - 360.0).abs() < 1.0 || rz_mid.abs() < 1.0, "Shortest angle 350->10 at mid should be ~360/0, got {rz_mid}");
     }
 }

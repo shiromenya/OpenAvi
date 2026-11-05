@@ -235,16 +235,23 @@ impl MediaCache {
         if let Some(cached) = self.audio_cache.get(path) {
             return cached.clone();
         }
-        // メタデータで音声ストリームが無いことが分かっている場合は ffmpeg を起動せず即座に None をキャッシュ
-        let meta = self.get_metadata(path);
-        if matches!(MediaKind::from_path(path), Some(MediaKind::Video)) && !meta.has_audio {
-            self.audio_cache.insert(path.to_path_buf(), None);
-            return None;
+        // WAV ファイルは FFmpeg 不要で直接ネイティブデコード可能
+        let is_wav = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("wav"))
+            .unwrap_or(false);
+
+        if !is_wav {
+            // メタデータで動画ファイルかつ音声ストリームが無いことが確定している場合は ffmpeg を起動せず即座に None をキャッシュ
+            let meta = self.get_metadata(path);
+            if matches!(MediaKind::from_path(path), Some(MediaKind::Video)) && !meta.has_audio {
+                self.audio_cache.insert(path.to_path_buf(), None);
+                return None;
+            }
         }
-        let Some(ffmpeg) = self.ffmpeg_bin.as_ref() else {
-            self.audio_cache.insert(path.to_path_buf(), None);
-            return None;
-        };
+
+        let ffmpeg = self.ffmpeg_bin.as_deref();
         let result = decode_audio_pcm(ffmpeg, path).map(|d| d.samples);
         self.audio_cache.insert(path.to_path_buf(), result.clone());
         result
@@ -442,11 +449,7 @@ fn video_stream_worker(
             let start_sec = start_frame as f64 / 30.0;
 
             let mut cmd = Command::new(&ffmpeg);
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-            }
+            au2_platform::hide_console_window(&mut cmd);
             if start_frame > 0 {
                 cmd.args(["-ss", &format!("{start_sec:.3}")]);
             }
@@ -596,19 +599,25 @@ fn load_gif_or_static(path: &Path) -> CachedAsset {
     load_static_image(path)
 }
 
-/// アプリ内ダウンロードした FFmpeg の配置先 (`%LOCALAPPDATA%\OpenAvi\bin`)。
+/// アプリ内ダウンロードした FFmpeg の配置先 (`<user_data_dir>/OpenAvi/bin`。Windows では `%LOCALAPPDATA%\OpenAvi\bin`)。
 /// インストール先が書き込み不可でも導入できるようユーザー領域を使います。
 pub fn user_ffmpeg_dir() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join("OpenAvi").join("bin"))
+    au2_platform::user_data_dir().map(|p| p.join("OpenAvi").join("bin"))
 }
 
-/// FFmpeg (Windows x64 essentials ビルド) の配布 URL。
+/// FFmpeg (Windows x64 essentials ビルド) の配布 URL。自動ダウンロードは Windows のみ対応。
 pub const FFMPEG_DOWNLOAD_URL: &str = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
 
 /// FFmpeg / FFprobe をダウンロードして [`user_ffmpeg_dir`] に展開します（ブロッキング。別スレッドから呼び出すこと）。
-/// 成功時は配置先ディレクトリを返します。
+/// 成功時は配置先ディレクトリを返します。Windows 以外では OS のパッケージマネージャ経由での導入を案内するエラーを返します。
 pub fn download_ffmpeg_blocking() -> Result<PathBuf, String> {
-    let dest = user_ffmpeg_dir().ok_or_else(|| "LOCALAPPDATA が取得できません".to_string())?;
+    if !cfg!(windows) {
+        return Err(
+            "自動ダウンロードは Windows のみ対応です。お使いの OS のパッケージマネージャ（apt / brew など）で ffmpeg を導入してください"
+                .to_string(),
+        );
+    }
+    let dest = user_ffmpeg_dir().ok_or_else(|| "ユーザーデータ領域が取得できません".to_string())?;
     std::fs::create_dir_all(&dest).map_err(|e| format!("配置先を作成できません: {e}"))?;
 
     let work = std::env::temp_dir().join("openavi-ffmpeg-download");
@@ -635,11 +644,7 @@ pub fn download_ffmpeg_blocking() -> Result<PathBuf, String> {
     );
 
     let mut cmd = Command::new("powershell");
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    }
+    au2_platform::hide_console_window(&mut cmd);
     let output = cmd
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script])
         .output()
@@ -650,17 +655,22 @@ pub fn download_ffmpeg_blocking() -> Result<PathBuf, String> {
         let err = String::from_utf8_lossy(&output.stderr);
         return Err(format!("ダウンロードに失敗しました: {}", err.trim()));
     }
-    if !dest.join("ffmpeg.exe").is_file() {
-        return Err("ffmpeg.exe を配置できませんでした".to_string());
+    if !dest.join(au2_platform::exe_name("ffmpeg")).is_file() {
+        return Err("ffmpeg を配置できませんでした".to_string());
     }
     Ok(dest)
 }
 
+/// FFmpeg / FFprobe の実行ファイルを探索します。
+/// 優先順: 実行ファイル隣接（ポータブル同梱）→ ユーザー領域 → カレント → OS 固有の既知の配置先 → システム PATH。
 fn locate_ffmpeg_tools() -> (Option<PathBuf>, Option<PathBuf>) {
+    let ffmpeg_exe = au2_platform::exe_name("ffmpeg");
+    let ffprobe_exe = au2_platform::exe_name("ffprobe");
+
     // 探索するディレクトリ候補リスト
     let mut search_dirs = Vec::new();
 
-    // 1. 実行ファイル (openavi.exe) の親ディレクトリおよび bin サブディレクトリ (ポータブル同梱を最優先)
+    // 1. 実行ファイルの親ディレクトリおよび bin サブディレクトリ (ポータブル同梱を最優先)
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
             search_dirs.push(exe_dir.to_path_buf());
@@ -669,7 +679,7 @@ fn locate_ffmpeg_tools() -> (Option<PathBuf>, Option<PathBuf>) {
         }
     }
 
-    // 1.5 アプリ内ダウンロードで導入された FFmpeg (%LOCALAPPDATA%\OpenAvi\bin)
+    // 1.5 アプリ内ダウンロードで導入された FFmpeg
     if let Some(dir) = user_ffmpeg_dir() {
         search_dirs.push(dir);
     }
@@ -681,24 +691,24 @@ fn locate_ffmpeg_tools() -> (Option<PathBuf>, Option<PathBuf>) {
         search_dirs.push(cur_dir.join("tools"));
     }
 
-    // 3. インストール先ディレクトリ (%LOCALAPPDATA%\Programs\OpenAvi)
-    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-        let install_dir = PathBuf::from(&local_app_data).join("Programs").join("OpenAvi");
-        search_dirs.push(install_dir.clone());
-        search_dirs.push(install_dir.join("bin"));
+    // 3. Windows 固有: インストール先 (%LOCALAPPDATA%\Programs\OpenAvi) / Scoop / Chocolatey
+    if cfg!(windows) {
+        if let Some(local_app_data) = au2_platform::user_data_dir() {
+            let install_dir = local_app_data.join("Programs").join("OpenAvi");
+            search_dirs.push(install_dir.clone());
+            search_dirs.push(install_dir.join("bin"));
+        }
+        if let Some(home) = au2_platform::home_dir() {
+            search_dirs.push(home.join("scoop").join("shims"));
+        }
+        search_dirs.push(PathBuf::from(r"C:\ProgramData\chocolatey\bin"));
     }
 
-    // 4. Scoop / Chocolatey
-    if let Ok(user_profile) = std::env::var("USERPROFILE") {
-        search_dirs.push(PathBuf::from(user_profile).join("scoop").join("shims"));
-    }
-    search_dirs.push(PathBuf::from(r"C:\ProgramData\chocolatey\bin"));
-
-    // ディレクトリ候補から ffmpeg.exe / ffprobe.exe を探索
+    // ディレクトリ候補から ffmpeg / ffprobe を探索
     for dir in &search_dirs {
-        let ffmpeg_candidate = dir.join("ffmpeg.exe");
+        let ffmpeg_candidate = dir.join(&ffmpeg_exe);
         if ffmpeg_candidate.is_file() {
-            let ffprobe_candidate = dir.join("ffprobe.exe");
+            let ffprobe_candidate = dir.join(&ffprobe_exe);
             let probe = if ffprobe_candidate.is_file() {
                 Some(ffprobe_candidate)
             } else {
@@ -708,7 +718,7 @@ fn locate_ffmpeg_tools() -> (Option<PathBuf>, Option<PathBuf>) {
         }
     }
 
-    // 5. システム PATH から検索
+    // 4. システム PATH から検索
     if Command::new("ffmpeg")
         .arg("-version")
         .stdout(Stdio::null())
@@ -719,16 +729,18 @@ fn locate_ffmpeg_tools() -> (Option<PathBuf>, Option<PathBuf>) {
         return (Some(PathBuf::from("ffmpeg")), Some(PathBuf::from("ffprobe")));
     }
 
-    // 6. Windows WinGet パッケージ領域を検索
-    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-        let pkg_dir = PathBuf::from(local_app_data).join("Microsoft\\WinGet\\Packages");
-        if let Ok(entries) = std::fs::read_dir(pkg_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
-                if name.contains("ffmpeg") {
-                    if let Some(bin_dir) = find_file_recursive(&entry.path(), "ffmpeg.exe", 4) {
-                        let probe = bin_dir.parent().unwrap().join("ffprobe.exe");
-                        return (Some(bin_dir), probe.exists().then_some(probe));
+    // 5. Windows 固有: WinGet パッケージ領域を検索
+    if cfg!(windows) {
+        if let Some(local_app_data) = au2_platform::user_data_dir() {
+            let pkg_dir = local_app_data.join("Microsoft").join("WinGet").join("Packages");
+            if let Ok(entries) = std::fs::read_dir(pkg_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                    if name.contains("ffmpeg") {
+                        if let Some(bin_dir) = find_file_recursive(&entry.path(), &ffmpeg_exe, 4) {
+                            let probe = bin_dir.parent().unwrap().join(&ffprobe_exe);
+                            return (Some(bin_dir), probe.exists().then_some(probe));
+                        }
                     }
                 }
             }
@@ -758,11 +770,7 @@ fn find_file_recursive(dir: &Path, target_name: &str, depth: u8) -> Option<PathB
 
 fn probe_media_metadata(ffprobe: &Path, path: &Path) -> Option<MediaMetadata> {
     let mut cmd = Command::new(ffprobe);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    }
+    au2_platform::hide_console_window(&mut cmd);
     let out = cmd
         .args([
             "-v",

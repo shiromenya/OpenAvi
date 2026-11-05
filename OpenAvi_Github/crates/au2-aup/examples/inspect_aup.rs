@@ -2,13 +2,16 @@ use std::path::Path;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let default_path = r"C:\Users\user\Desktop\配布　1280x720_24fps_44100Hz.aup";
+    let default_path = r"C:\Users\user\.gemini\antigravity\scratch\openavi\crates\au2-aup\test_data\dist_24fps.aup";
     let target = args.get(1).map(|s| s.as_str()).unwrap_or(default_path);
 
     if !Path::new(target).exists() {
         println!("File not found: {}", target);
         return;
     }
+
+    let test_copy = r"C:\Users\user\.gemini\antigravity\scratch\openavi\crates\au2-aup\test_data\dist_24fps.aup";
+    let _ = std::fs::copy(target, test_copy);
 
     let data = std::fs::read(target).expect("read aup");
     let doc = au2_aup::parse_aup_bytes(&data).expect("parse aup");

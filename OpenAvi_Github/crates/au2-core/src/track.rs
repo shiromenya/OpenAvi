@@ -41,6 +41,8 @@ impl MoveKind {
             MoveKind::MoveAmount => "移動量指定".into(),
             MoveKind::Random => "ランダム移動".into(),
             MoveKind::Script(name) => format!("スクリプト: {name}"),
+            MoveKind::Other(7) => "加減速移動".into(),
+            MoveKind::Other(8) => "反復移動".into(),
             MoveKind::Other(code) => format!("不明な移動方法({code})"),
         }
     }
@@ -174,7 +176,11 @@ impl Track {
         let i = keys.partition_point(|k| k.frame <= frame).saturating_sub(1).min(keys.len() - 2);
         let (a, b) = (keys[i], keys[i + 1]);
         let raw_t = norm(frame, a.frame, b.frame);
-        let t = interp.easing.apply(raw_t);
+        let t = if let Some(tc_t) = interp.param.as_deref().and_then(|p| eval_time_control_curve(p, raw_t)) {
+            tc_t
+        } else {
+            interp.easing.apply(raw_t)
+        };
 
         match &interp.kind {
             MoveKind::Instant => a.value,
@@ -205,10 +211,31 @@ impl Track {
                 let param_num = interp
                     .param
                     .as_deref()
-                    .and_then(|s| s.trim().parse::<i32>().ok())
+                    .and_then(|s| s.split(',').next()?.trim().parse::<i32>().ok())
                     .unwrap_or(0);
 
-                if sec.contains("イージング") || script_name.contains("イージング") {
+                if sec == "直線移動(回転)" || sec == "回転" {
+                    lerp_angle_aviutl2(a.value, b.value, t)
+                } else if sec == "補間移動(回転)" {
+                    let p0 = if i > 0 { keys[i - 1].value } else { a.value };
+                    let p3 = if i + 2 < keys.len() { keys[i + 2].value } else { b.value };
+                    let r1 = a.value;
+                    let r2 = adjust_angle_target(r1, b.value);
+                    let r0 = r1 - (adjust_angle_target(p0, r1) - p0);
+                    let r3 = r2 + (adjust_angle_target(b.value, p3) - b.value);
+                    catmull_rom(r0, r1, r2, r3, t)
+                } else if sec == "反復移動" {
+                    let freq = param_num.max(1) as f64;
+                    let total_t = norm(frame, first.frame, last.frame);
+                    let u = total_t * freq;
+                    let k = u.floor() as i64;
+                    let mut frac = u - (k as f64);
+                    if k % 2 == 1 {
+                        frac = 1.0 - frac;
+                    }
+                    let eased_frac = interp.easing.apply(frac);
+                    lerp(a.value, b.value, eased_frac)
+                } else if sec.contains("イージング") || script_name.contains("イージング") {
                     let eased_t = apply_aviutl_easing_id(param_num, raw_t);
                     if sec.contains("補間") || sec.contains("曲線") {
                         let p0 = if i > 0 { keys[i - 1].value } else { a.value };
@@ -259,6 +286,33 @@ impl Track {
                     lerp(a.value, b.value, t)
                 }
             }
+            MoveKind::Other(7) => {
+                // 初代 AviUtl 加減速移動 (コード 7)
+                let et = if interp.easing == Easing::None {
+                    raw_t * raw_t * (3.0 - 2.0 * raw_t)
+                } else {
+                    t
+                };
+                lerp(a.value, b.value, et)
+            }
+            MoveKind::Other(8) => {
+                // 初代 AviUtl 反復移動 (コード 8): param は移動フレーム間隔
+                let interval = interp
+                    .param
+                    .as_deref()
+                    .and_then(|s| s.trim().parse::<u32>().ok())
+                    .unwrap_or(10)
+                    .max(1) as f64;
+                let elapsed = (frame.saturating_sub(first.frame)) as f64;
+                let cycle = elapsed / interval;
+                let k = cycle.floor() as i64;
+                let mut frac = cycle - (k as f64);
+                if k % 2 == 1 {
+                    frac = 1.0 - frac;
+                }
+                let et = interp.easing.apply(frac);
+                lerp(a.value, b.value, et)
+            }
             _ => lerp(a.value, b.value, t),
         }
     }
@@ -288,6 +342,83 @@ fn norm(f: Frame, a: Frame, b: Frame) -> f64 {
 
 fn lerp(a: f64, b: f64, t: f64) -> f64 {
     a + (b - a) * t
+}
+
+/// AviUtl2 `script.tra2` の `adjust(r0, r1)` 完全互換：
+/// 360度未満の差は最短回転方向（-180..=180）に補正し、360度以上の差は周回数を維持します。
+pub fn adjust_angle_target(r0: f64, r1: f64) -> f64 {
+    let diff = r1 - r0;
+    let mut d = diff.rem_euclid(360.0);
+    if d > 180.0 {
+        d -= 360.0;
+    }
+    if diff >= 360.0 {
+        d += (diff / 360.0).floor() * 360.0;
+    } else if diff <= -360.0 {
+        d += (diff / 360.0).ceil() * 360.0;
+    }
+    r0 + d
+}
+
+pub fn lerp_angle_aviutl2(r0: f64, r1: f64, t: f64) -> f64 {
+    let target = adjust_angle_target(r0, r1);
+    lerp(r0, target, t)
+}
+
+/// AviUtl2 の時間制御パラメータ（`vx0,vy0,vx1,vy1` または制御点列）を評価します。
+/// - `加速移動=0.5,0,0,0` -> P1=(0.5, 0.0), P2=(1.0, 1.0)
+/// - `減速移動=0,0,0.5,0` -> P1=(0.0, 0.0), P2=(0.5, 1.0)
+/// - `加減速移動=0.5,0,0.5,0` -> P1=(0.5, 0.0), P2=(0.5, 1.0)
+pub fn eval_time_control_curve(tc_param: &str, raw_t: f64) -> Option<f64> {
+    let nums: Option<Vec<f64>> = tc_param
+        .split(',')
+        .map(|s| s.trim().parse::<f64>().ok().filter(|v| v.is_finite()))
+        .collect();
+    let nums = nums?;
+    if nums.len() == 4 {
+        let vx0 = nums[0].clamp(0.0, 1.0);
+        let vy0 = nums[1];
+        let vx1 = nums[2].clamp(0.0, 1.0);
+        let vy1 = nums[3];
+        let x1 = vx0;
+        let y1 = vy0;
+        let x2 = 1.0 - vx1;
+        let y2 = 1.0 - vy1;
+        Some(eval_cubic_bezier_1d(raw_t.clamp(0.0, 1.0), x1, y1, x2, y2))
+    } else {
+        None
+    }
+}
+
+fn eval_cubic_bezier_1d(x_target: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> f64 {
+    if x_target <= 0.0 {
+        return 0.0;
+    }
+    if x_target >= 1.0 {
+        return 1.0;
+    }
+    if (x1 - y1).abs() < 1e-6 && (x2 - y2).abs() < 1e-6 {
+        return x_target;
+    }
+    let bezier_x = |u: f64| -> f64 {
+        let inv = 1.0 - u;
+        3.0 * inv * inv * u * x1 + 3.0 * inv * u * u * x2 + u * u * u
+    };
+    let bezier_y = |u: f64| -> f64 {
+        let inv = 1.0 - u;
+        3.0 * inv * inv * u * y1 + 3.0 * inv * u * u * y2 + u * u * u
+    };
+    let mut lo = 0.0_f64;
+    let mut hi = 1.0_f64;
+    for _ in 0..16 {
+        let mid = 0.5 * (lo + hi);
+        if bezier_x(mid) < x_target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    bezier_y(0.5 * (lo + hi))
 }
 
 fn catmull_rom(p0: f64, p1: f64, p2: f64, p3: f64, t: f64) -> f64 {

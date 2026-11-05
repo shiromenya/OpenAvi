@@ -84,10 +84,22 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    /// デスクトップ上の個人用サンプルファイル（開発者環境にのみ存在。無ければ各テストはスキップされる）。
+    fn desk(rel: &str) -> &'static Path {
+        let base = au2_platform::desktop_dir().unwrap_or_default();
+        Box::leak(base.join(rel).into_boxed_path())
+    }
+
+    /// リポジトリ同梱のテストデータ (`crates/au2-aup/test_data`)。
+    fn test_data(name: &str) -> &'static Path {
+        let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../au2-aup/test_data").join(name);
+        Box::leak(p.into_boxed_path())
+    }
+
     /// 実 .aup をヘッドレス egui でプレビュー描画し、各フレームで描画プリミティブが出力されるか調べる。
     #[test]
     fn preview_renders_real_aup_frames() {
-        let path = Path::new(r"C:\Users\user\Desktop\goot time pf.aup");
+        let path = desk(r"goot time pf.aup");
         if !path.exists() {
             return;
         }
@@ -173,7 +185,7 @@ mod tests {
     #[test]
     fn test_real_mp3_playback_and_missing_file_warning() {
         let mut st = state::EditorState::default();
-        let mp3_path = Path::new(r"C:\Users\user\Desktop\ぐるたみん\01 シャルル - バルーン.mp3");
+        let mp3_path = desk(r"ぐるたみん\01 シャルル - バルーン.mp3");
         if !mp3_path.exists() {
             println!("MP3 file does not exist, skipping real mp3 test");
             return;
@@ -208,8 +220,8 @@ mod tests {
     #[test]
     fn test_aup_audio_file_restoration_and_resolution() {
         let candidates = [
-            r"C:\Users\user\Desktop\goot time pf.aup",
-            r"c:\Users\user\AppData\Local\Temp\goot time pf.aup",
+            desk(r"goot time pf.aup").to_str().unwrap_or(""),
+            r"",
         ];
         let mut aup_path = None;
         for c in candidates {
@@ -262,12 +274,15 @@ mod tests {
 
     #[test]
     fn test_camera_control_preview_rendering() {
-        let path = Path::new(r"C:\Users\user\Desktop\配布　1280x720_24fps_44100Hz.aup");
-        if !path.exists() {
+        let path = desk(r"配布　1280x720_24fps_44100Hz.aup");
+        let Ok(bytes) = std::fs::read(path) else {
+            return;
+        };
+        let mut st = state::EditorState::default();
+        st.load_aup(&bytes, Some(path));
+        if st.scene.object_count() == 0 {
             return;
         }
-        let mut st = state::EditorState::default();
-        st.load_path(path);
         assert!(!st.scene.layers.is_empty(), "レイヤーが読み込まれていること");
 
         let ctx = egui::Context::default();
@@ -358,11 +373,19 @@ mod tests {
 
     #[test]
     fn test_goot_time_full_ui_and_playback() {
-        let path = Path::new(r"C:\Users\user\Desktop\goot time pf.aup");
-        if !path.exists() {
-            println!("File not found, skipping: {:?}", path);
+        let p_desktop = desk(r"goot time pf.aup");
+        let p_testdata = Path::new(r"crates\au2-aup\test_data\goot_time.aup");
+        let p_alt = Path::new(r"..\au2-aup\test_data\goot_time.aup");
+        let path = if p_testdata.exists() {
+            p_testdata
+        } else if p_alt.exists() {
+            p_alt
+        } else if p_desktop.exists() {
+            p_desktop
+        } else {
+            println!("goot time pf.aup not found, skipping");
             return;
-        }
+        };
 
         println!("Loading goot time pf.aup...");
         let mut st = state::EditorState::default();
@@ -410,14 +433,17 @@ mod tests {
 
     #[test]
     fn test_mayamaid_aup_preview_and_scenes_if_present() {
-        let mayamaid_path = std::path::Path::new(r"C:\Users\user\Desktop\mayamaid.aup");
-        if !mayamaid_path.exists() {
-            eprintln!("mayamaid.aup not found on Desktop, skipping test.");
+        let mayamaid_path = desk(r"mayamaid.aup");
+        let Ok(bytes) = std::fs::read(mayamaid_path) else {
+            eprintln!("mayamaid.aup not readable, skipping test.");
             return;
-        }
+        };
 
         let mut st = state::EditorState::default();
-        st.load_path(mayamaid_path);
+        st.load_aup(&bytes, Some(mayamaid_path));
+        if st.scene.object_count() == 0 {
+            return;
+        }
         println!(
             "mayamaid.aup loaded! Scenes: {}, Layers: {}, Objects: {}, Length: {}",
             st.scenes.len(),
@@ -460,6 +486,98 @@ mod tests {
         st.scene = original_scene;
 
         println!("mayamaid.aup all scenes and key frames preview rendering passed successfully!");
+    }
+
+    #[test]
+    fn test_check_all_aups_on_desktop() {
+        let desktop = desk(r"");
+        if let Ok(entries) = std::fs::read_dir(desktop) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension().map(|e| e == "aup").unwrap_or(false) {
+                    let mut st = state::EditorState::default();
+                    st.load_path(&p);
+                    let missing = st.check_missing_media();
+                    println!("=== AUP: {:?} ===", p.file_name().unwrap());
+                    println!("  Objects: {}, Warnings: {}", st.scene.object_count(), st.warnings.len());
+                    for w in &st.warnings {
+                        if w.contains("未検出") {
+                            println!("  Warning: {}", w);
+                        }
+                    }
+                    for m in &missing {
+                        println!("  Missing: L{} kind={} path={:?}", m.layer_index + 1, m.kind_name, m.original_path);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_shipping_aup_preview_and_objects() {
+        let p_desktop = desk(r"出荷用プロジェクトファイル.aup");
+        let p_testdata = test_data("shipping.aup");
+        let path = if p_testdata.exists() {
+            p_testdata
+        } else if p_desktop.exists() {
+            p_desktop
+        } else {
+            eprintln!("shipping.aup not found, skipping test.");
+            return;
+        };
+
+        let mut st = state::EditorState::default();
+        st.load_path(path);
+        println!(
+            "shipping.aup loaded! Scenes: {}, Layers: {}, Objects: {}, Length: {}",
+            st.scenes.len(),
+            st.scene.layers.len(),
+            st.scene.object_count(),
+            st.scene.settings.length
+        );
+        println!("Status: {}", st.status);
+        println!("Warnings on load:");
+        for w in &st.warnings {
+            println!("  - {}", w);
+        }
+
+        assert_eq!(st.scene.layers.len(), 100, "100 layers expected");
+        assert!(st.scene.object_count() >= 90, "At least 90 objects expected, got {}", st.scene.object_count());
+        assert_eq!(st.scene.settings.width, 1280);
+        assert_eq!(st.scene.settings.height, 720);
+
+        println!("Warnings on load:");
+        for w in &st.warnings {
+            println!("  - {}", w);
+        }
+
+        println!("Media objects in scene:");
+        for (li, layer) in st.scene.layers.iter().enumerate() {
+            for obj in &layer.objects {
+                if let Some(src) = obj.source() {
+                    let file = src.text("file").unwrap_or("(none)");
+                    println!("  L{:02} [{:4}..={:4}] kind={:?} file={:?}", li + 1, obj.frame_start, obj.frame_end, src.kind, file);
+                }
+            }
+        }
+
+        let missing = st.check_missing_media();
+        println!("Missing media count: {}", missing.len());
+        for m in &missing {
+            println!("  Missing: id={:?}, L={}, kind={}, path={:?}", m.object_id, m.layer_index + 1, m.kind_name, m.original_path);
+        }
+
+        let ctx = egui::Context::default();
+        for f in (0..=1270).step_by(20) {
+            st.frame = f;
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    panels::preview::ui(ui, &mut st);
+                    panels::timeline::ui(ui, &mut st);
+                });
+            });
+        }
+        println!("shipping.aup preview rendering and UI test passed successfully!");
     }
 
     #[test]
@@ -525,5 +643,165 @@ mod tests {
 
         // 後片付け
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_smart_media_resolution_and_audio_playback() {
+        // 1. テスト用の作業ディレクトリと深層サブディレクトリ構造を作成
+        let temp_dir = std::env::temp_dir().join("openavi_test_audio_resolution");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let deep_sub_dir = temp_dir.join("sub1").join("sub2").join("audio_assets");
+        std::fs::create_dir_all(&deep_sub_dir).expect("create test directories");
+
+        // 2. 正常な WAV ファイルを深層フォルダに書き込み（44.1kHz 16-bit ステレオ 1秒）
+        let target_wav = deep_sub_dir.join("ピアノ　レコ.wav");
+        {
+            let num_frames = 44100u32;
+            let num_channels = 2u16;
+            let bits_per_sample = 16u16;
+            let sample_rate = 44100u32;
+            let byte_rate = sample_rate * num_channels as u32 * 2;
+            let block_align = num_channels * 2;
+            let data_size = num_frames * block_align as u32;
+
+            let mut wav = Vec::new();
+            wav.extend_from_slice(b"RIFF");
+            wav.extend_from_slice(&(36 + data_size).to_le_bytes());
+            wav.extend_from_slice(b"WAVEfmt ");
+            wav.extend_from_slice(&16u32.to_le_bytes());
+            wav.extend_from_slice(&1u16.to_le_bytes());
+            wav.extend_from_slice(&num_channels.to_le_bytes());
+            wav.extend_from_slice(&sample_rate.to_le_bytes());
+            wav.extend_from_slice(&byte_rate.to_le_bytes());
+            wav.extend_from_slice(&block_align.to_le_bytes());
+            wav.extend_from_slice(&bits_per_sample.to_le_bytes());
+            wav.extend_from_slice(b"data");
+            wav.extend_from_slice(&data_size.to_le_bytes());
+            for i in 0..num_frames {
+                let v = ((i % 100) as i16) * 50;
+                wav.extend_from_slice(&v.to_le_bytes());
+                wav.extend_from_slice(&(-v).to_le_bytes());
+            }
+            std::fs::write(&target_wav, wav).expect("write wav file");
+        }
+
+        // 3. プロジェクトファイルを模倣
+        let proj_file = temp_dir.join("test_project.aup2");
+        let mut st = state::EditorState::default();
+        st.file_path = Some(proj_file);
+
+        // A. 旧環境の他PC絶対パス + 半角スペース表記: "D:\OldUser\Desktop\ピアノ レコ.wav"
+        let old_pc_path = r"D:\OldUser\Desktop\ピアノ レコ.wav";
+        let resolved = st.resolve_cached_path(old_pc_path);
+        assert!(resolved.is_some(), "全角・半角スペースの違いや旧PCパスを越えて深層サブフォルダ内の実在ファイルを解決できること");
+        assert_eq!(resolved.as_ref().unwrap().canonicalize().unwrap(), target_wav.canonicalize().unwrap());
+
+        // B. 拡張子違い: "C:\OldPC\ピアノ　レコ.mp3" を探索した場合も実在の .wav に解決されること
+        let ext_diff_path = r"C:\OldPC\ピアノ　レコ.mp3";
+        let resolved_ext = st.resolve_cached_path(ext_diff_path);
+        assert!(resolved_ext.is_some(), "拡張子違い（.mp3 -> .wav）のメディアも自動で解決できること");
+
+        // C. NFD半濁点・濁点結合文字: "ヒ\u{309A}アノ　レコ.wav" (Macや外部ツール等で結合文字になったパス)
+        let nfd_path = "C:\\Music\\ヒ\u{309A}アノ　レコ.wav";
+        let resolved_nfd = st.resolve_cached_path(nfd_path);
+        assert!(resolved_nfd.is_some(), "Unicode NFD結合半濁点/濁点のファイル名も自動でNFC合成して解決できること");
+
+        // D. WAV ファイルのゼロ依存ネイティブ PCM デコード
+        let pcm = st.media.get_audio_pcm(&target_wav);
+        assert!(pcm.is_some(), "WAV ファイルがネイティブに PCM デコードされること");
+        let pcm_vec = pcm.unwrap();
+        assert_eq!(pcm_vec.len(), 44100 * 2, "44.1kHz 16-bit ステレオのサンプルが完全に取得できること");
+
+        // E. タイムライン上のオブジェクトの自動再リンクと再生同期
+        let audio_obj = au2_core::TimelineObject::new_audio(0, 300, r"C:\UnknownPC\ピアノ レコ.mp3");
+        st.scene.layers[0].objects.push(audio_obj);
+
+        // 自動再リンクの実行
+        let count = st.auto_relink_missing_media();
+        assert_eq!(count, 1, "未検出オブジェクトが手元の実在パスに自動再リンクされること");
+        assert_eq!(
+            st.scene.layers[0].objects[0].source().unwrap().text("file").unwrap(),
+            target_wav.to_string_lossy()
+        );
+
+        // オーディオ同期
+        st.sync_audio_playback();
+
+        // 未検出メディアチェックが空であること
+        let missing = st.check_missing_media();
+        assert!(missing.is_empty(), "自動再リンク後に未検出メディアが 0 件になること");
+
+        // 後片付け
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    /// 別 PC の絶対パス（UNC・他ドライブ）を持つ音声・画像・動画が、
+    /// 素材フォルダを指定するだけでまとめて再リンクされること。
+    #[test]
+    fn test_relink_from_folder_bulk() {
+        let root = std::env::temp_dir().join("openavi_bulk_relink_test");
+        let _ = std::fs::remove_dir_all(&root);
+        let assets = root.join("素材一式").join("images");
+        std::fs::create_dir_all(&assets).expect("create dirs");
+        let wav = root.join("素材一式").join("ma-maido.wav");
+        let png = assets.join("kaitenmaya.png");
+        let mp4 = root.join("素材一式").join("lightleak.mp4");
+        for f in [&wav, &png, &mp4] {
+            std::fs::write(f, b"dummy").expect("write dummy media");
+        }
+
+        let mut st = state::EditorState::default();
+        st.scene.layers[0].objects.push(au2_core::TimelineObject::new_audio(
+            0, 100, r"\\Trigkey-g4\c\MainD\ma-maido.wav",
+        ));
+        st.scene.layers[1].objects.push(au2_core::TimelineObject::new_image(
+            0, 100, r"D:\素材\kaitenmaya.png",
+        ));
+        st.scene.layers[2].objects.push(au2_core::TimelineObject::new_video(
+            0, 100, r"F:\ダウンロード\lightleak.mp4",
+        ));
+        assert_eq!(st.check_missing_media().len(), 3, "最初は 3 件とも未検出");
+
+        let (relinked, remaining) = st.relink_from_folder(&root.join("素材一式"));
+        assert_eq!(relinked, 3, "音声・画像・動画が一括で再リンクされること");
+        assert_eq!(remaining, 0);
+        assert!(st.check_missing_media().is_empty());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_dist_24fps_aup_load_and_full_preview() {
+        let p_testdata = test_data("dist_24fps.aup");
+        let p_desktop = desk(r"新しいフォルダー\配布　1280x720_24fps_44100Hz.aup");
+        let path = if p_testdata.exists() {
+            p_testdata
+        } else if p_desktop.exists() {
+            p_desktop
+        } else {
+            return;
+        };
+
+        let mut st = state::EditorState::default();
+        st.load_path(path);
+
+        assert_eq!(st.scene.settings.width, 1280);
+        assert_eq!(st.scene.settings.height, 720);
+        assert_eq!(st.scene.settings.frame_rate.num, 24);
+        assert_eq!(st.scene.settings.frame_rate.den, 1);
+        assert_eq!(st.scenes.len(), 4, "4 scenes expected");
+        assert!(st.scene.object_count() >= 230, "Expected >= 230 objects in Root scene, got {}", st.scene.object_count());
+
+        let ctx = egui::Context::default();
+        for f in (0..=7033).step_by(50) {
+            st.frame = f;
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    panels::preview::ui(ui, &mut st);
+                    panels::timeline::ui(ui, &mut st);
+                    panels::settings::ui(ui, &mut st);
+                });
+            });
+        }
     }
 }

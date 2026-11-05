@@ -35,7 +35,7 @@ mod ini;
 mod reader;
 mod writer;
 
-pub use encoding::{decode_text_hex, encode_text_hex, TextEncoding};
+pub use encoding::{decode as decode_text_bytes, decode_text_hex, encode_text_hex, TextEncoding};
 pub use error::ExoError;
-pub use reader::{parse_exo_bytes, parse_exo_str, ExoDocument};
+pub use reader::{parse_exa_bytes, parse_exa_str, parse_exo_bytes, parse_exo_str, ExoDocument};
 pub use writer::{write_exo_bytes, write_exo_string};

@@ -364,27 +364,26 @@ pub fn parse_legacy_aup(bytes: &[u8]) -> Result<AupDocument, AupError> {
             let trackbar_script_num = u32::from_le_bytes(decomp[0x7c..0x80].try_into().unwrap()) as usize;
 
             let hdr_base_size = u32::from_le_bytes(decomp[0x1C..0x20].try_into().unwrap()) as usize;
-            let is_pre_092 = exedit_version < 0x23f0;
-            let base_size = if hdr_base_size >= 0x500 && hdr_base_size <= 0x1000 {
+            let is_pre_092 = (exedit_version < 0x2300 && layer_num == 0 && scene_num == 0)
+                || hdr_base_size == 0x500
+                || (layer_size == 0 && scene_size == 0 && layer_num == 0 && scene_num == 0 && trackbar_script_num == 0);
+            let base_size = if (0x400..=0x1000).contains(&hdr_base_size) {
                 hdr_base_size
             } else if is_pre_092 {
-                0x508
+                0x500
             } else {
                 0x5c8
             };
-            // ExEdit 0.90〜0.91系 (base_size == 0x508) と 0.92系 (base_size == 0x5c8) のフィールドオフセット
-            // 0.90〜0.91系 (0x508):
-            //   0x0F8..0x178: track_value_left[32]  (128 bytes)
-            //   0x178..0x1F8: track_value_right[32] (128 bytes)
-            //   0x1F8..0x278: track_s[32] (default) (128 bytes)
-            //   0x278..0x2F8: track_e[32]           (128 bytes)
-            //   0x2F8..0x338: track_mode[16]        (64 bytes)
-            //   0x338..0x3F8: check_value[48]       (192 bytes)
-            //   0x3F8..0x3FC: exdata_offset         (4 bytes)
+            // ExEdit 0.90〜0.91系 (base_size == 0x500) と 0.92系 (base_size == 0x5c8) のフィールドオフセット
+            // 0.90〜0.91系 (0x500):
+            //   0x004..0x008: layer_index           (4 bytes)
+            //   0x0F8..0x1F8: track_value_left[64]  (256 bytes)
+            //   0x1F8..0x2F8: track_value_right[64] (256 bytes)
+            //   0x2F8..0x3F8: track_mode[64]        (256 bytes)
+            //   0x3F8..0x4B8: check_value[48]       (192 bytes)
+            //   0x4B8..0x4BC: exdata_offset         (4 bytes)
             //   0x4BC..0x4C0: group_belong          (4 bytes)
             //   0x4C0..0x500: track_param[16]       (64 bytes)
-            //   0x500..0x504: layer_set             (4 bytes)
-            //   0x504..0x508: scene_set             (4 bytes)
             // 0.92系 (0x5C8):
             //   0x0F8..0x1F8: track_value_left[64]  (256 bytes)
             //   0x1F8..0x2F8: track_value_right[64] (256 bytes)
@@ -395,45 +394,87 @@ pub fn parse_legacy_aup(bytes: &[u8]) -> Result<AupDocument, AupError> {
             //   0x4C0..0x5C0: track_param[64]       (256 bytes)
             //   0x5C0..0x5C4: layer_set             (4 bytes)
             //   0x5C4..0x5C8: scene_set             (4 bytes)
-            let is_compact_obj = base_size <= 0x540;
             let tb_left_off: usize = 0x0F8;
-            let tb_right_off: usize = if is_compact_obj { 0x178 } else { 0x1F8 };
+            let tb_right_off: usize = 0x1F8;
             let tb_mode_off: usize = 0x2F8;
-            let cb_off: usize = if is_compact_obj { 0x338 } else { 0x3F8 };
+            let cb_off: usize = 0x3F8;
             let tb_param_off: usize = 0x4C0;
-            let max_tracks: usize = if is_compact_obj { 32 } else { 64 };
-            let param_count: usize = if is_compact_obj { 16 } else { 64 };
+            let max_tracks: usize = 64;
             let (layer_off, scene_off) = (base_size - 8, base_size - 4);
+            let param_end = if is_pre_092 { base_size } else { layer_off };
+            let param_count: usize = param_end.saturating_sub(tb_param_off) / 4;
 
             let eff_layer_size = if layer_size > 0 { layer_size } else { 76 };
             let eff_scene_size = if scene_size > 0 { scene_size } else { 220 };
 
-            let mut cursor = 0x100;
-            cursor += layer_num * eff_layer_size;
+            // 0.90〜0.91系は固定ヘッダー長 0x474 の直後から EffectTypes が開始。
+            // 0.92系は 0x100 の後に Layer[], Scene[], TrackbarScript[] が続いて EffectTypes が開始。
+            let mut layers_info: std::collections::HashMap<(u32, usize), (Option<String>, bool, bool, bool, bool)> =
+                std::collections::HashMap::new();
+            let mut cursor = if is_pre_092 {
+                0x474
+            } else {
+                let mut c = 0x100;
+                for i in 0..layer_num {
+                    if c + eff_layer_size <= decomp.len() && eff_layer_size >= 16 {
+                        let l_data = &decomp[c..c + eff_layer_size];
+                        let flag = u32::from_le_bytes(l_data[4..8].try_into().unwrap());
+                        let name_end = eff_layer_size.min(76);
+                        let raw_name = decode_sjis_cstring(&l_data[12..name_end]);
+                        let name = if raw_name.is_empty() { None } else { Some(raw_name) };
+                        let visible = (flag & 1) == 0;
+                        let locked = (flag & 2) != 0;
+                        let coordinate_link = (flag & 0x10) != 0;
+                        let clip_above = (flag & 0x20) != 0;
+                        if name.is_some() || !visible || locked || coordinate_link || clip_above {
+                            let sc_idx = (i / 100) as u32;
+                            let l_idx = i % 100;
+                            layers_info.insert((sc_idx, l_idx), (name, visible, locked, coordinate_link, clip_above));
+                        }
+                    }
+                    c += eff_layer_size;
+                }
+                c
+            };
 
             // Scenes
             let mut scenes_info = std::collections::HashMap::new();
-            for i in 0..scene_num {
-                if cursor + eff_scene_size <= decomp.len() {
-                    let s_data = &decomp[cursor..cursor + eff_scene_size];
-                    let s_id0 = u32::from_le_bytes(s_data[0..4].try_into().unwrap());
-                    let s_name = decode_sjis_cstring(&s_data[8..8 + 64]);
-                    let w = u32::from_le_bytes(s_data[0x48..0x4c].try_into().unwrap());
-                    let h = u32::from_le_bytes(s_data[0x4c..0x50].try_into().unwrap());
-                    let max_f = u32::from_le_bytes(s_data[0x50..0x54].try_into().unwrap());
-                    let actual_sc_id = if s_id0 < 100 && (i == 0 || s_id0 > 0) { s_id0 } else { i as u32 };
-                    scenes_info.insert(actual_sc_id, (s_name, w, h, max_f));
-                    cursor += eff_scene_size;
+            if !is_pre_092 {
+                for i in 0..scene_num {
+                    if cursor + eff_scene_size <= decomp.len() {
+                        let s_data = &decomp[cursor..cursor + eff_scene_size];
+                        let s_id0 = u32::from_le_bytes(s_data[0..4].try_into().unwrap());
+                        let s_name = decode_sjis_cstring(&s_data[8..8 + 64]);
+                        let w = u32::from_le_bytes(s_data[0x48..0x4c].try_into().unwrap());
+                        let h = u32::from_le_bytes(s_data[0x4c..0x50].try_into().unwrap());
+                        let max_f = u32::from_le_bytes(s_data[0x50..0x54].try_into().unwrap());
+                        let actual_sc_id = if s_id0 < 100 && (i == 0 || s_id0 > 0) { s_id0 } else { i as u32 };
+                        scenes_info.insert(actual_sc_id, (s_name, w, h, max_f));
+                        cursor += eff_scene_size;
+                    }
                 }
             }
 
             // TrackbarScripts
             let mut scripts = Vec::new();
-            for _ in 0..trackbar_script_num {
-                if cursor + 128 <= decomp.len() {
-                    let sc_data = &decomp[cursor..cursor + 128];
-                    scripts.push(decode_sjis_cstring(sc_data));
-                    cursor += 128;
+            if !is_pre_092 {
+                for _ in 0..trackbar_script_num {
+                    if cursor + 128 <= decomp.len() {
+                        let sc_data = &decomp[cursor..cursor + 128];
+                        scripts.push(decode_sjis_cstring(sc_data));
+                        cursor += 128;
+                    }
+                }
+            }
+
+            // フォールバック: もし計算された cursor の位置が不正で 0x474 に有効な EffectType がある場合は 0x474 に補正
+            if cursor + 112 <= decomp.len() {
+                let test_name = decode_sjis_cstring(&decomp[cursor + 16..cursor + 16 + 32]);
+                if test_name.is_empty() && decomp.len() > 0x474 + 112 {
+                    let fallback_name = decode_sjis_cstring(&decomp[0x474 + 16..0x474 + 16 + 32]);
+                    if !fallback_name.is_empty() {
+                        cursor = 0x474;
+                    }
                 }
             }
 
@@ -483,8 +524,16 @@ pub fn parse_legacy_aup(bytes: &[u8]) -> Result<AupDocument, AupError> {
                 let chain_group = u32::from_le_bytes(o_data[0x50..0x54].try_into().unwrap());
                 let ext_size_field = u32::from_le_bytes(o_data[0xF4..0xF8].try_into().unwrap()) as usize;
                 let group = u32::from_le_bytes(o_data[0x4BC..0x4C0].try_into().unwrap());
-                let layer = u32::from_le_bytes(o_data[layer_off..layer_off + 4].try_into().unwrap());
-                let scene = u32::from_le_bytes(o_data[scene_off..scene_off + 4].try_into().unwrap());
+                let layer = if is_pre_092 {
+                    u32::from_le_bytes(o_data[0x04..0x08].try_into().unwrap())
+                } else {
+                    u32::from_le_bytes(o_data[layer_off..layer_off + 4].try_into().unwrap())
+                };
+                let scene = if is_pre_092 {
+                    0
+                } else {
+                    u32::from_le_bytes(o_data[scene_off..scene_off + 4].try_into().unwrap())
+                };
 
                 let is_chain = chain_group != 0xFFFF_FFFF && chain_group == last_chain_group && ext_size_field == 0;
                 last_chain_group = chain_group;
@@ -631,14 +680,22 @@ pub fn parse_legacy_aup(bytes: &[u8]) -> Result<AupDocument, AupError> {
                             if idx >= max_tracks {
                                 break;
                             }
-                            let cur = i32::from_le_bytes(o_data[tb_left_off + idx * 4..tb_left_off + idx * 4 + 4].try_into().unwrap());
-                            let next = i32::from_le_bytes(o_data[tb_right_off + idx * 4..tb_right_off + idx * 4 + 4].try_into().unwrap());
-                            let trans = if idx < param_count {
+                            let cur = if tb_left_off + idx * 4 + 4 <= o_data.len() {
+                                i32::from_le_bytes(o_data[tb_left_off + idx * 4..tb_left_off + idx * 4 + 4].try_into().unwrap())
+                            } else {
+                                0
+                            };
+                            let next = if tb_right_off + idx * 4 + 4 <= o_data.len() {
+                                i32::from_le_bytes(o_data[tb_right_off + idx * 4..tb_right_off + idx * 4 + 4].try_into().unwrap())
+                            } else {
+                                cur
+                            };
+                            let trans = if idx < max_tracks && tb_mode_off + idx * 4 + 4 <= o_data.len() {
                                 u32::from_le_bytes(o_data[tb_mode_off + idx * 4..tb_mode_off + idx * 4 + 4].try_into().unwrap())
                             } else {
                                 0
                             };
-                            let param = if idx < param_count {
+                            let param = if idx < param_count && tb_param_off + idx * 4 + 4 <= o_data.len() {
                                 i32::from_le_bytes(o_data[tb_param_off + idx * 4..tb_param_off + idx * 4 + 4].try_into().unwrap())
                             } else {
                                 0
@@ -663,7 +720,7 @@ pub fn parse_legacy_aup(bytes: &[u8]) -> Result<AupDocument, AupError> {
                         // チェックボックス (48 個)
                         for cb_i in 0..eff_type.checkbox_num {
                             let idx = checkbox_count + cb_i;
-                            if idx >= 48 {
+                            if idx >= 48 || cb_off + idx * 4 + 4 > o_data.len() {
                                 break;
                             }
                             let raw_val = i32::from_le_bytes(o_data[cb_off + idx * 4..cb_off + idx * 4 + 4].try_into().unwrap());
@@ -702,6 +759,15 @@ pub fn parse_legacy_aup(bytes: &[u8]) -> Result<AupDocument, AupError> {
                 if let Ok(doc) = parse_exo_str(&exo) {
                     let mut sc = doc.scene;
                     sc.name = sc_name;
+                    for (l_idx, layer) in sc.layers.iter_mut().enumerate() {
+                        if let Some((name, visible, locked, coord_link, clip_above)) = layers_info.get(&(sc_id, l_idx)) {
+                            layer.name = name.clone();
+                            layer.visible = *visible;
+                            layer.locked = *locked;
+                            layer.coordinate_link = *coord_link;
+                            layer.clip_above = *clip_above;
+                        }
+                    }
                     let mut max_end_frame = 0;
                     let mut obj_count = 0;
                     for l in &sc.layers {
@@ -972,6 +1038,30 @@ fn get_trackbar_scale(eff: &str, i: usize) -> i32 {
         "シャドー(カメラ制御)" => match i {
             0..=2 => 10,
             3..=4 => 1,
+            _ => 1,
+        },
+        "音声フェード" => 100,
+        "音声ディレイ" => match i {
+            0 => 10,
+            1 => 1,
+            _ => 1,
+        },
+        "モノラル化" | "音量フィルタ" => 10,
+        "動画ファイル合成" => match i {
+            0 => 1,
+            1..=3 => 10,
+            4 => 100,
+            _ => 1,
+        },
+        "画像ファイル合成" => match i {
+            0..=1 => 10,
+            2 => 100,
+            _ => 1,
+        },
+        "音声波形表示" => match i {
+            0..=1 => 1,
+            2 => 10,
+            3 => 100,
             _ => 1,
         },
         _ => 1,
@@ -1339,6 +1429,69 @@ fn get_trackbar_name(eff: &str, i: usize) -> String {
             4 => "精度".into(),
             _ => format!("track{}", i),
         },
+        "クロマキー" | "特定色域変換" => match i {
+            0 => "色相範囲".into(),
+            1 => "彩度範囲".into(),
+            2 => "境界補正".into(),
+            _ => format!("track{}", i),
+        },
+        "カラーキー" => match i {
+            0 => "輝度範囲".into(),
+            1 => "色差範囲".into(),
+            2 => "境界補正".into(),
+            _ => format!("track{}", i),
+        },
+        "ルミナンスキー" => match i {
+            0 => "基準輝度".into(),
+            1 => "ぼかし".into(),
+            _ => format!("track{}", i),
+        },
+        "拡張色設定" => match i {
+            0 => "R".into(),
+            1 => "G".into(),
+            2 => "B".into(),
+            _ => format!("track{}", i),
+        },
+        "音声フェード" => match i {
+            0 => "イン".into(),
+            1 => "アウト".into(),
+            _ => format!("track{}", i),
+        },
+        "音声ディレイ" => match i {
+            0 => "強さ".into(),
+            1 => "遅延".into(),
+            _ => format!("track{}", i),
+        },
+        "モノラル化" => match i {
+            0 => "比率".into(),
+            _ => format!("track{}", i),
+        },
+        "音量フィルタ" => match i {
+            0 => "レベル".into(),
+            _ => format!("track{}", i),
+        },
+        "動画ファイル合成" => match i {
+            0 => "再生位置".into(),
+            1 => "再生速度".into(),
+            2 => "X".into(),
+            3 => "Y".into(),
+            4 => "拡大率".into(),
+            _ => format!("track{}", i),
+        },
+        "画像ファイル合成" => match i {
+            0 => "X".into(),
+            1 => "Y".into(),
+            2 => "拡大率".into(),
+            _ => format!("track{}", i),
+        },
+        "音声波形表示" => match i {
+            0 => "横幅".into(),
+            1 => "高さ".into(),
+            2 => "音量".into(),
+            3 => "再生位置".into(),
+            4 => "編集全体の音声を元にする".into(),
+            _ => format!("track{}", i),
+        },
         _ => format!("track{}", i),
     }
 }
@@ -1421,6 +1574,48 @@ fn get_checkbox_name(eff: &str, i: usize) -> Option<String> {
             2 => Some("輝度反転".into()),
             3 => Some("色相反転".into()),
             4 => Some("透明度反転".into()),
+            _ => Some(format!("check{}", i)),
+        },
+        "クロマキー" => match i {
+            0 => Some("色彩補正".into()),
+            1 => Some("透過補正".into()),
+            _ => Some(format!("check{}", i)),
+        },
+        "カラーキー" => match i {
+            0 => Some("透過補正".into()),
+            _ => Some(format!("check{}", i)),
+        },
+        "特定色域変換" => match i {
+            0 => Some("補正".into()),
+            _ => Some(format!("check{}", i)),
+        },
+        "色調補正" => match i {
+            0 => Some("飽和する".into()),
+            _ => Some(format!("check{}", i)),
+        },
+        "音声ディレイ" => match i {
+            0 => Some("原音の音量を維持".into()),
+            _ => Some(format!("check{}", i)),
+        },
+        "動画ファイル合成" => match i {
+            0 => Some("ループ再生".into()),
+            1 => Some("動画ファイルの同期".into()),
+            2 => Some("ループ画像".into()),
+            _ => Some(format!("check{}", i)),
+        },
+        "画像ファイル合成" => match i {
+            0 => Some("ループ画像".into()),
+            _ => Some(format!("check{}", i)),
+        },
+        "カメラ制御オプション" => match i {
+            0 => Some("シャドウの対象から外す".into()),
+            1 => Some("カメラの方を向く".into()),
+            2 => Some("カメラの方を向く(縦横方向のみ)".into()),
+            3 => Some("カメラの方を向く(横方向のみ)".into()),
+            _ => Some(format!("check{}", i)),
+        },
+        "フレームバッファ" => match i {
+            0 => Some("フレームバッファをクリア".into()),
             _ => Some(format!("check{}", i)),
         },
         _ => Some(format!("check{}", i)),
@@ -1615,10 +1810,30 @@ fn export_ext_data(exo: &mut String, eff: &str, ext: &[u8]) {
                 }
             }
         }
-        "ミラー" | "色ずれ" | "ノイズ" => {
+        "ミラー" | "色ずれ" | "ノイズ" | "ルミナンスキー" | "インターレース解除" => {
             if ext.len() >= 4 {
                 let t = i32::from_le_bytes(ext[0..4].try_into().unwrap());
                 exo.push_str(&format!("type={}\r\n", t));
+            }
+        }
+        "動画ファイル合成" | "画像ファイル合成" => {
+            if ext.len() >= 4 {
+                let mode = i32::from_le_bytes(ext[0..4].try_into().unwrap());
+                exo.push_str(&format!("mode={}\r\n", mode));
+            }
+            if ext.len() > 4 {
+                if let Some(path) = clean_file_path(&ext[4..ext.len().min(264)]) {
+                    exo.push_str(&format!("file={}\r\n", path));
+                }
+            }
+        }
+        "音声波形表示" => {
+            if ext.len() >= 4 {
+                let t = i16::from_le_bytes(ext[0..2].try_into().unwrap());
+                exo.push_str(&format!("type={}\r\n", t));
+            }
+            if ext.len() >= 8 {
+                exo.push_str(&format!("color={:02x}{:02x}{:02x}\r\n", ext[4], ext[5], ext[6]));
             }
         }
         _ => {

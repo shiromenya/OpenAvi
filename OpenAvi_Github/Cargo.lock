@@ -498,6 +498,7 @@ dependencies = [
  "au2-core",
  "au2-exo",
  "au2-media",
+ "au2-platform",
  "au2-plugin",
  "eframe",
  "egui_dock",
@@ -533,16 +534,22 @@ dependencies = [
 name = "au2-media"
 version = "0.1.0"
 dependencies = [
+ "au2-platform",
  "image",
  "log",
  "thiserror 1.0.69",
 ]
 
 [[package]]
+name = "au2-platform"
+version = "0.1.0"
+
+[[package]]
 name = "au2-plugin"
 version = "0.1.0"
 dependencies = [
  "au2-core",
+ "au2-platform",
  "encoding_rs",
  "thiserror 1.0.69",
 ]

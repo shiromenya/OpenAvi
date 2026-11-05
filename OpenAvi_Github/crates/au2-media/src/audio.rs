@@ -40,14 +40,216 @@ impl DecodedAudio {
     }
 }
 
-/// FFmpeg を使用してメディアファイルの音声ストリームを 44.1kHz 16-bit ステレオ PCM に一括デコードします。
-pub fn decode_audio_pcm(ffmpeg: &Path, media_path: &Path) -> Option<DecodedAudio> {
-    let mut cmd = Command::new(ffmpeg);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+/// WAV (RIFF WAVE) ファイルを標準ライブラリのみで直接パースし、
+/// 44.1kHz 16-bit ステレオ PCM に高速デコードします。
+/// FFmpeg 不要で 8/16/24/32bit PCM および 32bit IEEE float、モノラル/ステレオ/任意サンプリングレートに対応。
+pub fn decode_wav_pcm(bytes: &[u8]) -> Option<DecodedAudio> {
+    if bytes.len() < 44 {
+        return None;
     }
+    if &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return None;
+    }
+
+    let mut pos = 12;
+    let mut fmt_opt: Option<(u16, u16, u32, u16)> = None; // (format, channels, sample_rate, bits_per_sample)
+    let mut data_slice: Option<&[u8]> = None;
+
+    while pos + 8 <= bytes.len() {
+        let chunk_id = &bytes[pos..pos + 4];
+        let chunk_size = u32::from_le_bytes([bytes[pos + 4], bytes[pos + 5], bytes[pos + 6], bytes[pos + 7]]) as usize;
+        let chunk_data_start = pos + 8;
+        let chunk_data_end = (chunk_data_start + chunk_size).min(bytes.len());
+
+        if chunk_id == b"fmt " && chunk_size >= 16 {
+            let data = &bytes[chunk_data_start..chunk_data_end];
+            let format_tag = u16::from_le_bytes([data[0], data[1]]);
+            let channels = u16::from_le_bytes([data[2], data[3]]);
+            let sample_rate = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+            let bits_per_sample = u16::from_le_bytes([data[14], data[15]]);
+            fmt_opt = Some((format_tag, channels, sample_rate, bits_per_sample));
+        } else if chunk_id == b"data" {
+            data_slice = Some(&bytes[chunk_data_start..chunk_data_end]);
+            if fmt_opt.is_some() {
+                break;
+            }
+        }
+
+        // 次のチャンクへ（奇数バイトサイズの場合は 1 バイトパディング）
+        pos = chunk_data_start + chunk_size + (chunk_size % 2);
+    }
+
+    let (format_tag, in_channels, in_rate, in_bits) = fmt_opt?;
+    let raw_data = data_slice?;
+
+    if in_channels == 0 || in_rate == 0 {
+        return None;
+    }
+
+    let bytes_per_sample = (in_bits as usize) / 8;
+    if bytes_per_sample == 0 {
+        return None;
+    }
+    let frame_size = bytes_per_sample * in_channels as usize;
+    if frame_size == 0 {
+        return None;
+    }
+    let total_frames = raw_data.len() / frame_size;
+    if total_frames == 0 {
+        return None;
+    }
+
+    // 44.1kHz 16-bit PCM の標準 WAV は直接ビットパーフェクトに変換（ゼロ誤差＆超高速）
+    if in_rate == SAMPLE_RATE && format_tag == 1 && in_bits == 16 {
+        let mut out = Vec::with_capacity(total_frames * 2);
+        for frame_idx in 0..total_frames {
+            let offset = frame_idx * frame_size;
+            let ch0 = i16::from_le_bytes([raw_data[offset], raw_data[offset + 1]]);
+            let ch1 = if in_channels > 1 {
+                i16::from_le_bytes([raw_data[offset + 2], raw_data[offset + 3]])
+            } else {
+                ch0
+            };
+            out.push(ch0);
+            out.push(ch1);
+        }
+        let duration_sec = total_frames as f64 / SAMPLE_RATE as f64;
+        return Some(DecodedAudio {
+            sample_rate: SAMPLE_RATE,
+            channels: CHANNELS,
+            samples: Arc::new(out),
+            duration_sec,
+        });
+    }
+
+    let mut in_samples_stereo: Vec<[f32; 2]> = Vec::with_capacity(total_frames);
+
+    match (format_tag, in_bits) {
+        // PCM 16bit
+        (1, 16) => {
+            for frame_idx in 0..total_frames {
+                let offset = frame_idx * frame_size;
+                let ch0 = i16::from_le_bytes([raw_data[offset], raw_data[offset + 1]]) as f32 / 32768.0;
+                let ch1 = if in_channels > 1 {
+                    i16::from_le_bytes([raw_data[offset + 2], raw_data[offset + 3]]) as f32 / 32768.0
+                } else {
+                    ch0
+                };
+                in_samples_stereo.push([ch0, ch1]);
+            }
+        }
+        // PCM 24bit
+        (1, 24) => {
+            for frame_idx in 0..total_frames {
+                let offset = frame_idx * frame_size;
+                let b0 = [0, raw_data[offset], raw_data[offset + 1], raw_data[offset + 2]];
+                let ch0 = (i32::from_le_bytes(b0) >> 8) as f32 / 8388608.0;
+                let ch1 = if in_channels > 1 {
+                    let b1 = [0, raw_data[offset + 3], raw_data[offset + 4], raw_data[offset + 5]];
+                    (i32::from_le_bytes(b1) >> 8) as f32 / 8388608.0
+                } else {
+                    ch0
+                };
+                in_samples_stereo.push([ch0, ch1]);
+            }
+        }
+        // PCM 8bit (unsigned)
+        (1, 8) => {
+            for frame_idx in 0..total_frames {
+                let offset = frame_idx * frame_size;
+                let ch0 = (raw_data[offset] as f32 - 128.0) / 128.0;
+                let ch1 = if in_channels > 1 {
+                    (raw_data[offset + 1] as f32 - 128.0) / 128.0
+                } else {
+                    ch0
+                };
+                in_samples_stereo.push([ch0, ch1]);
+            }
+        }
+        // PCM 32bit int
+        (1, 32) => {
+            for frame_idx in 0..total_frames {
+                let offset = frame_idx * frame_size;
+                let ch0 = i32::from_le_bytes(raw_data[offset..offset + 4].try_into().unwrap()) as f32 / 2147483648.0;
+                let ch1 = if in_channels > 1 {
+                    i32::from_le_bytes(raw_data[offset + 4..offset + 8].try_into().unwrap()) as f32 / 2147483648.0
+                } else {
+                    ch0
+                };
+                in_samples_stereo.push([ch0, ch1]);
+            }
+        }
+        // IEEE Float 32bit (format 3)
+        (3, 32) => {
+            for frame_idx in 0..total_frames {
+                let offset = frame_idx * frame_size;
+                let ch0 = f32::from_le_bytes(raw_data[offset..offset + 4].try_into().unwrap());
+                let ch1 = if in_channels > 1 {
+                    f32::from_le_bytes(raw_data[offset + 4..offset + 8].try_into().unwrap())
+                } else {
+                    ch0
+                };
+                in_samples_stereo.push([ch0, ch1]);
+            }
+        }
+        _ => return None,
+    }
+
+    // リサンプリング (in_rate -> 44100)
+    let out_frames = if in_rate == SAMPLE_RATE {
+        let mut out = Vec::with_capacity(in_samples_stereo.len() * 2);
+        for [l, r] in in_samples_stereo {
+            out.push((l.clamp(-1.0, 1.0) * 32767.0).round() as i16);
+            out.push((r.clamp(-1.0, 1.0) * 32767.0).round() as i16);
+        }
+        out
+    } else {
+        let ratio = in_rate as f64 / SAMPLE_RATE as f64;
+        let out_count = ((in_samples_stereo.len() as f64) / ratio).round() as usize;
+        let mut out = Vec::with_capacity(out_count * 2);
+        for i in 0..out_count {
+            let src_pos = i as f64 * ratio;
+            let idx0 = src_pos.floor() as usize;
+            let frac = (src_pos - idx0 as f64) as f32;
+            let s0 = in_samples_stereo.get(idx0).copied().unwrap_or([0.0, 0.0]);
+            let s1 = in_samples_stereo.get(idx0 + 1).copied().unwrap_or(s0);
+            let l = s0[0] + (s1[0] - s0[0]) * frac;
+            let r = s0[1] + (s1[1] - s0[1]) * frac;
+            out.push((l.clamp(-1.0, 1.0) * 32767.0).round() as i16);
+            out.push((r.clamp(-1.0, 1.0) * 32767.0).round() as i16);
+        }
+        out
+    };
+
+    let duration_sec = out_frames.len() as f64 / (SAMPLE_RATE as f64 * CHANNELS as f64);
+    Some(DecodedAudio {
+        sample_rate: SAMPLE_RATE,
+        channels: CHANNELS,
+        samples: Arc::new(out_frames),
+        duration_sec,
+    })
+}
+
+/// WAV または各種メディアファイル（MP3 / M4A / AAC / FLAC / MP4 / AVI）の音声を
+/// 44.1kHz 16-bit ステレオ PCM に一括デコードします。
+/// WAV ファイルは FFmpeg なしで直接高速ネイティブデコードし、その他は FFmpeg を使用します。
+pub fn decode_audio_pcm(ffmpeg_opt: Option<&Path>, media_path: &Path) -> Option<DecodedAudio> {
+    // 1. まず WAV ネイティブデコーダーを試行（FFmpeg 不要＆超高速）
+    if let Ok(bytes) = std::fs::read(media_path) {
+        if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE" {
+            if let Some(decoded) = decode_wav_pcm(&bytes) {
+                return Some(decoded);
+            }
+        }
+    }
+
+    // 2. FFmpeg が利用可能な場合は FFmpeg でデコード
+    let Some(ffmpeg) = ffmpeg_opt else {
+        return None;
+    };
+
+    let mut cmd = Command::new(ffmpeg);
+    au2_platform::hide_console_window(&mut cmd);
     let output = cmd
         .args(["-i"])
         .arg(media_path)
@@ -64,11 +266,18 @@ pub fn decode_audio_pcm(ffmpeg: &Path, media_path: &Path) -> Option<DecodedAudio
             "-",
         ])
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .output()
         .ok()?;
 
     if !output.status.success() || output.stdout.is_empty() {
+        if !output.stderr.is_empty() {
+            log::warn!(
+                "FFmpeg audio decode failed for {:?}: {}",
+                media_path,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
         return None;
     }
 
@@ -444,5 +653,92 @@ impl AudioEngine {
 impl Drop for AudioEngine {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_decode_wav_pcm_synthetic() {
+        // 44.1kHz 16-bit ステレオ 100サンプルの合成 WAV バイナリを作成
+        let num_frames = 100u32;
+        let num_channels = 2u16;
+        let bits_per_sample = 16u16;
+        let sample_rate = 44100u32;
+        let byte_rate = sample_rate * num_channels as u32 * (bits_per_sample as u32 / 8);
+        let block_align = num_channels * (bits_per_sample / 8);
+        let data_size = num_frames * block_align as u32;
+
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_size).to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+
+        // fmt chunk
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        wav.extend_from_slice(&num_channels.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&byte_rate.to_le_bytes());
+        wav.extend_from_slice(&block_align.to_le_bytes());
+        wav.extend_from_slice(&bits_per_sample.to_le_bytes());
+
+        // data chunk
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_size.to_le_bytes());
+        for i in 0..num_frames {
+            let sample_val = (i as i16) * 100;
+            wav.extend_from_slice(&sample_val.to_le_bytes()); // L
+            wav.extend_from_slice(&(-sample_val).to_le_bytes()); // R
+        }
+
+        let decoded = decode_wav_pcm(&wav).expect("should decode synthetic wav");
+        assert_eq!(decoded.sample_rate, 44100);
+        assert_eq!(decoded.channels, 2);
+        assert_eq!(decoded.samples.len(), 200);
+        assert_eq!(decoded.samples[0], 0);
+        assert_eq!(decoded.samples[1], 0);
+        assert_eq!(decoded.samples[2], 100);
+        assert_eq!(decoded.samples[3], -100);
+    }
+
+    #[test]
+    fn test_decode_wav_pcm_48k_mono() {
+        // 48kHz 16-bit モノラル 480 サンプル (10ms)
+        let num_frames = 480u32;
+        let num_channels = 1u16;
+        let bits_per_sample = 16u16;
+        let sample_rate = 48000u32;
+        let block_align = 2u16;
+        let byte_rate = sample_rate * block_align as u32;
+        let data_size = num_frames * block_align as u32;
+
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_size).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        wav.extend_from_slice(&num_channels.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&byte_rate.to_le_bytes());
+        wav.extend_from_slice(&block_align.to_le_bytes());
+        wav.extend_from_slice(&bits_per_sample.to_le_bytes());
+
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_size.to_le_bytes());
+        for i in 0..num_frames {
+            let sample_val = (i as i16) * 10;
+            wav.extend_from_slice(&sample_val.to_le_bytes());
+        }
+
+        let decoded = decode_wav_pcm(&wav).expect("should decode 48k mono wav");
+        assert_eq!(decoded.sample_rate, 44100);
+        assert_eq!(decoded.channels, 2);
+        // 480 サンプル @ 48kHz -> 約 441 サンプル @ 44.1kHz * 2ch = 882
+        assert!((decoded.samples.len() as i32 - 882).abs() <= 4);
     }
 }

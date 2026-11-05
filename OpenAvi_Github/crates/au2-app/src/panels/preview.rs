@@ -1202,14 +1202,102 @@ struct TextCharLayout {
     color_override: Option<Color32>,
 }
 
-/// AviUtl テキスト制御タグ（`<#rrggbb>`, `<s...>`, `<r...>`, `<w...>`, `<p...>` 等）を解析しつつ、
+fn preprocess_aviutl2_text(raw: &str, ctx: &DrawCtx, rel: Frame) -> String {
+    let mut s = raw.to_string();
+    // 1. `<//コメント//>` を除去
+    while let Some(start) = s.find("<//") {
+        if let Some(end_rel) = s[start + 3..].find("//>") {
+            s.replace_range(start..start + 3 + end_rel + 3, "");
+        } else {
+            break;
+        }
+    }
+    // 2. ルビタグ `</>親文字<!>ルビ</>` の親文字を残してルビ指定タグを整形
+    while let Some(start) = s.find("</>") {
+        let rest = &s[start + 3..];
+        if let Some(end_rel) = rest.find("</>") {
+            let segment = &rest[..end_rel];
+            if let Some((base_txt, _ruby_txt)) = segment.split_once("<!>") {
+                let base_owned = base_txt.to_string();
+                s.replace_range(start..start + 3 + end_rel + 3, &base_owned);
+                continue;
+            }
+        }
+        s.replace_range(start..start + 3, "");
+    }
+    // 3. 画面サイズ・時間変数タグの置換
+    let sw_str = format!("{}", ctx.screen_w.round() as i64);
+    let sh_str = format!("{}", ctx.screen_h.round() as i64);
+    let time_sec = rel as f64 / ctx.fps.max(1.0);
+    s = s
+        .replace("<gw>", &sw_str)
+        .replace("<gh>", &sh_str)
+        .replace("<tr>", &format!("{rel}"))
+        .replace("<tw>", &format!("{time_sec:.2}"))
+        .replace("<th>", &format!("{:.1}", ctx.fps));
+    // 4. `<?=式?>` または `<?式?>` の簡易評価
+    while let Some(start) = s.find("<?") {
+        if let Some(end_rel) = s[start + 2..].find("?>") {
+            let inner = s[start + 2..start + 2 + end_rel].trim();
+            let expr_str = inner.strip_prefix('=').unwrap_or(inner).trim();
+            let mut st = LuaObjState {
+                time: time_sec,
+                frame: rel as i64,
+                screen_w: ctx.screen_w,
+                screen_h: ctx.screen_h,
+                framerate: ctx.fps,
+                ..Default::default()
+            };
+            let code = format!("return ({expr_str})");
+            au2_plugin::execute_lua_script(&code, &mut st);
+            let repl = if let Some(v) = st.return_value {
+                if (v - v.round()).abs() < 1e-6 {
+                    format!("{}", v.round() as i64)
+                } else {
+                    format!("{v:.2}")
+                }
+            } else {
+                String::new()
+            };
+            s.replace_range(start..start + 2 + end_rel + 2, &repl);
+        } else {
+            break;
+        }
+    }
+    // 5. 初代 AviUtl の Unicode 数値文字参照 (`&#12345;` / `&#x3042;`) をデコード
+    let mut search_from = 0;
+    while let Some(rel_pos) = s[search_from..].find("&#") {
+        let start = search_from + rel_pos;
+        if let Some(semi_rel) = s[start + 2..].find(';') {
+            if semi_rel <= 8 {
+                let code_str = s[start + 2..start + 2 + semi_rel].trim();
+                let parsed_code = if let Some(hex) = code_str.strip_prefix('x').or_else(|| code_str.strip_prefix('X')) {
+                    u32::from_str_radix(hex, 16).ok()
+                } else {
+                    code_str.parse::<u32>().ok()
+                };
+                if let Some(ch) = parsed_code.and_then(char::from_u32) {
+                    let ch_str = ch.to_string();
+                    s.replace_range(start..start + 2 + semi_rel + 1, &ch_str);
+                    search_from = start + ch_str.len();
+                    continue;
+                }
+            }
+        }
+        search_from = start + 2;
+    }
+    s
+}
+
+/// AviUtl テキスト制御タグ（`<#rrggbb>`, `<s...>`, `<r...>`, `<w...>`, `<p...>`, `<@...>` 等）を解析しつつ、
 /// `表示速度`・`align` (0..17 横書き/縦書き)・`spacing_x`・`spacing_y`・`monospace` に従った文字配置と全体境界を計算します。
 fn layout_aviutl_text(
     ctx: &DrawCtx,
     src: &au2_core::Effect,
     rel: Frame,
 ) -> (Vec<TextCharLayout>, f32) {
-    let raw_text = src.text("text").unwrap_or_default().replace("\r\n", "\n");
+    let raw_input = src.text("text").unwrap_or_default().replace("\r\n", "\n");
+    let raw_text = preprocess_aviutl2_text(&raw_input, ctx, rel);
     if raw_text.is_empty() {
         return (Vec::new(), 0.0);
     }
@@ -1275,6 +1363,9 @@ fn layout_aviutl_text(
                     || tag_trim.starts_with('w')
                     || tag_trim.starts_with('c')
                     || tag_trim.starts_with('p')
+                    || tag_trim.starts_with('@')
+                    || tag_trim == "/"
+                    || tag_trim == "!"
                 {
                     idx += close_rel + 2;
                     continue;
@@ -1727,7 +1818,7 @@ fn draw_object_sub(
                     fx.clip_insets[1] += cut;
                 }
             }
-            "色調補正" => {
+            "色調補正" | "拡張色調補正" => {
                 let br = (eff.eval("明るさ", rel, 100.0) as f32 - 100.0) / 100.0;
                 let hue = eff.eval("色相", rel, 0.0) as f32;
                 let sat = (eff.eval("彩度", rel, 100.0) as f32 / 100.0).max(0.0);
@@ -1735,10 +1826,18 @@ fn draw_object_sub(
                 fx.hsv_shift.1 += hue;
                 fx.hsv_shift.2 = if fx.hsv_shift.2 == 0.0 { sat } else { fx.hsv_shift.2 * sat };
             }
-            "グラデーション" => {
+            "グラデーション" | "グラデーションマップ" => {
                 let strength = (eff.eval("強さ", rel, 100.0) / 100.0).clamp(0.0, 1.0) as f32;
-                let col1 = eff.text("color").and_then(parse_color);
-                let col2 = eff.text("color2").and_then(parse_color);
+                let col1 = eff
+                    .text("color")
+                    .or_else(|| eff.text("開始色"))
+                    .or_else(|| eff.text("色1"))
+                    .and_then(parse_color);
+                let col2 = eff
+                    .text("color2")
+                    .or_else(|| eff.text("終了色"))
+                    .or_else(|| eff.text("色2"))
+                    .and_then(parse_color);
                 if let Some(c) = col1.or(col2) {
                     fx.grad_color = Some((c, strength * 0.65));
                 }
@@ -1759,7 +1858,11 @@ fn draw_object_sub(
             }
             "縁取り" => {
                 fx.border_width = eff.eval("サイズ", rel, 4.0) as f32;
-                fx.border_color = eff.text("color").and_then(parse_color).or(Some(Color32::WHITE));
+                fx.border_color = eff
+                    .text("color")
+                    .or_else(|| eff.text("縁色"))
+                    .and_then(parse_color)
+                    .or(Some(Color32::WHITE));
             }
             "シャドー" | "ドロップシャドウ" => {
                 let dx = eff.eval("X", rel, 6.0) as f32;
@@ -1770,7 +1873,11 @@ fn draw_object_sub(
             }
             "単色化" => {
                 let strength = (eff.eval("強さ", rel, 100.0) / 100.0).clamp(0.0, 1.0) as f32;
-                let col = eff.text("color").and_then(parse_color).unwrap_or(Color32::from_rgb(255, 200, 120));
+                let col = eff
+                    .text("color")
+                    .or_else(|| eff.text("色"))
+                    .and_then(parse_color)
+                    .unwrap_or(Color32::from_rgb(255, 200, 120));
                 fx.tint_color = Some((col, strength));
             }
             "座標" => {
@@ -1780,16 +1887,18 @@ fn draw_object_sub(
             }
             "拡大率" => {
                 let z = eff.eval("拡大率", rel, 100.0) / 100.0;
-                lua_st.zoom *= z.max(0.0);
+                let sx = eff.eval("X", rel, 100.0) / 100.0;
+                let sy = eff.eval("Y", rel, 100.0) / 100.0;
+                lua_st.zoom *= (z * ((sx + sy) * 0.5)).max(0.0);
             }
             "透明度" => {
                 let tr = (eff.eval("透明度", rel, 0.0) / 100.0).clamp(0.0, 1.0);
                 lua_st.alpha *= 1.0 - tr;
             }
             "回転" => {
-                lua_st.rx += eff.eval("X", rel, 0.0);
-                lua_st.ry += eff.eval("Y", rel, 0.0);
-                lua_st.rz += eff.eval("Z", rel, 0.0);
+                lua_st.rx += eff.eval("X", rel, eff.eval("X軸回転", rel, 0.0));
+                lua_st.ry += eff.eval("Y", rel, eff.eval("Y軸回転", rel, 0.0));
+                lua_st.rz += eff.eval("Z", rel, eff.eval("Z軸回転", rel, 0.0));
             }
             "極座標変換" => {
                 let cw = eff.eval("中心幅", rel, 0.0) as f32;

@@ -79,6 +79,12 @@ pub struct LuaObjState {
     pub cy: f64,
     pub cz: f64,
     pub zoom: f64,
+    /// AviUtl2 の X軸拡大率 (1.0 基準)
+    pub sx: f64,
+    /// AviUtl2 の Y軸拡大率 (1.0 基準)
+    pub sy: f64,
+    /// AviUtl2 の Z軸拡大率 (1.0 基準)
+    pub sz: f64,
     pub alpha: f64,
     pub aspect: f64,
     pub time: f64,
@@ -88,6 +94,13 @@ pub struct LuaObjState {
     pub layer: i64,
     pub index: i64,
     pub num: i64,
+    pub id: i64,
+    pub effect_id: i64,
+    pub frame_s: i64,
+    pub frame_e: i64,
+    pub effect_layer: i64,
+    pub originframe: i64,
+    pub scene_id: i64,
     pub w: f64,
     pub h: f64,
     pub screen_w: f64,
@@ -98,8 +111,13 @@ pub struct LuaObjState {
     pub named_vars: HashMap<String, LuaVal>,
     pub font_name: String,
     pub font_size: f64,
+    pub font_type: i64,
     pub font_color: u32,
     pub font_color2: u32,
+    pub font_bold: bool,
+    pub font_italic: bool,
+    pub font_charspacing: f64,
+    pub font_linespacing: f64,
     pub loaded_primitive: Option<LuaLoadedPrimitive>,
     pub draw_calls: Vec<LuaDrawCall>,
     pub poly_calls: Vec<LuaPolyCall>,
@@ -115,6 +133,14 @@ pub struct LuaObjState {
     pub cam_uy: f64,
     pub cam_uz: f64,
     pub cam_d: f64,
+    /// `.tra` / `.tra2` 移動スクリプト用の制御点リスト (`getpoint` 用)
+    pub point_values: Vec<f64>,
+    pub point_index: usize,
+    pub point_time: f64,
+    pub point_totaltime: f64,
+    pub point_param: f64,
+    pub point_accelerate: bool,
+    pub point_decelerate: bool,
     /// `.tra` スクリプト等が `return` した数値結果
     pub return_value: Option<f64>,
 }
@@ -135,6 +161,9 @@ impl Default for LuaObjState {
             cy: 0.0,
             cz: 0.0,
             zoom: 1.0,
+            sx: 1.0,
+            sy: 1.0,
+            sz: 1.0,
             alpha: 1.0,
             aspect: 0.0,
             time: 0.0,
@@ -144,6 +173,13 @@ impl Default for LuaObjState {
             layer: 1,
             index: 0,
             num: 1,
+            id: 1,
+            effect_id: 1,
+            frame_s: 0,
+            frame_e: 150,
+            effect_layer: 1,
+            originframe: 0,
+            scene_id: 0,
             w: 200.0,
             h: 200.0,
             screen_w: 1920.0,
@@ -154,8 +190,13 @@ impl Default for LuaObjState {
             named_vars: HashMap::new(),
             font_name: "MS UI Gothic".to_string(),
             font_size: 36.0,
+            font_type: 0,
             font_color: 0xFFFFFF,
             font_color2: 0x000000,
+            font_bold: false,
+            font_italic: false,
+            font_charspacing: 0.0,
+            font_linespacing: 0.0,
             loaded_primitive: None,
             draw_calls: Vec::new(),
             poly_calls: Vec::new(),
@@ -171,6 +212,13 @@ impl Default for LuaObjState {
             cam_uy: -1.0,
             cam_uz: 0.0,
             cam_d: 1024.0,
+            point_values: vec![0.0, 100.0],
+            point_index: 0,
+            point_time: 0.5,
+            point_totaltime: 1.0,
+            point_param: 0.0,
+            point_accelerate: false,
+            point_decelerate: false,
             return_value: None,
         }
     }
@@ -1098,6 +1146,9 @@ impl<'a> Vm<'a> {
         for (k, v) in &obj.named_vars {
             globals.insert(k.clone(), v.clone());
         }
+        if !globals.contains_key("global") {
+            globals.insert("global".to_string(), LuaVal::Table(HashMap::new(), Vec::new()));
+        }
         let seed = ((obj.frame as u64).wrapping_mul(6364136223846793005)) ^ 0x9E3779B97F4A7C15;
         Self {
             obj,
@@ -1165,6 +1216,9 @@ impl<'a> Vm<'a> {
             "cy" => LuaVal::Num(self.obj.cy),
             "cz" => LuaVal::Num(self.obj.cz),
             "zoom" => LuaVal::Num(self.obj.zoom),
+            "sx" => LuaVal::Num(self.obj.sx),
+            "sy" => LuaVal::Num(self.obj.sy),
+            "sz" => LuaVal::Num(self.obj.sz),
             "alpha" => LuaVal::Num(self.obj.alpha),
             "aspect" => LuaVal::Num(self.obj.aspect),
             "time" => LuaVal::Num(self.obj.time),
@@ -1174,6 +1228,13 @@ impl<'a> Vm<'a> {
             "layer" => LuaVal::Num(self.obj.layer as f64),
             "index" => LuaVal::Num(self.obj.index as f64),
             "num" => LuaVal::Num(self.obj.num as f64),
+            "id" => LuaVal::Num(self.obj.id as f64),
+            "effect_id" => LuaVal::Num(self.obj.effect_id as f64),
+            "frame_s" => LuaVal::Num(self.obj.frame_s as f64),
+            "frame_e" => LuaVal::Num(self.obj.frame_e as f64),
+            "effect_layer" => LuaVal::Num(self.obj.effect_layer as f64),
+            "originframe" => LuaVal::Num(self.obj.originframe as f64),
+            "scene_id" => LuaVal::Num(self.obj.scene_id as f64),
             "w" | "getpixel_w" => LuaVal::Num(self.obj.w),
             "h" | "getpixel_h" => LuaVal::Num(self.obj.h),
             "screen_w" => LuaVal::Num(self.obj.screen_w),
@@ -1200,6 +1261,9 @@ impl<'a> Vm<'a> {
             "cy" => self.obj.cy = val.as_num(),
             "cz" => self.obj.cz = val.as_num(),
             "zoom" => self.obj.zoom = val.as_num(),
+            "sx" => self.obj.sx = val.as_num(),
+            "sy" => self.obj.sy = val.as_num(),
+            "sz" => self.obj.sz = val.as_num(),
             "alpha" => self.obj.alpha = val.as_num().clamp(0.0, 1.0),
             "aspect" => self.obj.aspect = val.as_num(),
             "track0" => self.obj.tracks[0] = val.as_num(),
@@ -1443,6 +1507,53 @@ impl<'a> Vm<'a> {
                     self.set_var(base, tbl);
                 }
             }
+            LValue::Index(Expr::Index(base_box, idx1_expr), idx2_expr) => {
+                if let Expr::Var(base) = base_box.as_ref() {
+                    let idx1_val = self.eval_expr(idx1_expr);
+                    let idx2_val = self.eval_expr(idx2_expr);
+                    let mut tbl = self.get_var(base);
+                    if let LuaVal::Table(ref mut map1, ref mut arr1) = tbl {
+                        let sub_tbl = if let LuaVal::Num(n1) = idx1_val {
+                            let i1 = n1 as isize;
+                            if i1 >= 1 {
+                                let u1 = (i1 - 1) as usize;
+                                if u1 >= arr1.len() && u1 < 4096 {
+                                    arr1.resize(u1 + 1, LuaVal::Nil);
+                                }
+                                arr1.get_mut(u1)
+                            } else {
+                                map1.get_mut(&idx1_val.as_str())
+                            }
+                        } else {
+                            map1.get_mut(&idx1_val.as_str())
+                        };
+                        if let Some(sub) = sub_tbl {
+                            if matches!(sub, LuaVal::Nil) {
+                                *sub = LuaVal::Table(HashMap::new(), Vec::new());
+                            }
+                            if let LuaVal::Table(ref mut map2, ref mut arr2) = sub {
+                                if let LuaVal::Num(n2) = idx2_val {
+                                    let i2 = n2 as isize;
+                                    if i2 >= 1 {
+                                        let u2 = (i2 - 1) as usize;
+                                        if u2 >= arr2.len() && u2 < 4096 {
+                                            arr2.resize(u2 + 1, LuaVal::Nil);
+                                        }
+                                        if u2 < arr2.len() {
+                                            arr2[u2] = val;
+                                        }
+                                    } else {
+                                        map2.insert(idx2_val.as_str(), val);
+                                    }
+                                } else {
+                                    map2.insert(idx2_val.as_str(), val);
+                                }
+                            }
+                        }
+                        self.set_var(base, tbl);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -1577,7 +1688,17 @@ impl<'a> Vm<'a> {
                     Expr::Field(base, func_name) => {
                         if let Expr::Var(ns) = base.as_ref() {
                             match ns.as_str() {
-                                "obj" => return self.call_obj_func(func_name, &eval_args),
+                                "obj" => {
+                                    let res = self.call_obj_func(func_name, &eval_args);
+                                    if func_name == "getaudio" {
+                                        if let Some(Expr::Var(buf_var)) = args.first() {
+                                            if let Some(LuaVal::Table(m, a)) = self.multi_return.get(1).cloned() {
+                                                self.set_var(buf_var, LuaVal::Table(m, a));
+                                            }
+                                        }
+                                    }
+                                    return res;
+                                }
                                 "math" => return self.call_math_func(func_name, &eval_args),
                                 "string" => return self.call_string_func(func_name, &eval_args),
                                 "table" => {
@@ -1649,30 +1770,91 @@ impl<'a> Vm<'a> {
             }
             "ipairs" | "pairs" => Some(args.first().cloned().unwrap_or(LuaVal::Nil)),
             "RGB" => {
-                let r = (a0() as u32).min(255);
-                let g = (a1() as u32).min(255);
-                let b = (a2() as u32).min(255);
-                Some(LuaVal::Num(((r << 16) | (g << 8) | b) as f64))
+                if args.len() == 1 {
+                    let col = a0() as u32;
+                    let r = ((col >> 16) & 0xFF) as f64;
+                    let g = ((col >> 8) & 0xFF) as f64;
+                    let b = (col & 0xFF) as f64;
+                    self.multi_return = vec![LuaVal::Num(g), LuaVal::Num(b)];
+                    Some(LuaVal::Num(r))
+                } else if args.len() >= 6 {
+                    let ratio = if self.obj.totaltime > 0.0 {
+                        (self.obj.time / self.obj.totaltime).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    let r1 = a0().clamp(0.0, 255.0);
+                    let g1 = a1().clamp(0.0, 255.0);
+                    let b1 = a2().clamp(0.0, 255.0);
+                    let r2 = args.get(3).map(|v| v.as_num()).unwrap_or(0.0).clamp(0.0, 255.0);
+                    let g2 = args.get(4).map(|v| v.as_num()).unwrap_or(0.0).clamp(0.0, 255.0);
+                    let b2 = args.get(5).map(|v| v.as_num()).unwrap_or(0.0).clamp(0.0, 255.0);
+                    let r = (r1 + (r2 - r1) * ratio).round() as u32;
+                    let g = (g1 + (g2 - g1) * ratio).round() as u32;
+                    let b = (b1 + (b2 - b1) * ratio).round() as u32;
+                    Some(LuaVal::Num(((r << 16) | (g << 8) | b) as f64))
+                } else {
+                    let r = (a0() as u32).min(255);
+                    let g = (a1() as u32).min(255);
+                    let b = (a2() as u32).min(255);
+                    Some(LuaVal::Num(((r << 16) | (g << 8) | b) as f64))
+                }
             }
             "HSV" => {
-                let h = a0().rem_euclid(360.0);
-                let s = (a1() / 100.0).clamp(0.0, 1.0);
-                let v = (a2() / 100.0).clamp(0.0, 1.0);
-                let c = v * s;
-                let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
-                let m = v - c;
-                let (r1, g1, b1) = match h as u32 {
-                    0..=59 => (c, x, 0.0),
-                    60..=119 => (x, c, 0.0),
-                    120..=179 => (0.0, c, x),
-                    180..=239 => (0.0, x, c),
-                    240..=299 => (x, 0.0, c),
-                    _ => (c, 0.0, x),
+                let hsv_to_rgb_u32 = |h_in: f64, s_in: f64, v_in: f64| -> u32 {
+                    let h = h_in.rem_euclid(360.0);
+                    let s = (s_in / 100.0).clamp(0.0, 1.0);
+                    let v = (v_in / 100.0).clamp(0.0, 1.0);
+                    let c = v * s;
+                    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+                    let m = v - c;
+                    let (r1, g1, b1) = match h as u32 {
+                        0..=59 => (c, x, 0.0),
+                        60..=119 => (x, c, 0.0),
+                        120..=179 => (0.0, c, x),
+                        180..=239 => (0.0, x, c),
+                        240..=299 => (x, 0.0, c),
+                        _ => (c, 0.0, x),
+                    };
+                    let r = (((r1 + m) * 255.0).round() as u32).min(255);
+                    let g = (((g1 + m) * 255.0).round() as u32).min(255);
+                    let b = (((b1 + m) * 255.0).round() as u32).min(255);
+                    (r << 16) | (g << 8) | b
                 };
-                let r = (((r1 + m) * 255.0).round() as u32).min(255);
-                let g = (((g1 + m) * 255.0).round() as u32).min(255);
-                let b = (((b1 + m) * 255.0).round() as u32).min(255);
-                Some(LuaVal::Num(((r << 16) | (g << 8) | b) as f64))
+                if args.len() == 1 {
+                    let col = a0() as u32;
+                    let r = ((col >> 16) & 0xFF) as f64 / 255.0;
+                    let g = ((col >> 8) & 0xFF) as f64 / 255.0;
+                    let b = (col & 0xFF) as f64 / 255.0;
+                    let max = r.max(g).max(b);
+                    let min = r.min(g).min(b);
+                    let d = max - min;
+                    let h = if d < 1e-6 {
+                        0.0
+                    } else if (max - r).abs() < 1e-6 {
+                        60.0 * (((g - b) / d).rem_euclid(6.0))
+                    } else if (max - g).abs() < 1e-6 {
+                        60.0 * (((b - r) / d) + 2.0)
+                    } else {
+                        60.0 * (((r - g) / d) + 4.0)
+                    };
+                    let s = if max < 1e-6 { 0.0 } else { (d / max) * 100.0 };
+                    let v = max * 100.0;
+                    self.multi_return = vec![LuaVal::Num(s.round()), LuaVal::Num(v.round())];
+                    Some(LuaVal::Num(h.round()))
+                } else if args.len() >= 6 {
+                    let ratio = if self.obj.totaltime > 0.0 {
+                        (self.obj.time / self.obj.totaltime).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    let h = a0() + (args.get(3).map(|v| v.as_num()).unwrap_or(0.0) - a0()) * ratio;
+                    let s = a1() + (args.get(4).map(|v| v.as_num()).unwrap_or(0.0) - a1()) * ratio;
+                    let v = a2() + (args.get(5).map(|v| v.as_num()).unwrap_or(0.0) - a2()) * ratio;
+                    Some(LuaVal::Num(hsv_to_rgb_u32(h, s, v) as f64))
+                } else {
+                    Some(LuaVal::Num(hsv_to_rgb_u32(a0(), a1(), a2()) as f64))
+                }
             }
             "AND" => Some(LuaVal::Num(((a0() as i64) & (a1() as i64)) as f64)),
             "OR" => Some(LuaVal::Num(((a0() as i64) | (a1() as i64)) as f64)),
@@ -1684,6 +1866,9 @@ impl<'a> Vm<'a> {
                 Some(LuaVal::Num(res as f64))
             }
             "rand" => Some(self.call_obj_func("rand", args)),
+            "rand1" => Some(self.call_obj_func("rand1", args)),
+            "mes" => Some(self.call_obj_func("mes", args)),
+            "load" => Some(self.call_obj_func("load", args)),
             "print" | "debug_print" => Some(LuaVal::Nil),
             _ => None,
         }
@@ -1874,6 +2059,20 @@ impl<'a> Vm<'a> {
                 let span = (hi - lo + 1.0).max(1.0) as u64;
                 LuaVal::Num(lo + (h % span) as f64)
             }
+            "rand1" => {
+                // AviUtl2 新規追加関数: 0.0 以上 1.0 以下の浮動小数点乱数を返す `obj.rand1([seed, frame])`
+                let seed = args.first().map(|v| v.as_num() as i64).unwrap_or(0);
+                let frm = args.get(1).map(|v| v.as_num() as i64).unwrap_or(self.obj.frame);
+                let mut h = (frm as u64)
+                    .wrapping_mul(0x9E3779B97F4A7C15)
+                    .wrapping_add((seed as u64).wrapping_mul(0xBF58476D1CE4E5B9))
+                    .wrapping_add((self.obj.index as u64).wrapping_mul(0x94D049BB133111EB));
+                h = (h ^ (h >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+                h = (h ^ (h >> 27)).wrapping_mul(0x94D049BB133111EB);
+                h ^= h >> 31;
+                let ratio = ((h & 0x1F_FFFF_FFFF_FFFF) as f64) / ((0x1F_FFFF_FFFF_FFFFu64) as f64);
+                LuaVal::Num(ratio.clamp(0.0, 1.0))
+            }
             "getvalue" => {
                 let key = args.first().map(|v| v.as_str()).unwrap_or_default();
                 match key.as_str() {
@@ -1883,11 +2082,41 @@ impl<'a> Vm<'a> {
                     "rx" => LuaVal::Num(self.obj.rx),
                     "ry" => LuaVal::Num(self.obj.ry),
                     "rz" => LuaVal::Num(self.obj.rz),
+                    "cx" => LuaVal::Num(self.obj.cx),
+                    "cy" => LuaVal::Num(self.obj.cy),
+                    "cz" => LuaVal::Num(self.obj.cz),
+                    "sx" => LuaVal::Num(self.obj.sx),
+                    "sy" => LuaVal::Num(self.obj.sy),
+                    "sz" => LuaVal::Num(self.obj.sz),
                     "zoom" => LuaVal::Num(self.obj.zoom * 100.0),
                     "alpha" => LuaVal::Num(self.obj.alpha),
                     "aspect" => LuaVal::Num(self.obj.aspect),
                     "time" => LuaVal::Num(self.obj.time),
                     "totaltime" => LuaVal::Num(self.obj.totaltime),
+                    "frame_s" => LuaVal::Num(self.obj.frame_s as f64),
+                    "frame_e" => LuaVal::Num(self.obj.frame_e as f64),
+                    "pos" => {
+                        self.multi_return = vec![
+                            LuaVal::Num(self.obj.y + self.obj.oy),
+                            LuaVal::Num(self.obj.z + self.obj.oz),
+                        ];
+                        LuaVal::Num(self.obj.x + self.obj.ox)
+                    }
+                    "angle" => {
+                        self.multi_return = vec![LuaVal::Num(self.obj.ry), LuaVal::Num(self.obj.rz)];
+                        LuaVal::Num(self.obj.rx)
+                    }
+                    "center" => {
+                        self.multi_return = vec![LuaVal::Num(self.obj.cy), LuaVal::Num(self.obj.cz)];
+                        LuaVal::Num(self.obj.cx)
+                    }
+                    "scale" => {
+                        self.multi_return = vec![
+                            LuaVal::Num(self.obj.zoom * self.obj.sy),
+                            LuaVal::Num(self.obj.zoom * self.obj.sz),
+                        ];
+                        LuaVal::Num(self.obj.zoom * self.obj.sx)
+                    }
                     "scenechange" => {
                         let ratio = if self.obj.totaltime > 0.0 {
                             (self.obj.time / self.obj.totaltime).clamp(0.0, 1.0)
@@ -1897,10 +2126,18 @@ impl<'a> Vm<'a> {
                         LuaVal::Num(ratio)
                     }
                     other => {
+                        if let Some(var_name) = other.strip_prefix("track.") {
+                            if let Some(v) = self.obj.named_vars.get(var_name) {
+                                return LuaVal::Num(v.as_num());
+                            }
+                        }
                         if let Some(idx_str) = other.strip_prefix("track") {
                             if let Ok(idx) = idx_str.parse::<usize>() {
                                 return LuaVal::Num(*self.obj.tracks.get(idx).unwrap_or(&0.0));
                             }
+                        }
+                        if let Some(v) = self.obj.named_vars.get(other) {
+                            return LuaVal::Num(v.as_num());
                         }
                         LuaVal::Num(0.0)
                     }
@@ -1913,13 +2150,113 @@ impl<'a> Vm<'a> {
                 if let Some(sz) = args.get(1) {
                     self.obj.font_size = sz.as_num().max(1.0);
                 }
+                if let Some(ft) = args.get(2) {
+                    self.obj.font_type = ft.as_num() as i64;
+                }
                 if let Some(c1) = args.get(3) {
                     self.obj.font_color = c1.as_num() as u32;
                 }
                 if let Some(c2) = args.get(4) {
                     self.obj.font_color2 = c2.as_num() as u32;
                 }
+                if let Some(bold) = args.get(5) {
+                    self.obj.font_bold = bold.truthy();
+                }
+                if let Some(italic) = args.get(6) {
+                    self.obj.font_italic = italic.truthy();
+                }
+                if let Some(cs) = args.get(7) {
+                    self.obj.font_charspacing = cs.as_num();
+                }
+                if let Some(ls) = args.get(8) {
+                    self.obj.font_linespacing = ls.as_num();
+                }
                 LuaVal::Nil
+            }
+            "getfont" => {
+                self.multi_return = vec![
+                    LuaVal::Num(self.obj.font_size),
+                    LuaVal::Num(self.obj.font_type as f64),
+                    LuaVal::Num(self.obj.font_color as f64),
+                    LuaVal::Num(self.obj.font_color2 as f64),
+                    LuaVal::Bool(self.obj.font_bold),
+                    LuaVal::Bool(self.obj.font_italic),
+                    LuaVal::Num(self.obj.font_charspacing),
+                    LuaVal::Num(self.obj.font_linespacing),
+                ];
+                LuaVal::Str(self.obj.font_name.clone())
+            }
+            "multiobject" => {
+                // AviUtl2 新規追加関数: `obj.multiobject(num, func)`
+                let count = args.first().map(|v| v.as_num() as i64).unwrap_or(1).clamp(1, 256);
+                let func_val = args.get(1).cloned().unwrap_or(LuaVal::Nil);
+                if let LuaVal::Func(params, body) = func_val {
+                    let saved_ox = self.obj.ox;
+                    let saved_oy = self.obj.oy;
+                    let saved_oz = self.obj.oz;
+                    let saved_rx = self.obj.rx;
+                    let saved_ry = self.obj.ry;
+                    let saved_rz = self.obj.rz;
+                    let saved_zoom = self.obj.zoom;
+                    let saved_sx = self.obj.sx;
+                    let saved_sy = self.obj.sy;
+                    let saved_sz = self.obj.sz;
+                    let saved_alpha = self.obj.alpha;
+                    let saved_idx = self.obj.index;
+                    let saved_num = self.obj.num;
+
+                    self.obj.num = count;
+                    for i in 0..count {
+                        self.obj.index = i;
+                        self.obj.ox = saved_ox;
+                        self.obj.oy = saved_oy;
+                        self.obj.oz = saved_oz;
+                        self.obj.rx = saved_rx;
+                        self.obj.ry = saved_ry;
+                        self.obj.rz = saved_rz;
+                        self.obj.zoom = saved_zoom;
+                        self.obj.sx = saved_sx;
+                        self.obj.sy = saved_sy;
+                        self.obj.sz = saved_sz;
+                        self.obj.alpha = saved_alpha;
+
+                        let _ = self.invoke_user_func(LuaVal::Func(params.clone(), body.clone()), Vec::new());
+
+                        if self.obj.draw_calls.len() < 512 {
+                            let scale = self.obj.zoom * ((self.obj.sx + self.obj.sy) * 0.5).max(0.0);
+                            self.obj.draw_calls.push(LuaDrawCall {
+                                ox: self.obj.ox,
+                                oy: self.obj.oy,
+                                oz: self.obj.oz,
+                                zoom: scale,
+                                alpha: self.obj.alpha.clamp(0.0, 1.0),
+                                rx: self.obj.rx,
+                                ry: self.obj.ry,
+                                rz: self.obj.rz,
+                                color: None,
+                                primitive: self.obj.loaded_primitive.clone(),
+                                clip: self.obj.current_clip,
+                            });
+                        }
+                    }
+
+                    self.obj.ox = saved_ox;
+                    self.obj.oy = saved_oy;
+                    self.obj.oz = saved_oz;
+                    self.obj.rx = saved_rx;
+                    self.obj.ry = saved_ry;
+                    self.obj.rz = saved_rz;
+                    self.obj.zoom = saved_zoom;
+                    self.obj.sx = saved_sx;
+                    self.obj.sy = saved_sy;
+                    self.obj.sz = saved_sz;
+                    self.obj.alpha = saved_alpha;
+                    self.obj.index = saved_idx;
+                    self.obj.num = saved_num;
+                    LuaVal::Bool(true)
+                } else {
+                    LuaVal::Bool(false)
+                }
             }
             "mes" => {
                 let text = args.first().map(|v| v.as_str()).unwrap_or_default();
@@ -1949,8 +2286,12 @@ impl<'a> Vm<'a> {
                             line_width,
                         });
                     }
-                    "text" => {
+                    "text" | "text.layout" | "textlayout" => {
                         let text = args.get(1).map(|v| v.as_str()).unwrap_or_default();
+                        let line_cnt = text.lines().count().max(1) as f64;
+                        let max_chars = text.lines().map(|l| l.chars().count()).max().unwrap_or(1) as f64;
+                        self.obj.w = (max_chars * self.obj.font_size).max(self.obj.font_size);
+                        self.obj.h = (line_cnt * self.obj.font_size * 1.15).max(self.obj.font_size);
                         self.obj.loaded_primitive = Some(LuaLoadedPrimitive::Text {
                             text,
                             font: self.obj.font_name.clone(),
@@ -1959,9 +2300,17 @@ impl<'a> Vm<'a> {
                             color2: self.obj.font_color2,
                         });
                     }
-                    "image" | "movie" => {
+                    "image" | "movie" | "movie.frame" | "movie.info" => {
                         let path = args.get(1).map(|v| v.as_str()).unwrap_or_default();
                         self.obj.loaded_primitive = Some(LuaLoadedPrimitive::Image { path });
+                        if kind == "movie.info" {
+                            self.multi_return = vec![
+                                LuaVal::Num(300.0),
+                                LuaVal::Num(self.obj.w),
+                                LuaVal::Num(self.obj.h),
+                            ];
+                            return LuaVal::Num(10.0);
+                        }
                     }
                     _ => {}
                 }
@@ -2135,6 +2484,31 @@ impl<'a> Vm<'a> {
                     "section_num" => LuaVal::Num(1.0),
                     "track_mode" => LuaVal::Num(0.0),
                     "camera_mode" => LuaVal::Num(1.0),
+                    "camera_focus" => {
+                        self.multi_return = vec![LuaVal::Num(10000.0), LuaVal::Num(0.0)];
+                        LuaVal::Num(self.obj.cam_d)
+                    }
+                    "script_name" => LuaVal::Str("Script".into()),
+                    "group_info" => {
+                        let mut map = HashMap::new();
+                        map.insert("x".into(), LuaVal::Num(0.0));
+                        map.insert("y".into(), LuaVal::Num(0.0));
+                        map.insert("z".into(), LuaVal::Num(0.0));
+                        map.insert("rx".into(), LuaVal::Num(0.0));
+                        map.insert("ry".into(), LuaVal::Num(0.0));
+                        map.insert("rz".into(), LuaVal::Num(0.0));
+                        map.insert("sx".into(), LuaVal::Num(1.0));
+                        map.insert("sy".into(), LuaVal::Num(1.0));
+                        map.insert("sz".into(), LuaVal::Num(1.0));
+                        LuaVal::Table(map, Vec::new())
+                    }
+                    "blend" => LuaVal::Num(self.obj.blend_mode as f64),
+                    "culling" => LuaVal::Num(if self.obj.culling { 1.0 } else { 0.0 }),
+                    "billboard" => LuaVal::Num(self.obj.billboard as f64),
+                    "drawtarget" => LuaVal::Str("framebuffer".into()),
+                    "draw_state" => LuaVal::Bool(!self.obj.draw_calls.is_empty()),
+                    "enable_group" | "enable_camera" => LuaVal::Bool(true),
+                    "clipping_object" | "clipping_upper_object" => LuaVal::Bool(false),
                     "multi_object" => LuaVal::Bool(self.obj.num > 1),
                     "gui" => LuaVal::Bool(true),
                     _ => LuaVal::Num(0.0),
@@ -2210,8 +2584,150 @@ impl<'a> Vm<'a> {
                 }
                 LuaVal::Nil
             }
-            "setanchor" => LuaVal::Num(1.0),
-            "copybuffer" => LuaVal::Bool(true),
+            "setanchor" => {
+                let var_name = args.first().map(|v| v.as_str()).unwrap_or_default();
+                let num = args.get(1).map(|v| v.as_num() as usize).unwrap_or(1).clamp(1, 16);
+                let is_xyz = args.iter().skip(2).any(|v| v.as_str().to_ascii_lowercase().contains("xyz"));
+                let stride = if is_xyz { 3 } else { 2 };
+                if !var_name.is_empty() {
+                    let hw = (self.obj.w * 0.5).max(50.0);
+                    let hh = (self.obj.h * 0.5).max(50.0);
+                    let default_corners = [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)];
+                    let mut tbl = self.get_var(&var_name);
+                    if matches!(tbl, LuaVal::Nil) {
+                        tbl = LuaVal::Table(HashMap::new(), Vec::new());
+                    }
+                    if let LuaVal::Table(map, mut arr) = tbl {
+                        let needed = num * stride;
+                        for i in 0..num {
+                            let (dx, dy) = default_corners[i % 4];
+                            let base = i * stride;
+                            if base >= arr.len() {
+                                arr.push(LuaVal::Num(dx));
+                            }
+                            if base + 1 >= arr.len() {
+                                arr.push(LuaVal::Num(dy));
+                            }
+                            if is_xyz && base + 2 >= arr.len() {
+                                arr.push(LuaVal::Num(0.0));
+                            }
+                        }
+                        if arr.len() < needed {
+                            arr.resize(needed, LuaVal::Num(0.0));
+                        }
+                        self.set_var(&var_name, LuaVal::Table(map, arr));
+                    }
+                }
+                LuaVal::Num(num as f64)
+            }
+            "putpixel" | "copypixel" | "pixeloption" => LuaVal::Nil,
+            "copybuffer" | "clearbuffer" | "putpixeldata" | "pixelshader" | "computeshader" => LuaVal::Bool(true),
+            "getpixeldata" => {
+                self.multi_return = vec![LuaVal::Num(self.obj.w), LuaVal::Num(self.obj.h)];
+                LuaVal::Table(HashMap::new(), Vec::new())
+            }
+            "data" | "module" => LuaVal::Table(HashMap::new(), Vec::new()),
+            "getaudio" => {
+                let n = args.get(3).or_else(|| args.get(2)).map(|v| v.as_num() as usize).unwrap_or(64).clamp(1, 512);
+                let arr: Vec<LuaVal> = (0..n)
+                    .map(|i| {
+                        let v = ((self.obj.time * 8.0 + i as f64 * 0.4).sin().abs() * 500.0).round();
+                        LuaVal::Num(v)
+                    })
+                    .collect();
+                self.multi_return = vec![LuaVal::Num(44100.0), LuaVal::Table(HashMap::new(), arr)];
+                LuaVal::Num(n as f64)
+            }
+            "getinfo" => {
+                let key = args.first().map(|v| v.as_str()).unwrap_or_default();
+                match key.as_str() {
+                    "version" => {
+                        self.multi_return = vec![LuaVal::Str("2.1.16".into())];
+                        LuaVal::Num(2011600.0)
+                    }
+                    "script_path" => LuaVal::Str(String::new()),
+                    "filter" | "saving" => LuaVal::Bool(false),
+                    "origin_scene_id" => LuaVal::Num(self.obj.scene_id as f64),
+                    "reference_frame" => LuaVal::Num(self.obj.frame as f64),
+                    "rendering_id" => LuaVal::Num(1.0),
+                    "image_max" => {
+                        self.multi_return = vec![LuaVal::Num(4096.0)];
+                        LuaVal::Num(4096.0)
+                    }
+                    "frame_max" => LuaVal::Num(self.obj.totalframe.max(1000) as f64),
+                    "layer_max" => LuaVal::Num(100.0),
+                    "bpm" => {
+                        self.multi_return = vec![
+                            LuaVal::Num(4.0),
+                            LuaVal::Num(4.0),
+                            LuaVal::Num(0.0),
+                            LuaVal::Num(1.0),
+                            LuaVal::Num(1.0),
+                            LuaVal::Num(0.0),
+                        ];
+                        LuaVal::Num(120.0)
+                    }
+                    "bpm_list" => LuaVal::Table(HashMap::new(), Vec::new()),
+                    "clock" | "script_time" => LuaVal::Num(self.obj.time),
+                    _ => LuaVal::Num(0.0),
+                }
+            }
+            "getpoint" => {
+                let first = args.first().cloned().unwrap_or(LuaVal::Nil);
+                match first {
+                    LuaVal::Str(cmd) => match cmd.as_str() {
+                        "num" => LuaVal::Num(self.obj.point_values.len().max(2) as f64),
+                        "index" => {
+                            let idx = self.obj.point_index;
+                            let frac = if self.obj.point_totaltime > 0.0 {
+                                (self.obj.point_time / self.obj.point_totaltime).clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
+                            self.multi_return = vec![LuaVal::Num(frac)];
+                            LuaVal::Num((idx as f64) + frac)
+                        }
+                        "time" => LuaVal::Num(self.obj.point_time),
+                        "totaltime" => LuaVal::Num(self.obj.point_totaltime),
+                        "framerate" => LuaVal::Num(self.obj.framerate),
+                        "accelerate" => LuaVal::Bool(self.obj.point_accelerate),
+                        "decelerate" => LuaVal::Bool(self.obj.point_decelerate),
+                        "param" => LuaVal::Num(self.obj.point_param),
+                        "link" => {
+                            let dim = args.get(1).map(|v| v.as_num() as usize).unwrap_or(0);
+                            LuaVal::Num(dim as f64)
+                        }
+                        "default" => {
+                            let p0 = self.obj.point_values.get(self.obj.point_index).copied().unwrap_or(0.0);
+                            let p1 = self
+                                .obj
+                                .point_values
+                                .get(self.obj.point_index + 1)
+                                .copied()
+                                .unwrap_or(p0);
+                            let ratio = if self.obj.point_totaltime > 0.0 {
+                                (self.obj.point_time / self.obj.point_totaltime).clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
+                            LuaVal::Num(p0 + (p1 - p0) * ratio)
+                        }
+                        _ => LuaVal::Num(0.0),
+                    },
+                    LuaVal::Num(idx_f) => {
+                        let base_idx = idx_f.floor().max(0.0) as usize;
+                        let val = self
+                            .obj
+                            .point_values
+                            .get(base_idx)
+                            .copied()
+                            .or_else(|| self.obj.point_values.last().copied())
+                            .unwrap_or(0.0);
+                        LuaVal::Num(val)
+                    }
+                    _ => LuaVal::Num(0.0),
+                }
+            }
             _ => LuaVal::Nil,
         }
     }

@@ -13,7 +13,10 @@ use std::path::{Path, PathBuf};
 
 use au2_core::{Effect, Frame, TimelineObject, Track};
 pub use lua_vm::{execute_lua_script, LuaDrawCall, LuaFilterCall, LuaLoadedPrimitive, LuaObjState, LuaPolyCall, LuaVal};
-pub use pe_loader::{build_sample_32bit_auf_bytes, build_sample_64bit_auf_bytes, inspect_native_pe_plugin, NativePluginInfo};
+pub use pe_loader::{
+    build_sample_32bit_auf_bytes, build_sample_64bit_auf_bytes, build_sample_aviutl2_auf2_bytes,
+    inspect_native_pe_plugin, NativePluginInfo,
+};
 
 /// プラグインまたはスクリプトの分類（初代 AviUtl および AviUtl2 両対応）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +39,10 @@ pub enum PluginKind {
     OutputDll,
     /// `.auc` / `.auc2` 色変換プラグイン DLL (32bit / 64bit)
     ColorDll,
+    /// `.mod2` スクリプトモジュール DLL (AviUtl2 64bit)
+    Mod2Dll,
+    /// `.aux2` 汎用プラグイン DLL (AviUtl2 64bit)
+    Aux2Dll,
 }
 
 impl PluginKind {
@@ -50,6 +57,8 @@ impl PluginKind {
             "aui" | "aui2" => Some(Self::InputDll),
             "auo" | "auo2" => Some(Self::OutputDll),
             "auc" | "auc2" => Some(Self::ColorDll),
+            "mod2" => Some(Self::Mod2Dll),
+            "aux2" => Some(Self::Aux2Dll),
             _ => None,
         }
     }
@@ -65,6 +74,8 @@ impl PluginKind {
             Self::InputDll => "入力プラグイン (.aui/.aui2)",
             Self::OutputDll => "出力プラグイン (.auo/.auo2)",
             Self::ColorDll => "色変換プラグイン (.auc/.auc2)",
+            Self::Mod2Dll => "スクリプトモジュール (.mod2)",
+            Self::Aux2Dll => "汎用プラグイン (.aux2)",
         }
     }
 
@@ -315,7 +326,15 @@ pub fn parse_script_entries(stem: &str, text: &str) -> Vec<ScriptEntry> {
         let line = raw_line.trim();
         if let Some(sec) = line.strip_prefix('@') {
             if let Some(prev) = current.take() {
-                entries.push(prev);
+                let is_empty_preamble = entries.is_empty()
+                    && prev.tracks.is_empty()
+                    && prev.checks.is_empty()
+                    && prev.check_name.is_none()
+                    && prev.dialogs.is_empty()
+                    && prev.script_body.trim().is_empty();
+                if !is_empty_preamble {
+                    entries.push(prev);
+                }
             }
             let sec_name = sec.trim().to_string();
             let display_name = if sec_name.is_empty() {
@@ -329,10 +348,20 @@ pub fn parse_script_entries(stem: &str, text: &str) -> Vec<ScriptEntry> {
 
         let entry = current.get_or_insert_with(|| new_empty_entry(stem.to_string(), stem.to_string()));
 
-        if let Some(rest) = line.strip_prefix("--track") {
+        if let Some(rest) = line.strip_prefix("--trackgroup@") {
+            // `--trackgroup@v1,v2,v3:label` はグループ指定メタデータのためスキップ
+            let _ = rest;
+        } else if let Some(rest) = line.strip_prefix("--track") {
             let next_idx = entry.tracks.len() as u8;
             if let Some(def) = parse_track_directive(rest, next_idx) {
                 entry.tracks.push(def);
+            }
+        } else if let Some(rest) = line.strip_prefix("--checksection") {
+            if let Some(chk) = parse_check_directive(rest) {
+                if entry.check_name.is_none() {
+                    entry.check_name = Some((chk.name.clone(), chk.default));
+                }
+                entry.checks.push(chk);
             }
         } else if let Some(rest) = line.strip_prefix("--check") {
             if let Some(chk) = parse_check_directive(rest) {
@@ -344,12 +373,16 @@ pub fn parse_script_entries(stem: &str, text: &str) -> Vec<ScriptEntry> {
         } else if let Some(rest) = line.strip_prefix("--dialog:") {
             entry.has_dialog = true;
             parse_dialog_directive(rest, &mut entry.dialogs);
-        } else if let Some(rest) = line.strip_prefix("--value@").or_else(|| line.strip_prefix("--color@")).or_else(|| line.strip_prefix("--file@")) {
+        } else if let Some(rest) = line.strip_prefix("--select@") {
+            // `--select@var:label=def,opt1=v1,opt2=v2,...` または `--select@var:label,opt1=v1,...`
             entry.has_dialog = true;
             if let Some((var_name, body)) = rest.split_once(':') {
-                let mut parts = body.splitn(2, ',');
-                let label = parts.next().unwrap_or(var_name).trim().to_string();
-                let def = parts.next().unwrap_or("0").trim().trim_matches('"').to_string();
+                let first_part = body.split(',').next().unwrap_or(body).trim();
+                let (label, def) = if let Some((l, d)) = first_part.split_once('=') {
+                    (l.trim().to_string(), d.trim().trim_matches('"').to_string())
+                } else {
+                    (first_part.to_string(), "0".to_string())
+                };
                 let is_num = def.parse::<f64>().is_ok();
                 entry.dialogs.push(ScriptDialogParam {
                     label,
@@ -358,10 +391,62 @@ pub fn parse_script_entries(stem: &str, text: &str) -> Vec<ScriptEntry> {
                     is_number: is_num,
                 });
             }
+        } else if let Some(rest) = line
+            .strip_prefix("--value@")
+            .or_else(|| line.strip_prefix("--color@"))
+            .or_else(|| line.strip_prefix("--file@"))
+            .or_else(|| line.strip_prefix("--font@"))
+            .or_else(|| line.strip_prefix("--figure@"))
+            .or_else(|| line.strip_prefix("--folder@"))
+            .or_else(|| line.strip_prefix("--text@"))
+            .or_else(|| line.strip_prefix("--string@"))
+        {
+            entry.has_dialog = true;
+            if let Some((var_name, body)) = rest.split_once(':') {
+                let mut parts = body.splitn(2, ',');
+                let label = parts.next().unwrap_or(var_name).trim().to_string();
+                let def = parts.next().unwrap_or("0").trim().trim_matches('"').to_string();
+                let is_num = def.parse::<f64>().is_ok()
+                    || def.strip_prefix("0x").or_else(|| def.strip_prefix("0X")).and_then(|h| u64::from_str_radix(h, 16).ok()).is_some();
+                entry.dialogs.push(ScriptDialogParam {
+                    label,
+                    var_name: var_name.trim().to_string(),
+                    default_value: def,
+                    is_number: is_num,
+                });
+            }
         } else if let Some(rest) = line.strip_prefix("--param:") {
-            // `--param:n=5;size=100` 等を初期スクリプト行として先頭に追加
-            entry.script_body.push_str(rest.trim());
-            entry.script_body.push('\n');
+            let trimmed = rest.trim();
+            if trimmed.contains('=') && !trimmed.contains(',') {
+                // 初代 `--param:n=5;size=100` 等を初期スクリプト行として先頭に追加
+                entry.script_body.push_str(trimmed);
+                entry.script_body.push('\n');
+            } else if let Some((label_part, def_part)) = trimmed.split_once(',') {
+                // AviUtl2 `.tra2` の `--param:項目名,初期値` または `--param:項目名/check,初期値`
+                let label = label_part.split('/').next().unwrap_or(label_part).trim().to_string();
+                let def = def_part.trim().to_string();
+                entry.dialogs.push(ScriptDialogParam {
+                    label,
+                    var_name: "param".to_string(),
+                    default_value: def.clone(),
+                    is_number: def.parse::<f64>().is_ok(),
+                });
+            }
+        } else if line.starts_with("--data@")
+            || line.starts_with("--hide@")
+            || line.starts_with("--group:")
+            || line.starts_with("--separator:")
+            || line.starts_with("--label:")
+            || line.starts_with("--information:")
+            || line.starts_with("--require:")
+            || line.starts_with("--script:")
+            || line.starts_with("--speed:")
+            || line == "--filter"
+            || line == "--hidemenu"
+            || line == "--twopoint"
+            || line == "--timecontrol"
+        {
+            // AviUtl2 メタデータディレクティブ行
         } else {
             entry.script_body.push_str(raw_line);
             entry.script_body.push('\n');
@@ -584,12 +669,13 @@ impl PluginRegistry {
             }
         }
 
-        // 初代 AviUtl 拡張編集標準互換スクリプト群をメモリ内ビルトインとして常時登録
+        // 初代 AviUtl / AviUtl2 拡張編集標準互換スクリプト群をメモリ内ビルトインとして常時登録
         let builtins = [
             ("exedit.anm", PluginKind::AnmScript, BUILTIN_EXEDIT_ANM),
             ("exedit.obj", PluginKind::ObjScript, BUILTIN_EXEDIT_OBJ),
             ("exedit.cam", PluginKind::CamScript, BUILTIN_EXEDIT_CAM),
             ("exedit.scn", PluginKind::ScnScript, BUILTIN_EXEDIT_SCN),
+            ("exedit.tra", PluginKind::TraScript, BUILTIN_EXEDIT_TRA),
         ];
         for (fname, kind, src) in builtins {
             let stem = fname.split('.').next().unwrap_or(fname);
@@ -604,6 +690,35 @@ impl PluginRegistry {
                 exports: entries.iter().map(|e| e.display_name.clone()).collect(),
                 entries,
             });
+        }
+
+        // システム上に AviUtl2 / 初代 AviUtl の Script / Plugin フォルダが存在すれば追加スキャンして登録
+        let mut extra_dirs: Vec<PathBuf> = Vec::new();
+        if cfg!(windows) {
+            extra_dirs.push(PathBuf::from(r"C:\ProgramData\aviutl2\Script"));
+            extra_dirs.push(PathBuf::from(r"C:\ProgramData\aviutl2\Plugin"));
+        }
+        if let Some(desktop) = au2_platform::desktop_dir() {
+            let desktop_au2 = desktop.join("aviutl2_v2.1.16").join("data");
+            extra_dirs.push(desktop_au2.join("Script"));
+            extra_dirs.push(desktop_au2.join("Plugin"));
+            let desktop_au1 = desktop.join("aviutl110");
+            extra_dirs.push(desktop_au1.join("plugins"));
+            extra_dirs.push(desktop_au1);
+        }
+        for dir in extra_dirs {
+            if let Ok(rd) = fs::read_dir(&dir) {
+                let mut extra_paths: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.is_file()).collect();
+                extra_paths.sort();
+                for p in extra_paths {
+                    let fname = p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+                    if !self.plugins.iter().any(|existing| existing.file_name == fname) {
+                        if let Some(desc) = inspect_plugin_file(&p) {
+                            self.plugins.push(desc);
+                        }
+                    }
+                }
+            }
         }
 
         // 高速検索インデックスを構築
@@ -671,6 +786,9 @@ impl PluginRegistry {
                 state.tracks[i] = eff.eval(&key, rel, state.tracks[i]);
             }
         }
+        state.sx = 1.0;
+        state.sy = 1.0;
+        state.sz = 1.0;
 
         // トラックバー値を `state.tracks[0..4]` および AviUtl2 名前付き変数にバインド
         // .exo / .aup では `track0`..`track3` キーで格納される場合と、トラック名（例: `時間`, `振幅`）で格納される場合の両方に対応
@@ -764,6 +882,20 @@ impl PluginRegistry {
             lua_vm::execute_compiled_script(&entry.compiled_ast, state);
         } else {
             execute_lua_script(&entry.script_body, state);
+        }
+        // AviUtl2 の個別軸拡大率 `obj.sx` / `obj.sy` が変更された場合は `zoom` / `aspect` に合成
+        if (state.sx - 1.0).abs() > 1e-4 || (state.sy - 1.0).abs() > 1e-4 {
+            let sx = state.sx.max(0.0);
+            let sy = state.sy.max(0.0);
+            let max_s = sx.max(sy);
+            state.zoom *= max_s;
+            if max_s > 1e-4 && (sx - sy).abs() > 1e-4 {
+                if sx < sy {
+                    state.aspect = ((1.0 - sx / sy) * 100.0).clamp(-100.0, 100.0);
+                } else {
+                    state.aspect = (-(1.0 - sy / sx) * 100.0).clamp(-100.0, 100.0);
+                }
+            }
         }
         true
     }
@@ -1957,6 +2089,24 @@ obj.oy = obj.oy + math.cos(t * 1.7) * obj.track1 * 0.6 + math.sin(t * 4.3) * obj
 obj.rz = obj.rz + math.sin(t * 2.9) * obj.track2
 "#;
 
+const BUILTIN_EXEDIT_TRA: &str = r#"@補間移動
+--twopoint
+local index,ratio = math.modf(obj.getpoint("index"))
+local x0 = obj.getpoint(index-1)
+local x1 = obj.getpoint(index)
+local x2 = obj.getpoint(index+1)
+local x3 = obj.getpoint(index+2)
+return obj.interpolation(ratio,x0,x1,x2,x3)
+
+@回転
+--param:100
+local index,ratio = math.modf(obj.getpoint("index"))
+local st = obj.getpoint(index);
+local ed = obj.getpoint(index+1);
+local r = obj.getpoint("param")
+return st + (ed-st)*r/100*ratio
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2072,5 +2222,103 @@ obj.draw(50, 50, 0)
         assert_eq!(obj_st.draw_calls.len(), 1);
         assert_eq!(obj_st.draw_calls[0].ox, 50.0);
         assert_eq!(obj_st.draw_calls[0].oy, 50.0);
+    }
+
+    #[test]
+    fn test_aviutl2_official_scripts_and_lua_extensions() {
+        // 1. AviUtl2 新規 Lua API (obj.rand1, obj.multiobject, obj.getfont, obj.sx/sy, obj.getinfo, obj.getpoint) の検証
+        let au2_script = r#"
+@AviUtl2テスト
+--track@scale_x:X倍率,0,500,150,0.1
+--select@mode:モード=1,通常=0,拡張=1,特殊=2
+--color@col:基本色,0x00ffcc
+local ver, ver_str = obj.getinfo("version")
+local r = obj.rand1(1, 0)
+obj.sx = scale_x / 100
+obj.setfont("メイリオ", 42, 1, col, 0x000000, true, false, 2, 4)
+local fname, fsize = obj.getfont()
+obj.multiobject(4, function()
+    obj.ox = obj.index * 20 + mode
+    obj.oy = fsize + math.floor(r * 0)
+end)
+"#;
+        let entries = parse_script_entries("au2_test", au2_script);
+        assert_eq!(entries.len(), 1);
+        let eff = entries[0].to_effect(PluginKind::AnmScript);
+        let mut reg = PluginRegistry::default();
+        reg.plugins.push(PluginDescriptor {
+            file_name: "au2_test.anm2".into(),
+            path: PathBuf::from("au2_test.anm2"),
+            kind: PluginKind::AnmScript,
+            arch: BinaryArch::Script,
+            status: SupportStatus::Supported,
+            description: "AviUtl2 Script".into(),
+            exports: Vec::new(),
+            entries,
+        });
+        let mut st = LuaObjState::default();
+        assert!(reg.execute_effect(&eff, 0, &mut st));
+        assert_eq!(st.draw_calls.len(), 4);
+        assert!((st.draw_calls[1].ox - 21.0).abs() < 1e-5);
+        assert!((st.draw_calls[1].oy - 42.0).abs() < 1e-5);
+        assert!(st.zoom > 1.4, "obj.sx should scale zoom: {}", st.zoom);
+
+        // 2. 実機の aviutl2_v2.1.16\data\Script が存在する場合は全スクリプト (.anm2, .obj2, .cam2, .scn2, .tra2) をパース＆実行検証
+        let script_dir = au2_platform::desktop_dir()
+            .map(|d| d.join("aviutl2_v2.1.16").join("data").join("Script"))
+            .unwrap_or_default();
+        if script_dir.exists() {
+            for fname in ["script.anm2", "script.obj2", "script.cam2", "script.scn2", "script.tra2"] {
+                let p = script_dir.join(fname);
+                if p.exists() {
+                    let desc = inspect_plugin_file(&p).expect("inspect official AviUtl2 script");
+                    assert!(!desc.entries.is_empty(), "{fname} should have script entries");
+                    for entry in &desc.entries {
+                        let mut test_st = LuaObjState::default();
+                        let eff = entry.to_effect(desc.kind);
+                        // パニックせず安全に全エントリを実行できること
+                        if !entry.compiled_ast.is_empty() {
+                            lua_vm::execute_compiled_script(&entry.compiled_ast, &mut test_st);
+                        }
+                        let _ = eff;
+                    }
+                }
+            }
+        }
+
+        // 3. 実機の初代 aviutl110\plugins が存在する場合は全スクリプト (.anm, .obj, .cam, .scn, .tra) および exedit.auf を検証
+        let au1_dir = au2_platform::desktop_dir()
+            .map(|d| d.join("aviutl110").join("plugins"))
+            .unwrap_or_default();
+        if au1_dir.exists() {
+            for fname in ["exedit.anm", "exedit.obj", "exedit.cam", "exedit.scn", "exedit.tra", "exedit.auf"] {
+                let p = au1_dir.join(fname);
+                if p.exists() {
+                    let desc = inspect_plugin_file(&p).expect("inspect official AviUtl 1.10 plugin/script");
+                    assert!(!desc.entries.is_empty(), "{fname} should have entries");
+                    for entry in &desc.entries {
+                        let mut test_st = LuaObjState::default();
+                        let eff = entry.to_effect(desc.kind);
+                        for d in &entry.dialogs {
+                            if d.is_number {
+                                if let Ok(v) = d.default_value.parse::<f64>() {
+                                    test_st.named_vars.insert(d.var_name.clone(), lua_vm::LuaVal::Num(v));
+                                } else if let Some(hex) = d.default_value.strip_prefix("0x").or_else(|| d.default_value.strip_prefix("0X")) {
+                                    if let Ok(v) = u32::from_str_radix(hex, 16) {
+                                        test_st.named_vars.insert(d.var_name.clone(), lua_vm::LuaVal::Num(v as f64));
+                                    }
+                                }
+                            } else {
+                                test_st.named_vars.insert(d.var_name.clone(), lua_vm::LuaVal::Str(d.default_value.clone()));
+                            }
+                        }
+                        if !entry.compiled_ast.is_empty() {
+                            lua_vm::execute_compiled_script(&entry.compiled_ast, &mut test_st);
+                        }
+                        let _ = eff;
+                    }
+                }
+            }
+        }
     }
 }

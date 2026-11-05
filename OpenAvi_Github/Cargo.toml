@@ -6,6 +6,7 @@ members = [
     "crates/au2-aup",
     "crates/au2-media",
     "crates/au2-plugin",
+    "crates/au2-platform",
     "crates/au2-app",
 ]
 default-members = ["crates/au2-app"]
@@ -23,6 +24,7 @@ au2-exo = { path = "crates/au2-exo" }
 au2-aup = { path = "crates/au2-aup" }
 au2-media = { path = "crates/au2-media" }
 au2-plugin = { path = "crates/au2-plugin" }
+au2-platform = { path = "crates/au2-platform" }
 encoding_rs = "0.8"
 thiserror = "1"
 log = "0.4"

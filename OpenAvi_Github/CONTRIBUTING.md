@@ -22,6 +22,13 @@ cargo run -p au2-app
 - **`au2-exo`**: `.exo` の読み書きとラウンドトリップ性を保証します。未知のキーや将来の拡張パラメータを欠落させない設計を維持してください。
 - **`au2-plugin`**: `.anm` / `.obj` / `.cam` / `.scn` / `.tra` スクリプトおよび `.auf` / `.aui` / `.auo` / `.auc` ネイティブプラグインのメタデータ解析とブリッジ機構を担当します。
 - **`au2-app`**: `eframe` (`egui` + `egui_dock` + `wgpu`) を用いたフロントエンド UI です。1フレーム単位のレスポンスを損なわないよう、重い処理は UI スレッドをブロックしない設計としてください。
+- **`au2-platform`**: OS 依存処理（ホーム/データ領域、`.exe` 拡張子、コンソール非表示）の唯一の窓口です。他クレートで `USERPROFILE` / `LOCALAPPDATA` / `cfg(windows)` を直接使わないでください。
+
+全体像と移植状況は [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) を参照してください。
+
+## テストの書き方
+
+- 個人環境の絶対パス（`C:\Users\...`）を書かないでください。同梱データは `CARGO_MANIFEST_DIR` 相対、デスクトップ上のサンプルは `au2_platform::desktop_dir()` 経由にし、無ければスキップします。
 
 ## Pull Request の送り方
 

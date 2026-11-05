@@ -120,6 +120,8 @@ pub struct EditorState {
     stream_textures: HashMap<PathBuf, (TextureHandle, u32, [usize; 2])>,
     /// ファイルパス解決のキャッシュ（毎フレームの OS ディスク IO / exists 呼び出しを削減）
     pub resolved_paths: HashMap<String, Option<PathBuf>>,
+    /// ユーザーが「フォルダから一括再リンク」で指定した追加の素材検索フォルダ。
+    pub extra_search_dirs: Vec<PathBuf>,
     /// FFmpeg（動画・音声デコーダー）のアプリ内ダウンロード状態
     pub ffmpeg_dl: FfmpegDownload,
     pub dirty: bool,
@@ -271,7 +273,7 @@ pub fn current_time_string() -> String {
 
 /// デフォルトの動画プロジェクト保存先ディレクトリ。
 pub fn default_projects_dir() -> PathBuf {
-    if let Some(user) = std::env::var_os("USERPROFILE") {
+    if let Some(user) = au2_platform::home_dir() {
         let p = PathBuf::from(&user).join("Videos").join("OpenAvi");
         if p.exists() || std::fs::create_dir_all(&p).is_ok() {
             return p;
@@ -353,6 +355,7 @@ impl Default for EditorState {
             static_textures: HashMap::new(),
             stream_textures: HashMap::new(),
             resolved_paths: HashMap::new(),
+            extra_search_dirs: Vec::new(),
             ffmpeg_dl: FfmpegDownload::Idle,
             dirty: false,
             autosave: AutoSaveSettings::default(),
@@ -478,6 +481,7 @@ impl EditorState {
     }
 
     /// 編集変更が発生したことを記録し、自動保存のデバウンスタイマーを開始します。
+    #[allow(dead_code)]
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
         if self.autosave.dirty_since.is_none() {
@@ -534,6 +538,10 @@ impl EditorState {
             au2_aup::write_aup_bytes(&self.scene)
         } else if is_exo {
             au2_exo::write_exo_bytes(&self.scene, self.encoding)
+        } else if !self.scenes.is_empty() {
+            let mut all_scenes = self.scenes.clone();
+            all_scenes.insert(0, self.scene.clone());
+            au2_aup::write_aup2_multi_scene_string(&all_scenes, 0, Some(path), self.frame).into_bytes()
         } else {
             au2_aup::write_aup2_bytes(&self.scene, Some(path), self.frame)
         };
@@ -588,6 +596,7 @@ impl EditorState {
             static_textures: HashMap::new(),
             stream_textures: HashMap::new(),
             resolved_paths: HashMap::new(),
+            extra_search_dirs: Vec::new(),
             ffmpeg_dl: FfmpegDownload::Idle,
             dirty: false,
             autosave: AutoSaveSettings {
@@ -605,81 +614,266 @@ impl EditorState {
         self.dirty = false;
         Ok(target_path)
     }
+}
 
+/// 日本語の結合濁点・結合半濁点（NFD形式）を合成文字（NFC形式）に結合します。
+fn compose_japanese_dakuten(input: &str) -> String {
+    let mut chars = input.chars().peekable();
+    let mut result = String::with_capacity(input.len());
+    while let Some(c) = chars.next() {
+        if let Some(&next_c) = chars.peek() {
+            if next_c == '\u{3099}' {
+                let composed = match c {
+                    'か' => 'が', 'き' => 'ぎ', 'く' => 'ぐ', 'け' => 'げ', 'こ' => 'ご',
+                    'さ' => 'ざ', 'し' => 'じ', 'す' => 'ず', 'せ' => 'ぜ', 'そ' => 'ぞ',
+                    'た' => 'だ', 'ち' => 'ぢ', 'つ' => 'づ', 'て' => 'で', 'と' => 'ど',
+                    'は' => 'ば', 'ひ' => 'び', 'ふ' => 'ぶ', 'へ' => 'べ', 'ほ' => 'ぼ',
+                    'カ' => 'ガ', 'キ' => 'ギ', 'ク' => 'グ', 'ケ' => 'ゲ', 'コ' => 'ゴ',
+                    'サ' => 'ザ', 'シ' => 'ジ', 'ス' => 'ズ', 'セ' => 'ゼ', 'ソ' => 'ゾ',
+                    'タ' => 'ダ', 'チ' => 'ヂ', 'ツ' => 'ヅ', 'テ' => 'デ', 'ト' => 'ド',
+                    'ハ' => 'バ', 'ヒ' => 'ビ', 'フ' => 'ブ', '\u{30D8}' => '\u{30D9}', 'ホ' => 'ボ',
+                    'ウ' => 'ヴ',
+                    _ => c,
+                };
+                if composed != c {
+                    result.push(composed);
+                    chars.next(); // 濁点消費
+                    continue;
+                }
+            } else if next_c == '\u{309A}' {
+                let composed = match c {
+                    'は' => 'ぱ', 'ひ' => 'ぴ', 'ふ' => 'ぷ', 'へ' => 'ぺ', 'ほ' => 'ぽ',
+                    'ハ' => 'パ', 'ヒ' => 'ピ', 'フ' => 'プ', '\u{30D8}' => '\u{30DA}', 'ホ' => 'ポ',
+                    _ => c,
+                };
+                if composed != c {
+                    result.push(composed);
+                    chars.next(); // 半濁点消費
+                    continue;
+                }
+            }
+        }
+        result.push(c);
+    }
+    result
+}
+
+/// 照合用キーを正規化します（全角スペース->半角スペース、連続スペース圧縮、NFC濁点合成、小文字化、トリム）
+fn normalize_match_key(input: &str) -> String {
+    let composed = compose_japanese_dakuten(input);
+    let mut res = String::with_capacity(composed.len());
+    let mut last_was_space = false;
+    for c in composed.chars() {
+        let normalized_char = match c {
+            '　' => ' ',
+            '_' | '-' => ' ',
+            c => c,
+        };
+        if normalized_char == ' ' {
+            if !last_was_space && !res.is_empty() {
+                res.push(' ');
+                last_was_space = true;
+            }
+        } else {
+            for lc in normalized_char.to_lowercase() {
+                res.push(lc);
+            }
+            last_was_space = false;
+        }
+    }
+    res.trim().to_string()
+}
+
+fn scan_subdirs<F: FnMut(PathBuf)>(root: &Path, max_depth: usize, cb: &mut F) {
+    if max_depth == 0 {
+        return;
+    }
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if file_name.starts_with('.')
+                    || file_name.eq_ignore_ascii_case("node_modules")
+                    || file_name.eq_ignore_ascii_case("target")
+                    || file_name.eq_ignore_ascii_case("appdata")
+                    || file_name.eq_ignore_ascii_case("windows")
+                    || file_name.starts_with('$')
+                {
+                    continue;
+                }
+                cb(path.clone());
+                scan_subdirs(&path, max_depth - 1, cb);
+            }
+        }
+    }
+}
+
+fn collect_search_dirs(proj_path: Option<&Path>, extra_dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+
+    let mut add_dir = |d: PathBuf| {
+        if d.is_dir() && visited.insert(d.clone()) {
+            dirs.push(d);
+        }
+    };
+
+    // 0. ユーザーが明示指定した素材フォルダ（サブフォルダ 6 階層まで）を最優先
+    for extra in extra_dirs {
+        add_dir(extra.clone());
+        scan_subdirs(extra, 6, &mut add_dir);
+    }
+
+    // 1. プロジェクトファイルの親フォルダおよびそのサブフォルダ（深さ3まで）
+    if let Some(proj) = proj_path {
+        if let Some(parent) = proj.parent() {
+            add_dir(parent.to_path_buf());
+            scan_subdirs(parent, 3, &mut add_dir);
+        }
+    }
+
+    // 2. ユーザープロファイル配下の主要フォルダ（Desktop, Downloads, Music, Videos, Documents）
+    if let Some(user) = au2_platform::home_dir() {
+        let user_path = PathBuf::from(user);
+        let desktop = user_path.join("Desktop");
+        add_dir(desktop.clone());
+        scan_subdirs(&desktop, 3, &mut add_dir);
+
+        let downloads = user_path.join("Downloads");
+        add_dir(downloads.clone());
+        scan_subdirs(&downloads, 2, &mut add_dir);
+
+        let music = user_path.join("Music");
+        add_dir(music.clone());
+        scan_subdirs(&music, 2, &mut add_dir);
+
+        let videos = user_path.join("Videos");
+        add_dir(videos.clone());
+        scan_subdirs(&videos, 2, &mut add_dir);
+
+        let docs = user_path.join("Documents");
+        add_dir(docs.clone());
+        scan_subdirs(&docs, 2, &mut add_dir);
+    }
+
+    // 3. カレントディレクトリ
+    if let Ok(cur) = std::env::current_dir() {
+        add_dir(cur.clone());
+        add_dir(cur.join("samples"));
+    }
+
+    dirs
+}
+
+impl EditorState {
     /// パス解決をメモリキャッシュ経由で行い、毎フレームの OS ファイルシステム I/O を排除します。
-    /// プロジェクトファイルと同じディレクトリやサブディレクトリ（audio, sounds, bgm 等）、デスクトップ、
-    /// および拡張子違い（.wav と .mp3 等）も自動で曖昧探索して解決します。
+    /// プロジェクトファイルと同じディレクトリやサブディレクトリ、デスクトップ、ダウンロード、
+    /// および拡張子違い（.wav と .mp3 等）や濁点・空白揺れも自動でスマート曖昧探索して解決します。
     pub fn resolve_cached_path(&mut self, path_str: &str) -> Option<PathBuf> {
-        let trimmed = path_str.trim();
-        if trimmed.is_empty() {
+        let raw_trimmed = path_str.trim();
+        if raw_trimmed.is_empty() {
             return None;
         }
-        if let Some(cached) = self.resolved_paths.get(trimmed) {
+        if let Some(cached) = self.resolved_paths.get(raw_trimmed) {
             return cached.clone();
         }
 
-        // 1. そのまま存在するかチェック
+        let expanded = au2_aup::expand_aviutl2_path_vars(raw_trimmed);
+        let trimmed = expanded.trim();
+
+        // 1. そのまま存在するかチェック（スラッシュ正規化、ドライブ補正）
         let mut p = PathBuf::from(trimmed);
-        if !p.exists() && (trimmed.starts_with(":\\") || trimmed.starts_with(":/")) {
-            let with_c = format!("C{}", trimmed);
-            let p_c = PathBuf::from(&with_c);
-            if p_c.exists() {
-                p = p_c;
+        if !p.exists() {
+            let normalized_slashes = trimmed.replace('/', "\\");
+            let p_slash = PathBuf::from(&normalized_slashes);
+            if p_slash.exists() {
+                p = p_slash;
+            } else if trimmed.starts_with(":\\") || trimmed.starts_with(":/") {
+                let with_c = format!("C{}", trimmed);
+                let p_c = PathBuf::from(&with_c);
+                if p_c.exists() {
+                    p = p_c;
+                }
             }
         }
 
         if !p.exists() {
-            let file_name = Path::new(trimmed).file_name().map(|n| n.to_string_lossy().into_owned());
-            let file_stem = Path::new(trimmed).file_stem().map(|s| s.to_string_lossy().to_ascii_lowercase());
+            let trimmed_path = Path::new(trimmed);
+            let orig_file_name = trimmed_path.file_name().map(|n| n.to_string_lossy().into_owned());
+            let orig_stem = trimmed_path.file_stem().map(|s| s.to_string_lossy().into_owned());
 
-            // 探索ディレクトリ一覧
-            let mut search_dirs: Vec<PathBuf> = Vec::new();
-            if let Some(proj) = &self.file_path {
-                if let Some(parent) = proj.parent() {
-                    search_dirs.push(parent.to_path_buf());
-                    for sub in ["audio", "sounds", "sound", "bgm", "assets", "material", "media", "music"] {
-                        search_dirs.push(parent.join(sub));
-                    }
-                }
-            }
-            if let Some(user) = std::env::var_os("USERPROFILE") {
-                let desktop = PathBuf::from(user).join("Desktop");
-                search_dirs.push(desktop.clone());
-                for sub in ["aviutl animation", "audio", "sounds", "sound", "bgm", "music", "OpenAvi"] {
-                    search_dirs.push(desktop.join(sub));
-                }
-            }
-            if let Ok(cur) = std::env::current_dir() {
-                search_dirs.push(cur.clone());
-                search_dirs.push(cur.join("samples"));
-            }
-
+            let search_dirs = collect_search_dirs(self.file_path.as_deref(), &self.extra_search_dirs);
             let mut found = None;
 
-            // 2. 同名ファイルで検索
-            if let Some(name) = &file_name {
-                for dir in &search_dirs {
-                    let cand = dir.join(name);
-                    if cand.exists() {
-                        found = Some(cand);
-                        break;
+            // 2. 末尾サブパスによる照合（親フォルダ＋ファイル名の組み合わせ）
+            // 例: "創作関係\Aviutl\2018\ココロフロート\ココロフロート.mp3" の末尾 "ココロフロート\ココロフロート.mp3"
+            if let Some(parent_dir_name) = trimmed_path.parent().and_then(|p| p.file_name()) {
+                if let Some(fname) = &orig_file_name {
+                    let sub_rel = Path::new(parent_dir_name).join(fname);
+                    for dir in &search_dirs {
+                        let cand = dir.join(&sub_rel);
+                        if cand.is_file() {
+                            found = Some(cand);
+                            break;
+                        }
                     }
                 }
             }
 
-            // 3. 拡張子違い（例: wav <-> mp3 <-> m4a 等）の同名幹で検索
+            // 3. 完全同名ファイル名照合（ファイル名が完全一致、または空白・NFC濁点・大文字小文字正規化で一致）
             if found.is_none() {
-                if let Some(stem) = &file_stem {
-                    'outer: for dir in &search_dirs {
-                        if dir.is_dir() {
-                            if let Ok(entries) = std::fs::read_dir(dir) {
-                                for entry in entries.flatten() {
-                                    let path = entry.path();
-                                    if path.is_file() {
-                                        if let Some(s) = path.file_stem().and_then(|s| s.to_str()) {
-                                            if s.eq_ignore_ascii_case(stem) {
-                                                found = Some(path);
-                                                break 'outer;
+                if let Some(name) = &orig_file_name {
+                    let target_key = normalize_match_key(name);
+                    'name_match: for dir in &search_dirs {
+                        let cand_direct = dir.join(name);
+                        if cand_direct.is_file() {
+                            found = Some(cand_direct);
+                            break;
+                        }
+                        if let Ok(entries) = std::fs::read_dir(dir) {
+                            for entry in entries.flatten() {
+                                let c_path = entry.path();
+                                if c_path.is_file() {
+                                    if let Some(c_name) = c_path.file_name().and_then(|n| n.to_str()) {
+                                        if normalize_match_key(c_name) == target_key {
+                                            found = Some(c_path);
+                                            break 'name_match;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 4. 拡張子違い（互換メディアフォーマット: wav, mp3, m4a, aac, flac, ogg, wma, mp4, avi, mov, mkv）のファイル名幹（stem）一致
+            if found.is_none() {
+                if let Some(stem) = &orig_stem {
+                    let target_stem_key = normalize_match_key(stem);
+                    const COMPAT_EXTS: &[&str] = &[
+                        "wav", "mp3", "m4a", "aac", "flac", "ogg", "wma", "mp4", "avi", "mov", "mkv", "webm",
+                    ];
+                    'stem_match: for dir in &search_dirs {
+                        for ext in COMPAT_EXTS {
+                            let cand = dir.join(format!("{}.{}", stem, ext));
+                            if cand.is_file() {
+                                found = Some(cand);
+                                break 'stem_match;
+                            }
+                        }
+                        if let Ok(entries) = std::fs::read_dir(dir) {
+                            for entry in entries.flatten() {
+                                let c_path = entry.path();
+                                if c_path.is_file() {
+                                    if let Some(c_ext) = c_path.extension().and_then(|e| e.to_str()) {
+                                        if COMPAT_EXTS.iter().any(|&e| e.eq_ignore_ascii_case(c_ext)) {
+                                            if let Some(c_stem) = c_path.file_stem().and_then(|s| s.to_str()) {
+                                                if normalize_match_key(c_stem) == target_stem_key {
+                                                    found = Some(c_path);
+                                                    break 'stem_match;
+                                                }
                                             }
                                         }
                                     }
@@ -690,7 +884,38 @@ impl EditorState {
                 }
             }
 
-            // 4. アプリケーション相対およびサンプル
+            // 5. ファジー部分一致（包含関係: 片方がもう一方を含み、類似度が高いものを選択）
+            if found.is_none() {
+                if let Some(stem) = &orig_stem {
+                    let target_stem_key = normalize_match_key(stem);
+                    if target_stem_key.len() >= 3 {
+                        let mut best_match: Option<(PathBuf, usize)> = None;
+                        for dir in &search_dirs {
+                            if let Ok(entries) = std::fs::read_dir(dir) {
+                                for entry in entries.flatten() {
+                                    let c_path = entry.path();
+                                    if c_path.is_file() {
+                                        if let Some(c_stem) = c_path.file_stem().and_then(|s| s.to_str()) {
+                                            let c_key = normalize_match_key(c_stem);
+                                            if c_key.len() >= 3 && (c_key.contains(&target_stem_key) || target_stem_key.contains(&c_key)) {
+                                                let diff = (c_key.len() as isize - target_stem_key.len() as isize).unsigned_abs();
+                                                if best_match.as_ref().map_or(true, |(_, d)| diff < *d) {
+                                                    best_match = Some((c_path, diff));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if let Some((best_path, _)) = best_match {
+                            found = Some(best_path);
+                        }
+                    }
+                }
+            }
+
+            // 6. アプリケーション相対およびサンプル
             if found.is_none() {
                 if let Some(resolved) = resolve_app_path(trimmed) {
                     found = Some(resolved);
@@ -702,13 +927,62 @@ impl EditorState {
             if let Some(resolved) = found {
                 p = resolved;
             } else {
-                self.resolved_paths.insert(trimmed.to_string(), None);
+                self.resolved_paths.insert(raw_trimmed.to_string(), None);
                 return None;
             }
         }
 
-        self.resolved_paths.insert(trimmed.to_string(), Some(p.clone()));
+        self.resolved_paths.insert(raw_trimmed.to_string(), Some(p.clone()));
         Some(p)
+    }
+
+    /// シーン内のすべてのメディアオブジェクトをスキャンし、未検出パスを手元の実在パスに自動再リンクします。
+    pub fn auto_relink_missing_media(&mut self) -> usize {
+        let mut files_to_resolve = Vec::new();
+        for layer in &self.scene.layers {
+            for obj in &layer.objects {
+                if let Some(src) = obj.source() {
+                    if matches!(src.kind, EffectKind::AudioFile | EffectKind::VideoFile | EffectKind::ImageFile) {
+                        if let Some(f) = src.text("file").filter(|s| !s.trim().is_empty()) {
+                            files_to_resolve.push(f.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut relink_map: HashMap<String, PathBuf> = HashMap::new();
+        for f in files_to_resolve {
+            if !relink_map.contains_key(&f) {
+                if let Some(resolved) = self.resolve_cached_path(&f) {
+                    if resolved != Path::new(&f) {
+                        relink_map.insert(f, resolved);
+                    }
+                }
+            }
+        }
+
+        let mut updated = 0;
+        for (old_f, new_p) in &relink_map {
+            let new_str = new_p.to_string_lossy().to_string();
+            for layer in &mut self.scene.layers {
+                for obj in &mut layer.objects {
+                    if let Some(src) = obj.source_mut() {
+                        if src.text("file") == Some(old_f.as_str()) {
+                            if let Some(au2_core::ParamValue::Text(t)) = src.param_mut("file") {
+                                *t = new_str.clone();
+                                updated += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            self.register_source(new_p);
+        }
+        if updated > 0 {
+            log::info!("未検出メディア {updated} 件を手元の実在ファイルに自動再リンクしました");
+        }
+        updated
     }
 
     /// 現在のタイムライン上の音声トラックをオーディオエンジンに同期供給します。
@@ -1045,6 +1319,16 @@ impl EditorState {
                 self.timeline.scroll_y = 0.0;
                 self.dirty = false;
                 self.sync_sources_from_scene();
+                let auto_relinked = self.auto_relink_missing_media();
+                self.sync_audio_playback();
+                let missing = self.check_missing_media();
+                if !missing.is_empty() {
+                    let msg = format!("⚠ プロジェクト内のメディア（音声/動画）が未検出です（{} 件）。手元のファイルを指定してください", missing.len());
+                    self.warnings.push(msg.clone());
+                    self.status = msg;
+                } else if auto_relinked > 0 {
+                    self.status = format!("プロジェクトを読み込みました（手元のメディア {auto_relinked} 件を自動照合）");
+                }
             }
             Err(e) => {
                 self.status = format!(".aup2 の読み込みに失敗しました: {e}");
@@ -1074,11 +1358,15 @@ impl EditorState {
                 self.timeline.scroll_y = 0.0;
                 self.dirty = false;
                 self.sync_sources_from_scene();
+                let auto_relinked = self.auto_relink_missing_media();
+                self.sync_audio_playback();
                 let missing = self.check_missing_media();
                 if !missing.is_empty() {
                     let msg = format!("⚠ プロジェクト内のメディア（音声/動画）が未検出です（{} 件）。手元のファイルを指定してください", missing.len());
                     self.warnings.push(msg.clone());
                     self.status = msg;
+                } else if auto_relinked > 0 {
+                    self.status = format!("プロジェクトを読み込みました（手元のメディア {auto_relinked} 件を自動照合）");
                 }
             }
             Err(e) => {
@@ -1118,6 +1406,16 @@ impl EditorState {
                 self.timeline.scroll_y = 0.0;
                 self.dirty = false;
                 self.sync_sources_from_scene();
+                let auto_relinked = self.auto_relink_missing_media();
+                self.sync_audio_playback();
+                let missing = self.check_missing_media();
+                if !missing.is_empty() {
+                    let msg = format!("⚠ プロジェクト内のメディア（音声/動画）が未検出です（{} 件）。手元のファイルを指定してください", missing.len());
+                    self.warnings.push(msg.clone());
+                    self.status = msg;
+                } else if auto_relinked > 0 {
+                    self.status = format!("オブジェクトファイルを読み込みました（手元のメディア {auto_relinked} 件を自動照合）");
+                }
             }
             Err(e) => {
                 self.status = format!("読み込みに失敗しました: {e}");
@@ -1160,8 +1458,79 @@ impl EditorState {
                 }
                 return;
             }
+            // 5. AviUtl2 エイリアスファイル (.object)
+            if lower == "object" {
+                match std::fs::read(path) {
+                    Ok(bytes) => match au2_aup::parse_object_alias_bytes(&bytes) {
+                        Ok(objs) => {
+                            let base_layer = self.timeline.context_target.layer;
+                            let base_frame = self.frame;
+                            let mut count = 0;
+                            for (idx, mut obj) in objs.into_iter().enumerate() {
+                                let len = obj.length().max(1);
+                                obj.frame_start = base_frame + obj.frame_start;
+                                obj.frame_end = obj.frame_start + len - 1;
+                                self.add_object_at(base_layer + idx, obj);
+                                count += 1;
+                            }
+                            self.sync_sources_from_scene();
+                            self.sync_audio_playback();
+                            self.status = format!(
+                                "AviUtl2 エイリアス `{}` から {} 個のオブジェクトを配置しました",
+                                path.file_name().map(|f| f.to_string_lossy()).unwrap_or_default(),
+                                count
+                            );
+                        }
+                        Err(e) => self.status = format!(".object の読み込みに失敗しました: {e}"),
+                    },
+                    Err(e) => self.status = format!("{} を開けません: {e}", path.display()),
+                }
+                return;
+            }
+            // 6. 初代 AviUtl エイリアスファイル (.exa)
+            if lower == "exa" {
+                match std::fs::read(path) {
+                    Ok(bytes) => match au2_exo::parse_exa_bytes(&bytes) {
+                        Ok(mut obj) => {
+                            let base_layer = self.timeline.context_target.layer;
+                            let base_frame = self.frame;
+                            let len = obj.length().max(1);
+                            obj.frame_start = base_frame;
+                            obj.frame_end = base_frame + len - 1;
+                            self.add_object_at(base_layer, obj);
+                            self.sync_sources_from_scene();
+                            self.sync_audio_playback();
+                            self.status = format!(
+                                "拡張編集エイリアス `{}` を配置しました",
+                                path.file_name().map(|f| f.to_string_lossy()).unwrap_or_default()
+                            );
+                        }
+                        Err(e) => self.status = format!(".exa の読み込みに失敗しました: {e}"),
+                    },
+                    Err(e) => self.status = format!("{} を開けません: {e}", path.display()),
+                }
+                return;
+            }
+            // 7. テキストファイル (.txt) → テキストオブジェクトとして配置 (exedit.ini 仕様)
+            if lower == "txt" {
+                match std::fs::read(path) {
+                    Ok(bytes) => {
+                        let (text, _) = au2_exo::decode_text_bytes(&bytes);
+                        let base_layer = self.timeline.context_target.layer;
+                        let base_frame = self.frame;
+                        let obj = TimelineObject::new_text(base_frame, base_frame + 59, text);
+                        self.add_object_at(base_layer, obj);
+                        self.status = format!(
+                            "テキストファイル `{}` をテキストオブジェクトとして配置しました",
+                            path.file_name().map(|f| f.to_string_lossy()).unwrap_or_default()
+                        );
+                    }
+                    Err(e) => self.status = format!("{} を開けません: {e}", path.display()),
+                }
+                return;
+            }
         }
-        // 5. 拡張編集オブジェクトファイル (.exo)
+        // 8. 拡張編集オブジェクトファイル (.exo)
         match std::fs::read(path) {
             Ok(bytes) => self.load_exo(&bytes, Some(path)),
             Err(e) => self.status = format!("{} を開けません: {e}", path.display()),
@@ -1173,15 +1542,18 @@ impl EditorState {
         if let Some(paths) = rfd::FileDialog::new()
             .set_title("ファイルを開く / 素材・プラグインを取り込む (自動判別)")
             .add_filter(
-                "すべての対応ファイル (.aup2, .aup, .exo, 動画, 画像, 音声, プラグイン)",
+                "すべての対応ファイル (.aup2, .aup, .exo, .exa, .object, 動画, 画像, 音声, プラグイン)",
                 &[
-                    "aup2", "aup", "exo", "mp4", "avi", "mov", "mkv", "webm", "wmv", "png", "jpg",
-                    "jpeg", "bmp", "webp", "gif", "wav", "mp3", "ogg", "flac", "anm", "obj", "cam",
-                    "scn", "tra", "auf", "aui", "auo", "auc", "anm2", "obj2", "cam2", "scn2",
-                    "tra2", "auf2", "aui2", "auo2", "auc2",
+                    "aup2", "aup", "exo", "exa", "object", "txt", "mp4", "avi", "mov", "mkv", "webm", "wmv", "png",
+                    "jpg", "jpeg", "bmp", "webp", "gif", "wav", "mp3", "ogg", "flac", "anm", "obj",
+                    "cam", "scn", "tra", "auf", "aui", "auo", "auc", "anm2", "obj2", "cam2", "scn2",
+                    "tra2", "auf2", "aui2", "auo2", "auc2", "mod2", "aux2",
                 ],
             )
-            .add_filter("プロジェクト / オブジェクト (.aup2, .aup, .exo)", &["aup2", "aup", "exo"])
+            .add_filter(
+                "プロジェクト / オブジェクト / エイリアス (.aup2, .aup, .exo, .exa, .object)",
+                &["aup2", "aup", "exo", "exa", "object"],
+            )
             .add_filter(
                 "動画・画像・音声メディア",
                 &[
@@ -1190,10 +1562,10 @@ impl EditorState {
                 ],
             )
             .add_filter(
-                "初代AviUtl / AviUtl2 プラグイン・スクリプト (.anm, .obj, .auf, .anm2, .auf2 等)",
+                "初代AviUtl / AviUtl2 プラグイン・スクリプト (.anm, .obj, .auf, .anm2, .auf2, .mod2 等)",
                 &[
                     "anm", "obj", "cam", "scn", "tra", "auf", "aui", "auo", "auc", "anm2", "obj2",
-                    "cam2", "scn2", "tra2", "auf2", "aui2", "auo2", "auc2",
+                    "cam2", "scn2", "tra2", "auf2", "aui2", "auo2", "auc2", "mod2", "aux2",
                 ],
             )
             .add_filter("すべてのファイル", &["*"])
@@ -1307,7 +1679,7 @@ impl EditorState {
                 "初代AviUtl / AviUtl2 スクリプト・プラグイン",
                 &[
                     "anm", "obj", "cam", "scn", "tra", "auf", "aui", "auo", "auc", "anm2", "obj2",
-                    "cam2", "scn2", "tra2", "auf2", "aui2", "auo2", "auc2",
+                    "cam2", "scn2", "tra2", "auf2", "aui2", "auo2", "auc2", "mod2", "aux2",
                 ],
             )
             .add_filter("すべてのファイル", &["*"])
@@ -1399,12 +1771,55 @@ impl EditorState {
         // キャッシュクリア＆再キャッシュ
         self.resolved_paths.clear();
         self.resolved_paths.insert(new_path_str.clone(), Some(new_path.to_path_buf()));
+        if !old_path.is_empty() {
+            self.resolved_paths.insert(old_path.to_string(), Some(new_path.to_path_buf()));
+        }
         self.register_source(new_path);
         self.sync_sources_from_scene();
         self.sync_audio_playback();
         self.dirty = true;
         let base_name = new_path.file_name().and_then(|n| n.to_str()).unwrap_or(&new_path_str);
         self.status = format!("メディアファイルを `{base_name}` に再設定しました（{count} 件のオブジェクトを更新）");
+    }
+
+    /// 指定フォルダ（サブフォルダ含む）を素材検索先に追加し、未検出メディアを一括で再リンクします。
+    /// AviUtl の .aup はメディア本体を内包せず絶対パスしか持たないため、別 PC で開いた場合は
+    /// 素材の入ったフォルダを指定してもらうことで、ファイル名から全素材を自動で割り当てます。
+    /// 戻り値は `(再リンクできた件数, まだ見つからない素材の件数)`。
+    pub fn relink_from_folder(&mut self, folder: &Path) -> (usize, usize) {
+        let folder = folder.to_path_buf();
+        if !self.extra_search_dirs.contains(&folder) {
+            self.extra_search_dirs.insert(0, folder);
+        }
+        // 未検出として記憶した結果を破棄して再探索
+        self.resolved_paths.clear();
+        let relinked = self.auto_relink_missing_media();
+        self.sync_sources_from_scene();
+        self.sync_audio_playback();
+        let remaining = self.check_missing_media().len();
+        if relinked > 0 {
+            self.dirty = true;
+        }
+        self.status = format!(
+            "フォルダから素材を再リンクしました（{relinked} 件を割り当て、未検出 {remaining} 件）"
+        );
+        (relinked, remaining)
+    }
+
+    /// 素材フォルダを選択して未検出メディアを一括再リンクするダイアログを開きます。
+    pub fn relink_from_folder_dialog(&mut self) -> bool {
+        let mut dlg = rfd::FileDialog::new().set_title("素材（音声・画像・動画）が入っているフォルダを選択");
+        if let Some(parent) = self.file_path.as_ref().and_then(|p| p.parent()) {
+            if parent.exists() {
+                dlg = dlg.set_directory(parent);
+            }
+        }
+        if let Some(dir) = dlg.pick_folder() {
+            self.relink_from_folder(&dir);
+            true
+        } else {
+            false
+        }
     }
 
     /// 未検出メディアをユーザー選択ファイルに再リンクするダイアログを開きます。
@@ -1416,17 +1831,28 @@ impl EditorState {
                 "手元のメディアファイルを選択して割り当て"
             });
 
-        if let Some(user) = std::env::var_os("USERPROFILE") {
-            let desktop = PathBuf::from(user).join("Desktop");
-            if desktop.exists() {
-                dlg = dlg.set_directory(desktop);
+        // プロジェクトファイルの親フォルダがあれば最優先で初期ディレクトリに設定
+        let mut dir_set = false;
+        if let Some(proj) = &self.file_path {
+            if let Some(parent) = proj.parent() {
+                if parent.exists() {
+                    dlg = dlg.set_directory(parent);
+                    dir_set = true;
+                }
+            }
+        }
+        if !dir_set {
+            if let Some(desktop) = au2_platform::desktop_dir() {
+                if desktop.exists() {
+                    dlg = dlg.set_directory(desktop);
+                }
             }
         }
 
         if is_audio {
-            dlg = dlg.add_filter("音声ファイル (*.mp3, *.wav, *.m4a, *.flac, *.ogg)", &["mp3", "wav", "m4a", "flac", "ogg"]);
+            dlg = dlg.add_filter("音声ファイル (*.mp3, *.wav, *.m4a, *.flac, *.ogg, *.aac)", &["mp3", "wav", "m4a", "flac", "ogg", "aac"]);
         } else {
-            dlg = dlg.add_filter("メディアファイル", &["mp3", "wav", "m4a", "flac", "ogg", "mp4", "avi", "mov", "png", "jpg", "jpeg"]);
+            dlg = dlg.add_filter("メディアファイル", &["mp3", "wav", "m4a", "flac", "ogg", "aac", "mp4", "avi", "mov", "png", "jpg", "jpeg"]);
         }
         dlg = dlg.add_filter("すべてのファイル (*.*)", &["*"]);
 

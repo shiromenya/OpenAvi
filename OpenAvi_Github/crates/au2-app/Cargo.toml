@@ -15,6 +15,7 @@ au2-exo.workspace = true
 au2-aup.workspace = true
 au2-media.workspace = true
 au2-plugin.workspace = true
+au2-platform.workspace = true
 eframe.workspace = true
 egui_dock.workspace = true
 rfd.workspace = true

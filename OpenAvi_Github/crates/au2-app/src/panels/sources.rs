@@ -205,6 +205,8 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                     PluginKind::InputDll => "📥",
                     PluginKind::OutputDll => "📤",
                     PluginKind::ColorDll => "🎨",
+                    PluginKind::Mod2Dll => "📦",
+                    PluginKind::Aux2Dll => "⚙",
                 };
                 ui.horizontal(|ui| {
                     ui.label(format!("{icon} {}", p.file_name));

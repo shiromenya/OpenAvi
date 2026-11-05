@@ -839,12 +839,25 @@ impl OpenAviApp {
                         let is_audio = first.kind_name.contains("音声");
                         if ui
                             .button(
-                                egui::RichText::new("🎵 手元のファイルを選択して割り当て...")
+                                egui::RichText::new("📁 素材フォルダを指定して一括割り当て...")
                                     .color(Color32::WHITE)
                                     .strong(),
                             )
+                            .on_hover_text(
+                                "AviUtl のプロジェクト(.aup)は音声・画像・動画の本体を含まず、元の PC 上のパスだけを保存しています。\n素材が入ったフォルダを指定すると、ファイル名から全ての素材を自動で割り当てます。",
+                            )
                             .clicked()
                         {
+                            self.st.relink_from_folder_dialog();
+                        }
+                        let single_label = if first.kind_name.contains("画像") {
+                            "🖼 このファイルだけ選択..."
+                        } else if is_audio {
+                            "🎵 このファイルだけ選択..."
+                        } else {
+                            "🎞 このファイルだけ選択..."
+                        };
+                        if ui.button(single_label).clicked() {
                             self.st.relink_media_dialog(None, &first.original_path, is_audio);
                         }
                     });

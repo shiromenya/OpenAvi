@@ -1,11 +1,12 @@
 //! 初代 AviUtl (32-bit x86) および AviUtl2 (64-bit x64) のネイティブプラグイン DLL
-//! (`.auf`, `.aui`, `.auo`, `.auc`, `.auf2`, `.aui2`, `.auo2`, `.auc2`) 解析・ブリッジローダ。
+//! (`.auf`, `.aui`, `.auo`, `.auc`, `.auf2`, `.aui2`, `.auo2`, `.auc2`, `.mod2`, `.aux2`) 解析・ブリッジローダ。
 //!
-//! 64-bit プロセス上でも 32-bit `.auf` 等の PE セクション・エクスポートテーブル・`FILTER_DLL` 構造体を
+//! 64-bit プロセス上でも 32-bit `.auf` 等の PE セクション・エクスポートテーブル・`FILTER_DLL` 構造体、
+//! および AviUtl2 SDK の `FILTER_PLUGIN_TABLE` / `SCRIPT_MODULE_TABLE` / `COMMON_PLUGIN_TABLE` 構造体を
 //! 直接解析し、プラグイン名・バージョン情報・トラックバー定義（最小値・最大値・初期値）・
-//! チェックボックス定義を完全抽出してタイムラインおよびプレビューで動作可能にします。
+//! チェックボックス・選択リスト・色・ファイル定義を完全抽出してタイムラインおよびプレビューで動作可能にします。
 
-use crate::{BinaryArch, PluginKind, ScriptCheckDef, ScriptEntry, ScriptTrackDef};
+use crate::{BinaryArch, PluginKind, ScriptCheckDef, ScriptDialogParam, ScriptEntry, ScriptTrackDef};
 
 /// PE バイナリから抽出されたネイティブプラグイン情報。
 #[derive(Debug, Clone)]
@@ -190,6 +191,48 @@ impl<'a> PeView<'a> {
     fn read_u64(&self, off: usize) -> Option<u64> {
         let b = self.bytes.get(off..off + 8)?;
         Some(u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
+    }
+
+    fn read_f64(&self, off: usize) -> Option<f64> {
+        let b = self.bytes.get(off..off + 8)?;
+        let val = f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
+        if val.is_finite() {
+            Some(val)
+        } else {
+            None
+        }
+    }
+
+    /// UTF-16LE (LPCWSTR) ワイド文字列を読み取ります（AviUtl2 SDK の `FILTER_PLUGIN_TABLE` 等で使用）。
+    fn read_wstring(&self, off: usize, max_chars: usize) -> Option<String> {
+        if off + 2 > self.bytes.len() {
+            return None;
+        }
+        let mut units = Vec::new();
+        for i in 0..max_chars {
+            let pos = off + i * 2;
+            let Some(b) = self.bytes.get(pos..pos + 2) else {
+                break;
+            };
+            let u = u16::from_le_bytes([b[0], b[1]]);
+            if u == 0 {
+                break;
+            }
+            if u < 0x20 && u != 0x09 && u != 0x0A && u != 0x0D {
+                return None;
+            }
+            units.push(u);
+        }
+        if units.is_empty() {
+            return None;
+        }
+        let s = String::from_utf16(&units).ok()?;
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
     }
 
     fn read_cstring(&self, off: usize, max_len: usize) -> Option<String> {
@@ -456,6 +499,207 @@ impl<'a> PeView<'a> {
         ))
     }
 
+    /// AviUtl2 SDK の 64-bit `FILTER_PLUGIN_TABLE` (`filter2.h`) を指定オフセットから読み取ります。
+    ///
+    /// レイアウト:
+    /// - `+0x00`: `int flag` (4 bytes + 4 bytes padding)
+    /// - `+0x08`: `LPCWSTR name`
+    /// - `+0x10`: `LPCWSTR label`
+    /// - `+0x18`: `LPCWSTR information`
+    /// - `+0x20`: `void** items` (NULL終端の `FILTER_ITEM_*` ポインタ配列)
+    fn try_read_filter_plugin_table_64(&self, off: usize) -> Option<(ScriptEntry, Option<String>)> {
+        if off + 0x28 > self.bytes.len() {
+            return None;
+        }
+        let name_va = self.read_u64(off + 0x08)?;
+        let name_off = self.va_to_offset(name_va)?;
+        let name = self.read_wstring(name_off, 128).or_else(|| self.read_cstring(name_off, 128))?;
+
+        let info_va = self.read_u64(off + 0x18).unwrap_or(0);
+        let info = self.va_to_offset(info_va).and_then(|io| {
+            self.read_wstring(io, 256).or_else(|| self.read_cstring(io, 256))
+        });
+
+        let items_va = self.read_u64(off + 0x20).unwrap_or(0);
+        let mut tracks = Vec::new();
+        let mut checks = Vec::new();
+        let mut dialogs = Vec::new();
+
+        if let Some(items_off) = self.va_to_offset(items_va) {
+            for idx in 0..64 {
+                let Some(item_va) = self.read_u64(items_off + idx * 8) else {
+                    break;
+                };
+                if item_va == 0 {
+                    break;
+                }
+                let Some(item_off) = self.va_to_offset(item_va) else {
+                    break;
+                };
+                let Some(type_va) = self.read_u64(item_off) else {
+                    break;
+                };
+                let Some(type_off) = self.va_to_offset(type_va) else {
+                    break;
+                };
+                let Some(item_type) = self.read_wstring(type_off, 32).or_else(|| self.read_cstring(type_off, 32)) else {
+                    break;
+                };
+                let item_name = self
+                    .read_u64(item_off + 0x08)
+                    .and_then(|va| self.va_to_offset(va))
+                    .and_then(|no| self.read_wstring(no, 64).or_else(|| self.read_cstring(no, 64)))
+                    .unwrap_or_default();
+
+                match item_type.as_str() {
+                    "track" | "track2" => {
+                        if let (Some(def_val), Some(min_val), Some(max_val)) = (
+                            self.read_f64(item_off + 0x10),
+                            self.read_f64(item_off + 0x18),
+                            self.read_f64(item_off + 0x20),
+                        ) {
+                            if min_val <= max_val && !item_name.is_empty() {
+                                let step = self.read_f64(item_off + 0x28).unwrap_or(1.0);
+                                let precision = if step <= 0.001 {
+                                    3
+                                } else if step <= 0.01 {
+                                    2
+                                } else if step <= 0.1 {
+                                    1
+                                } else {
+                                    0
+                                };
+                                tracks.push(ScriptTrackDef {
+                                    index: tracks.len() as u8,
+                                    var_name: None,
+                                    name: item_name,
+                                    min: min_val,
+                                    max: max_val,
+                                    default: def_val.clamp(min_val, max_val),
+                                    precision,
+                                });
+                            }
+                        }
+                    }
+                    "check" | "checksection" | "checksection2" => {
+                        if !item_name.is_empty() {
+                            let bval = self.bytes.get(item_off + 0x10).copied().unwrap_or(0) != 0;
+                            checks.push(ScriptCheckDef {
+                                var_name: None,
+                                name: item_name,
+                                default: bval,
+                            });
+                        }
+                    }
+                    "color" => {
+                        if !item_name.is_empty() {
+                            let code = self.read_u32(item_off + 0x10).unwrap_or(0xFFFFFF) & 0xFFFFFF;
+                            dialogs.push(ScriptDialogParam {
+                                label: item_name.clone(),
+                                var_name: item_name,
+                                default_value: format!("0x{code:06x}"),
+                                is_number: true,
+                            });
+                        }
+                    }
+                    "select" => {
+                        if !item_name.is_empty() {
+                            let val = self.read_i32(item_off + 0x10).unwrap_or(0);
+                            dialogs.push(ScriptDialogParam {
+                                label: item_name.clone(),
+                                var_name: item_name,
+                                default_value: val.to_string(),
+                                is_number: true,
+                            });
+                        }
+                    }
+                    "file" | "string" | "text" | "folder" => {
+                        if !item_name.is_empty() {
+                            let def_str = self
+                                .read_u64(item_off + 0x10)
+                                .and_then(|va| self.va_to_offset(va))
+                                .and_then(|so| self.read_wstring(so, 256).or_else(|| self.read_cstring(so, 256)))
+                                .unwrap_or_default();
+                            dialogs.push(ScriptDialogParam {
+                                label: item_name.clone(),
+                                var_name: item_name,
+                                default_value: def_str,
+                                is_number: false,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let check_name = checks.first().map(|c| (c.name.clone(), c.default));
+        let has_dialog = !dialogs.is_empty();
+        Some((
+            ScriptEntry {
+                display_name: name.clone(),
+                section_name: name,
+                tracks,
+                check_name,
+                checks,
+                dialogs,
+                has_dialog,
+                script_body: String::new(),
+                compiled_ast: Vec::new(),
+            },
+            info,
+        ))
+    }
+
+    /// AviUtl2 SDK の 64-bit `SCRIPT_MODULE_TABLE` (`module2.h`, `.mod2`) を読み取ります。
+    ///
+    /// - `+0x00`: `LPCWSTR information`
+    /// - `+0x08`: `SCRIPT_MODULE_FUNCTION* functions` (`{ LPCWSTR name, void* func }` の NULL 終端配列)
+    fn try_read_script_module_table_64(&self, off: usize) -> Option<(String, Vec<String>)> {
+        if off + 0x10 > self.bytes.len() {
+            return None;
+        }
+        let info_va = self.read_u64(off)?;
+        let info_off = self.va_to_offset(info_va)?;
+        let info = self.read_wstring(info_off, 256).or_else(|| self.read_cstring(info_off, 256))?;
+
+        let funcs_va = self.read_u64(off + 0x08).unwrap_or(0);
+        let mut func_names = Vec::new();
+        if let Some(funcs_off) = self.va_to_offset(funcs_va) {
+            for i in 0..128 {
+                let entry_off = funcs_off + i * 16;
+                let Some(fn_name_va) = self.read_u64(entry_off) else {
+                    break;
+                };
+                if fn_name_va == 0 {
+                    break;
+                }
+                let Some(fn_off) = self.va_to_offset(fn_name_va) else {
+                    break;
+                };
+                if let Some(fname) = self.read_wstring(fn_off, 64).or_else(|| self.read_cstring(fn_off, 64)) {
+                    func_names.push(fname);
+                }
+            }
+        }
+        Some((info, func_names))
+    }
+
+    /// AviUtl2 SDK の 64-bit `COMMON_PLUGIN_TABLE` (`plugin2.h`, `.aux2`) を読み取ります。
+    fn try_read_common_plugin_table_64(&self, off: usize) -> Option<(String, Option<String>)> {
+        if off + 0x10 > self.bytes.len() {
+            return None;
+        }
+        let name_va = self.read_u64(off)?;
+        let name_off = self.va_to_offset(name_va)?;
+        let name = self.read_wstring(name_off, 128).or_else(|| self.read_cstring(name_off, 128))?;
+        let info = self
+            .read_u64(off + 0x08)
+            .and_then(|va| self.va_to_offset(va))
+            .and_then(|io| self.read_wstring(io, 256).or_else(|| self.read_cstring(io, 256)));
+        Some((name, info))
+    }
+
     /// 32-bit エクスポート関数（`mov eax, imm32; ret` 等）から返却ポインタ VA を逆アセンブル抽出します。
     fn disassemble_ret_va_32(&self, func_rva: u32) -> Option<u64> {
         let off = self.rva_to_offset(func_rva)?;
@@ -548,10 +792,71 @@ pub fn inspect_native_pe_plugin(stem: &str, kind: PluginKind, bytes: &[u8]) -> N
                     }
                 }
             }
+            (BinaryArch::X86_64, "GetFilterPluginTable") => {
+                if let Some(va) = pe.disassemble_ret_va_64(*rva) {
+                    if let Some(off) = pe.va_to_offset(va) {
+                        if let Some((entry, info)) = pe.try_read_filter_plugin_table_64(off) {
+                            if let Some(inf) = info {
+                                description = inf;
+                            }
+                            entries.push(entry);
+                        }
+                    }
+                }
+            }
+            (BinaryArch::X86_64, "GetFilterPluginTableList") => {
+                if let Some(list_va) = pe.disassemble_ret_va_64(*rva) {
+                    if let Some(list_off) = pe.va_to_offset(list_va) {
+                        for i in 0..32 {
+                            let Some(ptr_va) = pe.read_u64(list_off + i * 8) else {
+                                break;
+                            };
+                            if ptr_va == 0 {
+                                break;
+                            }
+                            if let Some(off) = pe.va_to_offset(ptr_va) {
+                                if let Some((entry, info)) = pe.try_read_filter_plugin_table_64(off) {
+                                    if description.is_empty() {
+                                        if let Some(inf) = info {
+                                            description = inf;
+                                        }
+                                    }
+                                    entries.push(entry);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            (BinaryArch::X86_64, "GetScriptModuleTable") => {
+                if let Some(va) = pe.disassemble_ret_va_64(*rva) {
+                    if let Some(off) = pe.va_to_offset(va) {
+                        if let Some((info, funcs)) = pe.try_read_script_module_table_64(off) {
+                            description = if funcs.is_empty() {
+                                info
+                            } else {
+                                format!("{info} (関数: {})", funcs.join(", "))
+                            };
+                        }
+                    }
+                }
+            }
+            (BinaryArch::X86_64, "GetCommonPluginTable" | "GetInputPluginTable" | "GetOutputPluginTable") => {
+                if let Some(va) = pe.disassemble_ret_va_64(*rva) {
+                    if let Some(off) = pe.va_to_offset(va) {
+                        if let Some((name, info)) = pe.try_read_common_plugin_table_64(off) {
+                            description = info.unwrap_or(name);
+                        }
+                    }
+                }
+            }
             (BinaryArch::X86_64, "GetFilterTable" | "GetPluginTable") => {
                 if let Some(va) = pe.disassemble_ret_va_64(*rva) {
                     if let Some(off) = pe.va_to_offset(va) {
-                        if let Some((entry, info)) = pe.try_read_filter_dll_64(off) {
+                        if let Some((entry, info)) = pe
+                            .try_read_filter_dll_64(off)
+                            .or_else(|| pe.try_read_filter_plugin_table_64(off))
+                        {
                             if let Some(inf) = info {
                                 description = inf;
                             }
@@ -571,7 +876,10 @@ pub fn inspect_native_pe_plugin(stem: &str, kind: PluginKind, bytes: &[u8]) -> N
                                 break;
                             }
                             if let Some(off) = pe.va_to_offset(ptr_va) {
-                                if let Some((entry, info)) = pe.try_read_filter_dll_64(off) {
+                                if let Some((entry, info)) = pe
+                                    .try_read_filter_dll_64(off)
+                                    .or_else(|| pe.try_read_filter_plugin_table_64(off))
+                                {
                                     if description.is_empty() {
                                         if let Some(inf) = info {
                                             description = inf;
@@ -599,14 +907,21 @@ pub fn inspect_native_pe_plugin(stem: &str, kind: PluginKind, bytes: &[u8]) -> N
             let end = end.min(bytes.len());
             let step = if pe.arch == BinaryArch::X86_64 { 8 } else { 4 };
             let mut off = start;
-            while off + 0x58 <= end {
+            while off + 0x28 <= end {
                 let found = match pe.arch {
-                    BinaryArch::X86_32 => pe.try_read_filter_dll_32(off),
-                    BinaryArch::X86_64 => pe.try_read_filter_dll_64(off),
+                    BinaryArch::X86_32 if off + 0x58 <= end => pe.try_read_filter_dll_32(off),
+                    BinaryArch::X86_64 => {
+                        let f1 = if off + 0xA0 <= end {
+                            pe.try_read_filter_dll_64(off)
+                        } else {
+                            None
+                        };
+                        f1.or_else(|| pe.try_read_filter_plugin_table_64(off))
+                    }
                     _ => None,
                 };
                 if let Some((entry, info)) = found {
-                    if !entry.tracks.is_empty() || !entry.checks.is_empty() {
+                    if !entry.tracks.is_empty() || !entry.checks.is_empty() || !entry.dialogs.is_empty() {
                         if description.is_empty() {
                             if let Some(inf) = info {
                                 description = inf;
@@ -861,6 +1176,106 @@ pub fn build_sample_64bit_auf_bytes() -> Vec<u8> {
     buf
 }
 
+/// テスト用：AviUtl2 SDK 公式仕様（`GetFilterPluginTable` + `FILTER_PLUGIN_TABLE` + `FILTER_ITEM_TRACK`/`CHECK`/`COLOR` UTF-16LE）の `.auf2` バイナリを生成します。
+pub fn build_sample_aviutl2_auf2_bytes() -> Vec<u8> {
+    let mut buf = vec![0u8; 0x800];
+    buf[0..2].copy_from_slice(b"MZ");
+    buf[0x3C..0x40].copy_from_slice(&0x40u32.to_le_bytes());
+
+    buf[0x40..0x44].copy_from_slice(b"PE\0\0");
+    buf[0x44..0x46].copy_from_slice(&0x8664u16.to_le_bytes());
+    buf[0x46..0x48].copy_from_slice(&1u16.to_le_bytes());
+    buf[0x54..0x56].copy_from_slice(&0xF0u16.to_le_bytes());
+    buf[0x56..0x58].copy_from_slice(&0x2022u16.to_le_bytes());
+
+    let opt = 0x58;
+    buf[opt..opt + 2].copy_from_slice(&0x020bu16.to_le_bytes());
+    let image_base: u64 = 0x0000_0001_8000_0000;
+    buf[opt + 24..opt + 32].copy_from_slice(&image_base.to_le_bytes());
+    buf[opt + 112..opt + 116].copy_from_slice(&0x1020u32.to_le_bytes());
+    buf[opt + 116..opt + 120].copy_from_slice(&0x80u32.to_le_bytes());
+
+    let sec = 0x148;
+    buf[sec..sec + 6].copy_from_slice(b".rdata");
+    buf[sec + 8..sec + 12].copy_from_slice(&0x600u32.to_le_bytes());
+    buf[sec + 12..sec + 16].copy_from_slice(&0x1000u32.to_le_bytes());
+    buf[sec + 16..sec + 20].copy_from_slice(&0x600u32.to_le_bytes());
+    buf[sec + 20..sec + 24].copy_from_slice(&0x200u32.to_le_bytes());
+
+    // RVA 0x1000 (off 0x200): `GetFilterPluginTable`: `lea rax, [rip + 0xF9]; ret` -> RVA 0x1100
+    buf[0x200..0x203].copy_from_slice(&[0x48, 0x8D, 0x05]);
+    buf[0x203..0x207].copy_from_slice(&0x000000F9i32.to_le_bytes());
+    buf[0x207] = 0xC3;
+
+    // Export Directory at RVA 0x1020 (off 0x220)
+    let exp = 0x220;
+    buf[exp + 20..exp + 24].copy_from_slice(&1u32.to_le_bytes());
+    buf[exp + 24..exp + 28].copy_from_slice(&1u32.to_le_bytes());
+    buf[exp + 28..exp + 32].copy_from_slice(&0x1050u32.to_le_bytes());
+    buf[exp + 32..exp + 36].copy_from_slice(&0x1054u32.to_le_bytes());
+    buf[exp + 36..exp + 40].copy_from_slice(&0x1058u32.to_le_bytes());
+
+    buf[0x250..0x254].copy_from_slice(&0x1000u32.to_le_bytes());
+    buf[0x254..0x258].copy_from_slice(&0x1060u32.to_le_bytes());
+    buf[0x258..0x25A].copy_from_slice(&0u16.to_le_bytes());
+    buf[0x260..0x260 + 21].copy_from_slice(b"GetFilterPluginTable\0");
+
+    let write_wstr = |b: &mut [u8], off: usize, s: &str| {
+        for (i, u) in s.encode_utf16().enumerate() {
+            let p = off + i * 2;
+            b[p..p + 2].copy_from_slice(&u.to_le_bytes());
+        }
+    };
+
+    // RVA 0x1100 (off 0x300): FILTER_PLUGIN_TABLE
+    let fpt = 0x300;
+    buf[fpt..fpt + 4].copy_from_slice(&1i32.to_le_bytes()); // flag = 1
+    buf[fpt + 0x08..fpt + 0x10].copy_from_slice(&(image_base + 0x1300).to_le_bytes()); // name LPCWSTR
+    buf[fpt + 0x10..fpt + 0x18].copy_from_slice(&(image_base + 0x1340).to_le_bytes()); // label LPCWSTR
+    buf[fpt + 0x18..fpt + 0x20].copy_from_slice(&(image_base + 0x1380).to_le_bytes()); // information LPCWSTR
+    buf[fpt + 0x20..fpt + 0x28].copy_from_slice(&(image_base + 0x1140).to_le_bytes()); // items void**
+
+    // RVA 0x1140 (off 0x340): items pointer array [item0_track, item1_check, item2_color, NULL]
+    buf[0x340..0x348].copy_from_slice(&(image_base + 0x1180).to_le_bytes());
+    buf[0x348..0x350].copy_from_slice(&(image_base + 0x11C0).to_le_bytes());
+    buf[0x350..0x358].copy_from_slice(&(image_base + 0x1200).to_le_bytes());
+    buf[0x358..0x360].copy_from_slice(&0u64.to_le_bytes());
+
+    // RVA 0x1180 (off 0x380): FILTER_ITEM_TRACK
+    let it0 = 0x380;
+    buf[it0..it0 + 8].copy_from_slice(&(image_base + 0x1400).to_le_bytes()); // type = L"track"
+    buf[it0 + 0x08..it0 + 0x10].copy_from_slice(&(image_base + 0x1420).to_le_bytes()); // name = L"発光強度"
+    buf[it0 + 0x10..it0 + 0x18].copy_from_slice(&75.5f64.to_le_bytes()); // default
+    buf[it0 + 0x18..it0 + 0x20].copy_from_slice(&0.0f64.to_le_bytes()); // min
+    buf[it0 + 0x20..it0 + 0x28].copy_from_slice(&200.0f64.to_le_bytes()); // max
+    buf[it0 + 0x28..it0 + 0x30].copy_from_slice(&0.1f64.to_le_bytes()); // step
+
+    // RVA 0x11C0 (off 0x3C0): FILTER_ITEM_CHECK
+    let it1 = 0x3C0;
+    buf[it1..it1 + 8].copy_from_slice(&(image_base + 0x1440).to_le_bytes()); // type = L"check"
+    buf[it1 + 0x08..it1 + 0x10].copy_from_slice(&(image_base + 0x1460).to_le_bytes()); // name = L"ハイライト強調"
+    buf[it1 + 0x10] = 1;
+
+    // RVA 0x1200 (off 0x400): FILTER_ITEM_COLOR
+    let it2 = 0x400;
+    buf[it2..it2 + 8].copy_from_slice(&(image_base + 0x1480).to_le_bytes()); // type = L"color"
+    buf[it2 + 0x08..it2 + 0x10].copy_from_slice(&(image_base + 0x14A0).to_le_bytes()); // name = L"発光色"
+    buf[it2 + 0x10..it2 + 0x14].copy_from_slice(&0x00FFAA00u32.to_le_bytes());
+
+    // Wide strings at RVA 0x1300+ (off 0x500+)
+    write_wstr(&mut buf, 0x500, "ネオングロー(AviUtl2)"); // RVA 0x1300
+    write_wstr(&mut buf, 0x540, "加工"); // RVA 0x1340
+    write_wstr(&mut buf, 0x580, "AviUtl2 SDK FILTER_PLUGIN_TABLE サンプル"); // RVA 0x1380
+    write_wstr(&mut buf, 0x600, "track"); // RVA 0x1400
+    write_wstr(&mut buf, 0x620, "発光強度"); // RVA 0x1420
+    write_wstr(&mut buf, 0x640, "check"); // RVA 0x1440
+    write_wstr(&mut buf, 0x660, "ハイライト強調"); // RVA 0x1460
+    write_wstr(&mut buf, 0x680, "color"); // RVA 0x1480
+    write_wstr(&mut buf, 0x6A0, "発光色"); // RVA 0x14A0
+
+    buf
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -900,5 +1315,28 @@ mod tests {
         assert_eq!(e.tracks[1].name, "角度");
         assert_eq!(e.tracks[1].min, -360.0);
         assert_eq!(e.tracks[1].max, 360.0);
+    }
+
+    #[test]
+    fn extract_aviutl2_auf2_filter_plugin_table() {
+        let bytes = build_sample_aviutl2_auf2_bytes();
+        let info = inspect_native_pe_plugin("sample_neon_auf2", PluginKind::FilterDll, &bytes);
+        assert_eq!(info.arch, BinaryArch::X86_64);
+        assert!(info.exports.contains(&"GetFilterPluginTable".to_string()));
+        assert_eq!(info.description, "AviUtl2 SDK FILTER_PLUGIN_TABLE サンプル");
+        assert_eq!(info.entries.len(), 1);
+        let e = &info.entries[0];
+        assert_eq!(e.display_name, "ネオングロー(AviUtl2)");
+        assert_eq!(e.tracks.len(), 1);
+        assert_eq!(e.tracks[0].name, "発光強度");
+        assert!((e.tracks[0].default - 75.5).abs() < 1e-6);
+        assert_eq!(e.tracks[0].max, 200.0);
+        assert_eq!(e.tracks[0].precision, 1);
+        assert_eq!(e.checks.len(), 1);
+        assert_eq!(e.checks[0].name, "ハイライト強調");
+        assert!(e.checks[0].default);
+        assert_eq!(e.dialogs.len(), 1);
+        assert_eq!(e.dialogs[0].label, "発光色");
+        assert_eq!(e.dialogs[0].default_value, "0xffaa00");
     }
 }
