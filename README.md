@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/openavi_logo.svg" alt="OpenAvi Logo" width="480">
+</p>
+
 # OpenAvi
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -71,17 +75,18 @@ openavi/
 
 設計の詳細・移植状況は [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) を参照してください。
 
-> **対応 OS**: Windows（フル機能）。Linux / macOS は GUI・ファイル読み書きは動作する想定ですが、**音声出力は未対応**（Windows の winmm 依存）で、FFmpeg の自動ダウンロードも Windows のみです。
+> **対応 OS**: Windows / macOS / Linux（クロスプラットフォーム対応）。音声出力（Windows: `winmm` / macOS: `AudioToolbox` / Linux: `PipeWire・PulseAudio・ALSA`）および FFmpeg の自動検出・自動ダウンロードも全 OS に対応しています。
 
 ---
 
-## ダウンロード＆ワンクリック起動（一般ユーザー向け）
+## ダウンロード＆起動方法（一般ユーザー向け）
 
-1. 配布パッケージ **`OpenAvi-windows-x64.zip`** を解凍します。
-2. フォルダ内の **`install.bat`** を実行すると：
-   - `%LOCALAPPDATA%\Programs\OpenAvi` にアプリ本体がインストールされます。
-   - **デスクトップ** と **スタートメニュー** に **「OpenAvi」ショートカット** が自動作成されます。
-3. デスクトップの **「OpenAvi」アイコンをダブルクリックするだけ** で起動できます（フォルダ内の `openavi.exe` または `Launch-OpenAvi.bat` から直接ポータブル起動することも可能です）。
+インストール不要のポータブル設計（AviUtl スタイル）です。
+
+1. [Releases](../../releases) から **`OpenAvi-windows-x64.zip`** をダウンロードして解凍します。
+2. フォルダ内の **`openavi.exe` をダブルクリックするだけ** で即座に起動します。
+   - インストーラーによるレジストリ登録等は行わないため、フォルダごと自由な場所に移動したり、USB メモリに入れて持ち運ぶことも可能です。
+   - 動画・音声の読み込みに必要な FFmpeg 等もあらかじめ同梱・自動連携されているため、追加設定なしですぐにお使いいただけます。
 
 ---
 
