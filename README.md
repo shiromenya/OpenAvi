@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/openavi_logo.svg" alt="OpenAvi Logo" width="480">
+  <img src="OpenAvi_Github/assets/OpenAvi Logo.svg" alt="OpenAvi Logo" width="480">
 </p>
 
 # OpenAvi
