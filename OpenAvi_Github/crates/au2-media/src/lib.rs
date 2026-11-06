@@ -130,6 +130,52 @@ impl MediaCache {
         self.ffmpeg_bin.is_some()
     }
 
+    /// 検出済みの `ffmpeg` 実行ファイルパスを返します。
+    pub fn ffmpeg_path(&self) -> Option<&Path> {
+        self.ffmpeg_bin.as_deref()
+    }
+
+    /// 静止画または動画の指定フレームを同期的に（デコード完了まで待機して）取得します。
+    /// 動画書き出し（エクスポート）時にフレーム欠落や遅延を防ぐために使用します。
+    pub fn get_frame_sync(&mut self, path: &Path, frame_index: u32, time_sec: f64) -> Option<Arc<RgbaFrame>> {
+        if !self.assets.contains_key(path) {
+            let _ = self.get_frame_arc(path, frame_index, time_sec);
+        }
+        match self.assets.get(path)? {
+            CachedAsset::Static(frame) => Some(Arc::clone(frame)),
+            CachedAsset::AnimatedGif(frames) if !frames.is_empty() => {
+                Some(Arc::clone(&frames[(frame_index as usize) % frames.len()]))
+            }
+            CachedAsset::VideoStream(handle) => {
+                let (lock, cvar) = &*handle.shared;
+                let mut st = lock.lock().ok()?;
+                st.target_frame = frame_index;
+                cvar.notify_all();
+                let deadline = Instant::now() + Duration::from_millis(800);
+                while !st.frames.contains_key(&frame_index) && !st.stop {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        break;
+                    }
+                    let (new_st, _) = cvar.wait_timeout(st, deadline - now).ok()?;
+                    st = new_st;
+                }
+                if let Some(f) = st.frames.get(&frame_index) {
+                    return Some(Arc::clone(f));
+                }
+                if let Some((_, nearest)) = st
+                    .frames
+                    .iter()
+                    .min_by_key(|(&k, _)| (k as i64 - frame_index as i64).abs())
+                {
+                    return Some(Arc::clone(nearest));
+                }
+                st.first_frame.clone()
+            }
+            _ => None,
+        }
+    }
+
     /// FFmpeg を再探索し、検出できた場合は失敗キャッシュを破棄して動画・音声を再デコード可能にします。
     /// （アプリ内からの自動ダウンロード完了後などに呼び出します）
     pub fn reload_ffmpeg(&mut self) -> bool {

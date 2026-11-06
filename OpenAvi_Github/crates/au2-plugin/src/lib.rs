@@ -8,6 +8,12 @@
 pub mod lua_vm;
 pub mod pe_loader;
 
+/// スクリプトやプラグインの名称から、`@` 以降のスクリプトファイル名サフィックスを除去して返します。
+/// 例: `"震える@sample_effects"` -> `"震える"`, `"点滅"` -> `"点滅"`
+pub fn clean_script_name(name: &str) -> &str {
+    name.split('@').next().unwrap_or(name).trim()
+}
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -337,10 +343,11 @@ pub fn parse_script_entries(stem: &str, text: &str) -> Vec<ScriptEntry> {
                 }
             }
             let sec_name = sec.trim().to_string();
+            // プラグイン・スクリプトの表示名から @以降の余計なファイル名サフィックスを除去してシンプルにする
             let display_name = if sec_name.is_empty() {
                 stem.to_string()
             } else {
-                format!("{sec_name}@{stem}")
+                sec_name.clone()
             };
             current = Some(new_empty_entry(display_name, sec_name));
             continue;
@@ -723,11 +730,18 @@ impl PluginRegistry {
 
         // 高速検索インデックスを構築
         for (p_idx, p) in self.plugins.iter().enumerate() {
+            let stem = Path::new(&p.file_name)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&p.file_name);
             for (e_idx, e) in p.entries.iter().enumerate() {
                 self.index_map.entry(e.display_name.clone()).or_insert((p_idx, e_idx));
                 self.index_map.entry(e.section_name.clone()).or_insert((p_idx, e_idx));
                 let sec_only = e.section_name.split('@').next().unwrap_or(&e.section_name);
                 self.index_map.entry(sec_only.to_string()).or_insert((p_idx, e_idx));
+                // 旧来の `セクション名@ファイル名` 書式での参照互換性
+                let legacy_key = format!("{}@{stem}", sec_only);
+                self.index_map.entry(legacy_key).or_insert((p_idx, e_idx));
             }
         }
     }
@@ -2129,7 +2143,8 @@ if flag then obj.oy = obj.oy + amp end
 ";
         let entries = parse_script_entries("sample_effects", src);
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].display_name, "揺れ@sample_effects");
+        assert_eq!(entries[0].display_name, "揺れ");
+        assert_eq!(clean_script_name("揺れ@sample_effects"), "揺れ");
         assert_eq!(entries[0].tracks.len(), 3);
         assert_eq!(entries[0].dialogs.len(), 1);
         assert_eq!(entries[0].dialogs[0].var_name, "col");

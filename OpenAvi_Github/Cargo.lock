@@ -503,6 +503,7 @@ dependencies = [
  "eframe",
  "egui_dock",
  "env_logger",
+ "image",
  "log",
  "rfd",
 ]

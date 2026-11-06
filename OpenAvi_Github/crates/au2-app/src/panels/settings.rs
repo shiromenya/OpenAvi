@@ -6,9 +6,10 @@
 
 use au2_core::{Effect, EffectKind, Frame, Param, ParamValue, Track};
 use au2_plugin::PluginKind;
-use eframe::egui::{self, CollapsingHeader, Color32, DragValue, Grid, RichText, Stroke, TextEdit};
+use eframe::egui::{self, CollapsingHeader, DragValue, Grid, RichText, Stroke, TextEdit};
 
 use crate::state::EditorState;
+use crate::theme;
 
 pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     let Some(id) = st.selected else {
@@ -56,9 +57,9 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     let mut file_changed_flag = false;
 
     egui::Frame::none()
-        .fill(Color32::from_rgb(24, 26, 33))
-        .stroke(Stroke::new(1.0_f32, Color32::from_gray(40)))
-        .rounding(egui::Rounding::same(6.0))
+        .fill(theme::surface_alt())
+        .stroke(Stroke::new(1.0_f32, theme::border()))
+        .rounding(egui::Rounding::same(8.0))
         .inner_margin(egui::Margin::symmetric(10.0, 8.0))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -434,17 +435,19 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                             ui.menu_button("🎬 アニメーション効果 (標準 & スクリプト)", |ui| {
                                 for (kind, entry) in &available_scripts {
                                     if *kind == au2_plugin::PluginKind::AnmScript {
-                                        if ui.button(&entry.display_name).clicked() {
+                                        let name = au2_plugin::clean_script_name(&entry.display_name);
+                                        if ui.button(name).clicked() {
                                             pending_effect = Some(entry.to_effect(*kind));
                                             ui.close_menu();
                                         }
                                     }
                                 }
                             });
-                            ui.menu_button("🎥 カメラ効果 / 外部プラグイン (.auf)", |ui| {
+                            ui.menu_button("🎥 カメラ効果 / プラグイン効果 (.auf)", |ui| {
                                 for (kind, entry) in &available_scripts {
                                     if *kind != au2_plugin::PluginKind::AnmScript {
-                                        if ui.button(&entry.display_name).clicked() {
+                                        let name = au2_plugin::clean_script_name(&entry.display_name);
+                                        if ui.button(name).clicked() {
                                             pending_effect = Some(entry.to_effect(*kind));
                                             ui.close_menu();
                                         }
@@ -458,21 +461,21 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
 
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(format!("Layer {}", layer + 1)).size(11.0).color(Color32::from_rgb(147, 197, 253)));
+                ui.label(RichText::new(format!("Layer {}", layer + 1)).size(11.0).color(theme::accent_text()));
                 ui.separator();
-                ui.label(RichText::new(format!("{} 〜 {} ({}F)", obj.frame_start + 1, obj.frame_end + 1, obj.length())).size(11.0).color(Color32::from_gray(185)));
+                ui.label(RichText::new(format!("{} 〜 {} ({}F)", obj.frame_start + 1, obj.frame_end + 1, obj.length())).size(11.0).color(theme::text_muted()));
                 if !obj.midpoints.is_empty() {
                     ui.separator();
-                    ui.label(RichText::new(format!("中間点: {} / 区間: {}", obj.midpoints.len(), seg + 1)).size(11.0).color(Color32::from_rgb(250, 204, 21)));
+                    ui.label(RichText::new(format!("中間点: {} / 区間: {}", obj.midpoints.len(), seg + 1)).size(11.0).color(theme::fg(egui::Color32::from_rgb(250, 204, 21))));
                 }
                 if let Some(g) = obj.group {
                     ui.separator();
-                    ui.label(RichText::new(format!("グループ {g}")).size(11.0).color(Color32::from_gray(170)));
+                    ui.label(RichText::new(format!("グループ {g}")).size(11.0).color(theme::text_muted()));
                 }
             });
             if !obj.contains(frame) {
                 ui.add_space(2.0);
-                ui.label(RichText::new("※ 現在フレームはオブジェクトの範囲外です").size(10.5).color(Color32::from_rgb(250, 204, 21)));
+                ui.label(RichText::new("※ 現在フレームはオブジェクトの範囲外です").size(10.5).color(theme::warn_text()));
             }
         });
 
@@ -539,14 +542,14 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
 
                                         if is_missing {
                                             ui.horizontal(|ui| {
-                                                ui.colored_label(Color32::from_rgb(255, 90, 90), "⚠ ファイルが見つかりません（リンク切れ）");
+                                                ui.colored_label(theme::danger_text(), "⚠ ファイルが見つかりません（リンク切れ）");
                                                 if ui.button("🎵 手元のファイルを割り当てる...").clicked() {
                                                     pending_relink = Some((s.clone(), is_audio));
                                                 }
                                             });
                                         } else if let Some((_, Some(resolved_path), _)) = resolved_info {
                                             ui.colored_label(
-                                                Color32::from_rgb(110, 220, 110),
+                                                theme::ok_text(),
                                                 format!("✓ 検出: {}", resolved_path.file_name().and_then(|n| n.to_str()).unwrap_or("")),
                                             );
                                         }
@@ -622,9 +625,9 @@ fn track_editor(ui: &mut egui::Ui, t: &mut Track, keys: &[Frame], seg: usize, re
 
 fn scene_settings_ui(ui: &mut egui::Ui, st: &mut EditorState) {
     egui::Frame::none()
-        .fill(Color32::from_rgb(24, 26, 33))
-        .stroke(Stroke::new(1.0_f32, Color32::from_gray(40)))
-        .rounding(egui::Rounding::same(6.0))
+        .fill(theme::surface_alt())
+        .stroke(Stroke::new(1.0_f32, theme::border()))
+        .rounding(egui::Rounding::same(8.0))
         .inner_margin(egui::Margin::symmetric(10.0, 8.0))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -639,9 +642,9 @@ fn scene_settings_ui(ui: &mut egui::Ui, st: &mut EditorState) {
     let obj_count = st.scene.object_count();
     let s = &mut st.scene.settings;
     egui::Frame::none()
-        .fill(Color32::from_rgb(20, 22, 27))
-        .stroke(Stroke::new(1.0_f32, Color32::from_gray(36)))
-        .rounding(egui::Rounding::same(6.0))
+        .fill(theme::surface())
+        .stroke(Stroke::new(1.0_f32, theme::border()))
+        .rounding(egui::Rounding::same(8.0))
         .inner_margin(egui::Margin::same(10.0))
         .show(ui, |ui| {
             Grid::new("au2-scene-settings").num_columns(2).striped(true).spacing([12.0, 6.0]).show(ui, |ui| {
@@ -681,7 +684,7 @@ fn scene_settings_ui(ui: &mut egui::Ui, st: &mut EditorState) {
                     ui.add(DragValue::new(&mut s.frame_rate.num).range(1..=240_000));
                     ui.label("/");
                     ui.add(DragValue::new(&mut s.frame_rate.den).range(1..=1001));
-                    ui.label(RichText::new(format!("= {:.3} fps", s.frame_rate.as_f64())).color(Color32::from_rgb(147, 197, 253)));
+                    ui.label(RichText::new(format!("= {:.3} fps", s.frame_rate.as_f64())).color(theme::accent_text()));
                 });
                 ui.end_row();
 

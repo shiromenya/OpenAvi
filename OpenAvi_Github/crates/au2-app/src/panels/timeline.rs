@@ -19,8 +19,9 @@ use au2_core::{Effect, EffectKind, Frame, ObjectCategory, ObjectId, Rational, Ti
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke};
 
 use crate::state::{ContextTarget, EditorState, TimelineDrag};
+use crate::theme::{self, flip};
 
-const HEADER_W: f32 = 88.0;
+const HEADER_W: f32 = 104.0;
 const RULER_H: f32 = 22.0;
 const H_SCROLLBAR_H: f32 = 18.0;
 const ZOOM_BAR_W: f32 = 200.0;
@@ -477,18 +478,38 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     let row_top = |li: usize| lanes.top() + li as f32 * layer_h - scroll_y;
 
     // ---- 描画 ----
-    painter.rect_filled(full, 0.0, Color32::from_gray(28));
+    painter.rect_filled(full, 0.0, flip(Color32::from_gray(28)));
     let first_row = (scroll_y / layer_h).floor() as usize;
     let rows = (lanes.height() / layer_h).ceil() as usize + 1;
     let visible_rows = first_row..(first_row + rows).min(MAX_LAYERS);
 
-    // レーン背景
+    // レーン背景（ライトモード／ダークモードそれぞれで明確なコントラスト比を持つ交互色分け）
     let lane_painter = painter.with_clip_rect(lanes);
+    let is_dark = theme::is_dark();
     for li in visible_rows.clone() {
         let y = row_top(li);
         let r = Rect::from_min_size(pos2(lanes.left(), y), vec2(lanes.width(), layer_h));
-        let base = if li % 2 == 0 { 34 } else { 38 };
-        lane_painter.rect_filled(r, 0.0, Color32::from_gray(base));
+        let row_bg = if is_dark {
+            if li % 2 == 0 {
+                Color32::from_rgb(23, 25, 31)
+            } else {
+                Color32::from_rgb(31, 34, 43)
+            }
+        } else {
+            if li % 2 == 0 {
+                Color32::from_rgb(255, 255, 255)
+            } else {
+                Color32::from_rgb(233, 238, 247)
+            }
+        };
+        lane_painter.rect_filled(r, 0.0, row_bg);
+        // 各レーンの下辺に薄い区切り線
+        let divider_color = if is_dark {
+            Color32::from_gray(38)
+        } else {
+            Color32::from_rgb(216, 222, 234)
+        };
+        lane_painter.line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(1.0_f32, divider_color));
     }
     // シーン長より後ろを暗く
     let end_x = fx(st.scene.settings.length as f32);
@@ -496,7 +517,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
         lane_painter.rect_filled(
             Rect::from_min_max(pos2(end_x.max(lanes.left()), lanes.top()), lanes.max),
             0.0,
-            Color32::from_black_alpha(90),
+            Color32::from_black_alpha(if theme::is_dark() { 90 } else { 40 }),
         );
     }
 
@@ -715,8 +736,8 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     }
 
     // ルーラー
-    painter.rect_filled(ruler, 0.0, Color32::from_rgb(26, 28, 35));
-    painter.line_segment([ruler.left_bottom(), ruler.right_bottom()], Stroke::new(1.0_f32, Color32::from_gray(44)));
+    painter.rect_filled(ruler, 0.0, flip(Color32::from_rgb(26, 28, 35)));
+    painter.line_segment([ruler.left_bottom(), ruler.right_bottom()], Stroke::new(1.0_f32, theme::border()));
     let rate = st.scene.settings.frame_rate;
     let fps = rate.as_f64().round().max(1.0) as u32;
     let candidates = [1, 2, 5, 10, fps / 2, fps, fps * 2, fps * 5, fps * 10, fps * 30, fps * 60, fps * 300, fps * 600];
@@ -729,47 +750,71 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
         let x = fx(f as f32);
         let major = f % step == 0;
         let h = if major { RULER_H * 0.6 } else { RULER_H * 0.25 };
-        ruler_painter.line_segment([pos2(x, ruler.bottom() - h), pos2(x, ruler.bottom())], Stroke::new(1.0_f32, Color32::from_gray(120)));
+        ruler_painter.line_segment([pos2(x, ruler.bottom() - h), pos2(x, ruler.bottom())], Stroke::new(1.0_f32, flip(Color32::from_gray(120))));
         if major {
-            ruler_painter.text(pos2(x + 3.0, ruler.top() + 2.0), Align2::LEFT_TOP, fmt_time(f, rate), FontId::monospace(10.0), Color32::from_gray(190));
+            ruler_painter.text(pos2(x + 3.0, ruler.top() + 2.0), Align2::LEFT_TOP, fmt_time(f, rate), FontId::monospace(10.0), theme::text_muted());
         }
         f += minor;
     }
 
-    // レイヤーヘッダ
+    // レイヤーヘッダ（レーン背景と連動した交互色分け）
     let header_painter = painter.with_clip_rect(headers);
-    header_painter.rect_filled(headers, 0.0, Color32::from_rgb(24, 26, 32));
     for li in visible_rows {
         let y = row_top(li);
         let r = Rect::from_min_size(pos2(headers.left(), y), vec2(HEADER_W, layer_h));
+        let h_row_bg = if is_dark {
+            if li % 2 == 0 {
+                Color32::from_rgb(26, 28, 36)
+            } else {
+                Color32::from_rgb(33, 36, 46)
+            }
+        } else {
+            if li % 2 == 0 {
+                Color32::from_rgb(250, 251, 254)
+            } else {
+                Color32::from_rgb(235, 239, 247)
+            }
+        };
+        header_painter.rect_filled(r, 0.0, h_row_bg);
+
         let layer = &st.scene.layers[li];
-        let color = if layer.visible { Color32::from_gray(225) } else { Color32::from_gray(100) };
+        let color = if layer.visible { theme::text() } else { theme::text_muted() };
         let base_name = layer.name.clone().unwrap_or_else(|| format!("Layer {}", li + 1));
 
         // レイヤーバッジ [L1]
-        let badge_rect = Rect::from_min_size(pos2(r.left() + 5.0, r.center().y - 8.0), vec2(22.0, 16.0));
-        header_painter.rect_filled(badge_rect, 3.0, Color32::from_rgb(34, 38, 48));
-        header_painter.text(badge_rect.center(), Align2::CENTER_CENTER, format!("L{}", li + 1), FontId::monospace(10.0), Color32::from_rgb(175, 195, 225));
+        let badge_rect = Rect::from_min_size(pos2(r.left() + 5.0, r.center().y - 8.0), vec2(24.0, 16.0));
+        let badge_bg = if is_dark {
+            Color32::from_rgb(38, 42, 54)
+        } else {
+            Color32::from_rgb(218, 226, 242)
+        };
+        header_painter.rect_filled(badge_rect, 3.0, badge_bg);
+        header_painter.text(badge_rect.center(), Align2::CENTER_CENTER, format!("L{}", li + 1), FontId::monospace(10.0), theme::accent_text());
 
         // レイヤー名
-        header_painter.text(pos2(badge_rect.right() + 5.0, r.center().y), Align2::LEFT_CENTER, base_name, FontId::proportional(11.5), color);
+        header_painter.text(pos2(badge_rect.right() + 6.0, r.center().y), Align2::LEFT_CENTER, base_name, FontId::proportional(11.5), color);
 
         // 状態アイコン (右端)
         if layer.locked {
-            header_painter.text(pos2(r.right() - 5.0, r.center().y), Align2::RIGHT_CENTER, "🔒", FontId::proportional(10.0), Color32::from_rgb(250, 204, 21));
+            header_painter.text(pos2(r.right() - 6.0, r.center().y), Align2::RIGHT_CENTER, "🔒", FontId::proportional(10.0), theme::fg(Color32::from_rgb(250, 204, 21)));
         } else if !layer.visible {
-            header_painter.text(pos2(r.right() - 5.0, r.center().y), Align2::RIGHT_CENTER, "🚫", FontId::proportional(10.0), Color32::from_gray(120));
+            header_painter.text(pos2(r.right() - 6.0, r.center().y), Align2::RIGHT_CENTER, "🚫", FontId::proportional(10.0), theme::text_muted());
         }
-        header_painter.line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(1.0_f32, Color32::from_gray(35)));
+        header_painter.line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(1.0_f32, theme::border()));
     }
 
     // 左上コーナー：クリップ内プレビュー ON/OFF スタイリッシュピルボタン
     let corner_hovered = hover_pos.is_some_and(|p| corner.contains(p));
-    painter.rect_filled(corner, 0.0, Color32::from_rgb(22, 24, 30));
-    painter.line_segment([corner.right_top(), corner.right_bottom()], Stroke::new(1.0_f32, Color32::from_gray(40)));
-    painter.line_segment([corner.left_bottom(), corner.right_bottom()], Stroke::new(1.0_f32, Color32::from_gray(40)));
+    let corner_bg = if is_dark {
+        Color32::from_rgb(22, 24, 30)
+    } else {
+        Color32::from_rgb(241, 244, 250)
+    };
+    painter.rect_filled(corner, 0.0, corner_bg);
+    painter.line_segment([corner.right_top(), corner.right_bottom()], Stroke::new(1.0_f32, theme::border()));
+    painter.line_segment([corner.left_bottom(), corner.right_bottom()], Stroke::new(1.0_f32, theme::border()));
 
-    let btn_rect = corner.shrink2(vec2(4.0, 3.0));
+    let btn_rect = corner.shrink2(vec2(3.0, 2.5));
     let (btn_fill, btn_stroke, text_color) = if show_previews {
         if corner_hovered {
             (Color32::from_rgb(45, 110, 245), Stroke::new(1.0_f32, Color32::from_rgb(147, 197, 253)), Color32::WHITE)
@@ -777,23 +822,23 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
             (Color32::from_rgb(37, 99, 235), Stroke::new(1.0_f32, Color32::from_rgb(96, 165, 250)), Color32::WHITE)
         }
     } else if corner_hovered {
-        (Color32::from_rgb(52, 56, 68), Stroke::new(1.0_f32, Color32::from_gray(120)), Color32::from_gray(225))
+        (flip(Color32::from_rgb(52, 56, 68)), Stroke::new(1.0_f32, theme::border()), theme::text())
     } else {
-        (Color32::from_rgb(38, 41, 50), Stroke::new(1.0_f32, Color32::from_gray(65)), Color32::from_gray(175))
+        (flip(Color32::from_rgb(38, 41, 50)), Stroke::new(1.0_f32, theme::border()), theme::text_muted())
     };
     painter.rect_filled(btn_rect, 4.0, btn_fill);
     painter.rect_stroke(btn_rect, 4.0, btn_stroke);
 
     let toggle_label = if show_previews {
-        "🖼 プレビュー: ON"
+        "🖼 プレビュー ON"
     } else {
-        "🖼 プレビュー: OFF"
+        "🖼 プレビュー OFF"
     };
     painter.text(
         btn_rect.center(),
         Align2::CENTER_CENTER,
         toggle_label,
-        FontId::proportional(10.0),
+        FontId::proportional(10.5),
         text_color,
     );
 
@@ -809,78 +854,78 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     }
 
     // 下部水平スクロールバー
-    painter.rect_filled(h_scrollbar, 0.0, Color32::from_gray(24));
-    painter.line_segment([h_scrollbar.left_top(), h_scrollbar.right_top()], Stroke::new(1.0_f32, Color32::from_gray(40)));
+    painter.rect_filled(h_scrollbar, 0.0, flip(Color32::from_gray(24)));
+    painter.line_segment([h_scrollbar.left_top(), h_scrollbar.right_top()], Stroke::new(1.0_f32, theme::border()));
     let thumb_hovered = hover_pos.is_some_and(|p| thumb_rect.contains(p));
     let thumb_bg = if matches!(st.timeline.drag, Some(TimelineDrag::ScrollbarThumb { .. })) {
-        Color32::from_rgb(37, 99, 235)
+        theme::accent()
     } else if thumb_hovered {
-        Color32::from_gray(120)
+        flip(Color32::from_gray(120))
     } else {
-        Color32::from_gray(75)
+        flip(Color32::from_gray(75))
     };
     painter.rect_filled(thumb_rect, 3.0, thumb_bg);
-    painter.rect_stroke(thumb_rect, 3.0, Stroke::new(1.0_f32, Color32::from_white_alpha(45)));
+    painter.rect_stroke(thumb_rect, 3.0, Stroke::new(1.0_f32, theme::border()));
 
     // 右下ズームツールバー
-    painter.rect_filled(zoom_bar, 0.0, Color32::from_rgb(24, 26, 32));
-    painter.line_segment([zoom_bar.left_top(), zoom_bar.right_top()], Stroke::new(1.0_f32, Color32::from_gray(40)));
-    painter.line_segment([zoom_bar.left_top(), zoom_bar.left_bottom()], Stroke::new(1.0_f32, Color32::from_gray(40)));
+    painter.rect_filled(zoom_bar, 0.0, flip(Color32::from_rgb(24, 26, 32)));
+    painter.line_segment([zoom_bar.left_top(), zoom_bar.right_top()], Stroke::new(1.0_f32, theme::border()));
+    painter.line_segment([zoom_bar.left_top(), zoom_bar.left_bottom()], Stroke::new(1.0_f32, theme::border()));
 
     // [⊡ 全体] ボタン (Fit)
     let fit_hovered = hover_pos.is_some_and(|p| btn_fit.contains(p));
-    let fit_bg = if fit_hovered { Color32::from_gray(56) } else { Color32::from_gray(38) };
+    let fit_bg = if fit_hovered { flip(Color32::from_gray(56)) } else { flip(Color32::from_gray(38)) };
     painter.rect_filled(btn_fit, 3.0, fit_bg);
-    painter.rect_stroke(btn_fit, 3.0, Stroke::new(1.0_f32, if fit_hovered { Color32::from_gray(90) } else { Color32::from_gray(50) }));
+    painter.rect_stroke(btn_fit, 3.0, Stroke::new(1.0_f32, if fit_hovered { flip(Color32::from_gray(90)) } else { theme::border() }));
     painter.text(
         btn_fit.center(),
         Align2::CENTER_CENTER,
         "⊡ 全体",
         FontId::proportional(10.0),
-        if fit_hovered { Color32::WHITE } else { Color32::from_gray(210) },
+        if fit_hovered { theme::text() } else { theme::text_muted() },
     );
 
     // [-] ボタン
     let minus_hovered = hover_pos.is_some_and(|p| btn_minus.contains(p));
-    let minus_bg = if minus_hovered { Color32::from_gray(56) } else { Color32::from_gray(38) };
+    let minus_bg = if minus_hovered { flip(Color32::from_gray(56)) } else { flip(Color32::from_gray(38)) };
     painter.rect_filled(btn_minus, 3.0, minus_bg);
-    painter.rect_stroke(btn_minus, 3.0, Stroke::new(1.0_f32, if minus_hovered { Color32::from_gray(90) } else { Color32::from_gray(50) }));
+    painter.rect_stroke(btn_minus, 3.0, Stroke::new(1.0_f32, if minus_hovered { flip(Color32::from_gray(90)) } else { theme::border() }));
     painter.text(
         btn_minus.center(),
         Align2::CENTER_CENTER,
         "−",
         FontId::proportional(11.0),
-        if minus_hovered { Color32::WHITE } else { Color32::from_gray(210) },
+        if minus_hovered { theme::text() } else { theme::text_muted() },
     );
 
     // スライダートラック (溝)
-    painter.rect_filled(slider_track, 2.0, Color32::from_gray(18));
-    painter.rect_stroke(slider_track, 2.0, Stroke::new(1.0_f32, Color32::from_gray(42)));
+    painter.rect_filled(slider_track, 2.0, flip(Color32::from_gray(18)));
+    painter.rect_stroke(slider_track, 2.0, Stroke::new(1.0_f32, theme::border()));
 
     // スライダーつまみ (Knob)
     let is_zoom_dragging = matches!(st.timeline.drag, Some(TimelineDrag::ZoomSlider));
     let knob_hovered = hover_pos.is_some_and(|p| knob_rect.contains(p)) || is_zoom_dragging;
     let knob_bg = if is_zoom_dragging {
-        Color32::from_rgb(59, 130, 246)
+        theme::accent()
     } else if knob_hovered {
-        Color32::from_gray(150)
+        flip(Color32::from_gray(150))
     } else {
-        Color32::from_gray(100)
+        flip(Color32::from_gray(100))
     };
     painter.rect_filled(knob_rect, 2.5, knob_bg);
-    painter.rect_stroke(knob_rect, 2.5, Stroke::new(1.0_f32, Color32::from_white_alpha(50)));
+    painter.rect_stroke(knob_rect, 2.5, Stroke::new(1.0_f32, theme::border()));
 
     // [+] ボタン
     let plus_hovered = hover_pos.is_some_and(|p| btn_plus.contains(p));
-    let plus_bg = if plus_hovered { Color32::from_gray(56) } else { Color32::from_gray(38) };
+    let plus_bg = if plus_hovered { flip(Color32::from_gray(56)) } else { flip(Color32::from_gray(38)) };
     painter.rect_filled(btn_plus, 3.0, plus_bg);
-    painter.rect_stroke(btn_plus, 3.0, Stroke::new(1.0_f32, if plus_hovered { Color32::from_gray(90) } else { Color32::from_gray(50) }));
+    painter.rect_stroke(btn_plus, 3.0, Stroke::new(1.0_f32, if plus_hovered { flip(Color32::from_gray(90)) } else { theme::border() }));
     painter.text(
         btn_plus.center(),
         Align2::CENTER_CENTER,
         "+",
         FontId::proportional(11.0),
-        if plus_hovered { Color32::WHITE } else { Color32::from_gray(210) },
+        if plus_hovered { theme::text() } else { theme::text_muted() },
     );
 
     // 倍率テキスト (例: 100%)
@@ -890,13 +935,13 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
         Align2::RIGHT_CENTER,
         format!("{}%", zoom_pct),
         FontId::monospace(9.5),
-        Color32::from_gray(185),
+        theme::text_muted(),
     );
 
     // 左下角
-    painter.rect_filled(corner_bl, 0.0, Color32::from_rgb(24, 26, 32));
-    painter.line_segment([corner_bl.left_top(), corner_bl.right_top()], Stroke::new(1.0_f32, Color32::from_gray(40)));
-    painter.line_segment([corner_bl.right_top(), corner_bl.right_bottom()], Stroke::new(1.0_f32, Color32::from_gray(40)));
+    painter.rect_filled(corner_bl, 0.0, flip(Color32::from_rgb(24, 26, 32)));
+    painter.line_segment([corner_bl.left_top(), corner_bl.right_top()], Stroke::new(1.0_f32, theme::border()));
+    painter.line_segment([corner_bl.right_top(), corner_bl.right_bottom()], Stroke::new(1.0_f32, theme::border()));
 }
 
 /// タイムライン右クリック時のコンテキストメニュー。

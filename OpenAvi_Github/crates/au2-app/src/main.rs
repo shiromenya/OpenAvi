@@ -2,9 +2,11 @@
 //! OpenAvi デスクトップアプリケーション。
 
 mod app;
+mod export;
 mod fonts;
 mod panels;
 mod state;
+mod theme;
 
 use std::sync::Arc;
 
@@ -803,5 +805,146 @@ mod tests {
                 });
             });
         }
+    }
+
+    /// UI 全体をヘッドレスで描画して PNG に保存するデザイン確認用スナップショット。
+    /// 環境変数 `OPENAVI_SNAPSHOT_DIR` が設定されているときのみ画像を出力する。
+    #[test]
+    fn ui_snapshot_png() {
+        let Some(dir) = std::env::var_os("OPENAVI_SNAPSHOT_DIR").map(std::path::PathBuf::from) else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).expect("create snapshot dir");
+        let (w, h) = (1440usize, 900usize);
+        let mut renderer = export::SceneSoftwareRenderer::new();
+        for (mode, tag) in [(theme::ThemeMode::Dark, "dark"), (theme::ThemeMode::Light, "light")] {
+            for (dialog, name) in [(0u8, "main"), (1, "newproj"), (2, "export"), (3, "plugins")] {
+                let mut st = state::EditorState::default();
+                st.load_exo(state::SAMPLE_EXO, None);
+                st.frame = 30;
+                let mut app = app::OpenAviApp::for_snapshot(st);
+                app.snapshot_open_dialog(dialog);
+                theme::set_mode_no_save(renderer.context(), mode);
+                let bg = if mode == theme::ThemeMode::Dark { [20, 21, 25, 255] } else { [241, 243, 247, 255] };
+                let rgba = renderer.paint_ui(w, h, bg, |ctx| app.update_ui(ctx));
+                let path = dir.join(format!("{name}_{tag}.png"));
+                image::save_buffer(&path, &rgba, w as u32, h as u32, image::ColorType::Rgba8).expect("save png");
+            }
+        }
+        theme::set_mode_no_save(renderer.context(), theme::ThemeMode::Dark);
+    }
+
+    #[test]
+    fn test_video_and_audio_export() {
+        let mut st = state::EditorState::default();
+        st.load_exo(state::SAMPLE_EXO, None);
+        // 図形・テキスト・画像を含むシーンでソフトウェアラスタライザの描画を確認
+        let mut renderer = export::SceneSoftwareRenderer::new();
+        let frame_rgba = renderer.render_frame(&mut st, 0, 320, 180, 30.0);
+        assert_eq!(frame_rgba.len(), 320 * 180 * 4);
+        // サンプルシーンには図形やテキストがあるため、完全な真っ黒 (RGB=0) ではないピクセルが存在することを確認
+        let non_black_pixels = frame_rgba
+            .chunks_exact(4)
+            .filter(|px| px[0] > 10 || px[1] > 10 || px[2] > 10)
+            .count();
+        assert!(non_black_pixels > 100, "ラスタライズされたフレームに図形・テキストが描画されていること (non_black={non_black_pixels})");
+
+        let out_dir = std::env::temp_dir().join("openavi_export_test");
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).expect("create export test dir");
+
+        // 1. WAV 音声書き出しテスト (FFmpeg 不要)
+        let wav_path = out_dir.join("test_out.wav");
+        let wav_cfg = export::ExportConfig {
+            output_path: wav_path.clone(),
+            format: export::ExportFormat::Wav,
+            quality: export::ExportQuality::High,
+            width: 320,
+            height: 180,
+            fps_num: 30,
+            fps_den: 1,
+            start_frame: 0,
+            end_frame: 29,
+            include_audio: true,
+        };
+        export::export_scene_blocking(&mut st, wav_cfg).expect("WAV export should succeed");
+        assert!(wav_path.is_file());
+        let wav_bytes = std::fs::read(&wav_path).expect("read wav");
+        assert!(wav_bytes.len() > 44 && &wav_bytes[0..4] == b"RIFF");
+
+        // 2. FFmpeg が利用可能な環境では MP4 動画書き出しを検証
+        if st.media.has_ffmpeg() {
+            let mp4_path = out_dir.join("test_out.mp4");
+            let mp4_cfg = export::ExportConfig {
+                output_path: mp4_path.clone(),
+                format: export::ExportFormat::Mp4,
+                quality: export::ExportQuality::Standard,
+                width: 320,
+                height: 180,
+                fps_num: 30,
+                fps_den: 1,
+                start_frame: 0,
+                end_frame: 14, // 0.5秒 (15フレーム)
+                include_audio: true,
+            };
+            export::export_scene_blocking(&mut st, mp4_cfg).expect("MP4 export should succeed");
+            assert!(mp4_path.is_file());
+            let meta = std::fs::metadata(&mp4_path).expect("mp4 metadata");
+            assert!(meta.len() > 500, "生成された MP4 ファイルが空でないこと (size={})", meta.len());
+        }
+
+        let _ = std::fs::remove_dir_all(&out_dir);
+    }
+
+    /// ダークモードとライトモードの切り替え、および各モードでの UI 描画が正常に行われること。
+    #[test]
+    fn test_dark_and_light_mode_rendering() {
+        let (w, h) = (800usize, 600usize);
+        let mut renderer = export::SceneSoftwareRenderer::new();
+
+        // 1. ダークモードでレンダリング
+        theme::set_mode_no_save(renderer.context(), theme::ThemeMode::Dark);
+        assert_eq!(theme::mode(), theme::ThemeMode::Dark);
+        assert!(theme::is_dark());
+
+        let mut st_dark = state::EditorState::default();
+        st_dark.load_exo(state::SAMPLE_EXO, None);
+        let mut app_dark = app::OpenAviApp::for_snapshot(st_dark);
+        let dark_rgba = renderer.paint_ui(w, h, [20, 21, 25, 255], |ctx| app_dark.update_ui(ctx));
+        assert_eq!(dark_rgba.len(), w * h * 4);
+
+        // 2. ライトモードでレンダリング
+        theme::set_mode_no_save(renderer.context(), theme::ThemeMode::Light);
+        assert_eq!(theme::mode(), theme::ThemeMode::Light);
+        assert!(!theme::is_dark());
+
+        let mut st_light = state::EditorState::default();
+        st_light.load_exo(state::SAMPLE_EXO, None);
+        let mut app_light = app::OpenAviApp::for_snapshot(st_light);
+        let light_rgba = renderer.paint_ui(w, h, [241, 243, 247, 255], |ctx| app_light.update_ui(ctx));
+        assert_eq!(light_rgba.len(), w * h * 4);
+
+        // 3. ライトモード時の平均輝度がダークモード時より明らかに高いことを検証
+        let dark_avg_lum: u64 = dark_rgba
+            .chunks_exact(4)
+            .map(|px| (px[0] as u64 + px[1] as u64 + px[2] as u64) / 3)
+            .sum::<u64>()
+            / (w * h) as u64;
+        let light_avg_lum: u64 = light_rgba
+            .chunks_exact(4)
+            .map(|px| (px[0] as u64 + px[1] as u64 + px[2] as u64) / 3)
+            .sum::<u64>()
+            / (w * h) as u64;
+
+        assert!(
+            light_avg_lum > dark_avg_lum + 50,
+            "ライトモードの平均輝度 ({light_avg_lum}) はダークモード ({dark_avg_lum}) より明るいこと"
+        );
+
+        // 4. トグル動作の確認
+        let toggled = theme::mode().toggled();
+        assert_eq!(toggled, theme::ThemeMode::Dark);
+        theme::set_mode_no_save(renderer.context(), toggled);
+        assert!(theme::is_dark());
     }
 }

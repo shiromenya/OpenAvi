@@ -8,6 +8,7 @@ use eframe::egui::{
 };
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 
+use crate::export::{ExportConfig, ExportFormat, ExportQuality, ExportSession};
 use crate::panels;
 use crate::state::{
     default_projects_dir, EditorState, NewProjectConfig, ProjectFormat, ProjectPreset, SAMPLE_EXO,
@@ -50,7 +51,76 @@ pub struct OpenAviApp {
     show_plugins: bool,
     show_about: bool,
     new_project_modal: NewProjectModalState,
+    export_modal: ExportModalState,
     last_title: String,
+}
+
+/// 動画・音声書き出し（エクスポート）モーダルダイアログの状態。
+pub struct ExportModalState {
+    pub is_open: bool,
+    pub config: ExportConfig,
+    pub use_content_range: bool,
+    pub session: Option<ExportSession>,
+    pub finished_path: Option<PathBuf>,
+    pub error_message: Option<String>,
+}
+
+impl Default for ExportModalState {
+    fn default() -> Self {
+        let default_dir = au2_platform::desktop_dir().unwrap_or_else(default_projects_dir);
+        Self {
+            is_open: false,
+            config: ExportConfig {
+                output_path: default_dir.join("output.mp4"),
+                format: ExportFormat::Mp4,
+                quality: ExportQuality::High,
+                width: 1920,
+                height: 1080,
+                fps_num: 30,
+                fps_den: 1,
+                start_frame: 0,
+                end_frame: 299,
+                include_audio: true,
+            },
+            use_content_range: true,
+            session: None,
+            finished_path: None,
+            error_message: None,
+        }
+    }
+}
+
+impl ExportModalState {
+    pub fn open_for_state(&mut self, st: &EditorState) {
+        let base_dir = st
+            .file_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .or_else(au2_platform::desktop_dir)
+            .unwrap_or_else(default_projects_dir);
+        let stem = st
+            .file_path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "output".to_string());
+        let ext = self.config.format.extension();
+        let default_path = base_dir.join(format!("{stem}.{ext}"));
+
+        let mut cfg = ExportConfig::from_scene(&st.scene, default_path);
+        cfg.format = self.config.format;
+        cfg.quality = self.config.quality;
+        cfg.include_audio = self.config.include_audio;
+        if !self.use_content_range {
+            cfg.end_frame = st.last_frame();
+        }
+        self.config = cfg;
+        self.session = None;
+        self.finished_path = None;
+        self.error_message = None;
+        self.is_open = true;
+    }
 }
 
 /// 新規プロジェクト作成モーダルダイアログの状態。
@@ -287,6 +357,18 @@ pub fn show_native_unsaved_confirm(doc_name: &str) -> ConfirmResult {
     }
 }
 
+/// 残り秒数を「1時間02分」「3分05秒」「12秒」の形式に整形します。
+fn format_remaining(secs: f32) -> String {
+    let s = secs.max(0.0).ceil() as u64;
+    if s >= 3600 {
+        format!("{}時間{:02}分", s / 3600, (s % 3600) / 60)
+    } else if s >= 60 {
+        format!("{}分{:02}秒", s / 60, s % 60)
+    } else {
+        format!("{s}秒")
+    }
+}
+
 fn default_dock() -> DockState<Tab> {
     let mut dock = DockState::new(vec![Tab::Preview]);
     let surface = dock.main_surface_mut();
@@ -300,46 +382,41 @@ const SC_NEW: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::
 const SC_OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
 const SC_IMPORT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::I);
 const SC_SAVE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
+const SC_EXPORT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::E);
 
 impl OpenAviApp {
+    /// ヘッドレスのスナップショットテスト用に、ウィンドウ無しでアプリ状態を構築します。
+    #[cfg(test)]
+    pub(crate) fn for_snapshot(st: EditorState) -> Self {
+        Self {
+            dock: default_dock(),
+            layout: LayoutMode::Docked,
+            st,
+            gpu_info: "snapshot".into(),
+            show_plugins: false,
+            show_about: false,
+            new_project_modal: NewProjectModalState::default(),
+            export_modal: ExportModalState::default(),
+            last_title: String::new(),
+        }
+    }
+
+    /// スナップショット用に各種ダイアログを開きます（1 = 新規プロジェクト, 2 = 書き出し, 3 = プラグイン管理）。
+    #[cfg(test)]
+    pub(crate) fn snapshot_open_dialog(&mut self, which: u8) {
+        match which {
+            1 => self.new_project_modal.is_open = true,
+            2 => self.export_modal.open_for_state(&self.st),
+            3 => self.show_plugins = true,
+            _ => {}
+        }
+    }
+
     pub fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>) -> Self {
         crate::fonts::install_japanese_font(&cc.egui_ctx);
 
-        // プロ向け動画編集ソフトに最適化した洗練されたダークテーマ
-        let mut visuals = egui::Visuals::dark();
-        visuals.panel_fill = Color32::from_rgb(20, 21, 25);
-        visuals.window_fill = Color32::from_rgb(26, 28, 34);
-        visuals.extreme_bg_color = Color32::from_rgb(13, 14, 17);
-        visuals.faint_bg_color = Color32::from_rgb(28, 30, 36);
-        visuals.selection.bg_fill = Color32::from_rgb(37, 99, 235);
-        visuals.selection.stroke = Stroke::new(1.0_f32, Color32::from_rgb(96, 165, 250));
-
-        let rounding = egui::Rounding::same(4.0);
-        visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(24, 25, 30);
-        visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, Color32::from_gray(38));
-        visuals.widgets.noninteractive.rounding = rounding;
-
-        visuals.widgets.inactive.bg_fill = Color32::from_rgb(34, 37, 46);
-        visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, Color32::from_gray(48));
-        visuals.widgets.inactive.rounding = rounding;
-
-        visuals.widgets.hovered.bg_fill = Color32::from_rgb(46, 52, 65);
-        visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(96, 165, 250));
-        visuals.widgets.hovered.rounding = rounding;
-
-        visuals.widgets.active.bg_fill = Color32::from_rgb(37, 99, 235);
-        visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
-        visuals.widgets.active.rounding = rounding;
-
-        visuals.widgets.open.bg_fill = Color32::from_rgb(38, 42, 52);
-        visuals.widgets.open.rounding = rounding;
-        cc.egui_ctx.set_visuals(visuals);
-
-        let mut style = (*cc.egui_ctx.style()).clone();
-        style.spacing.item_spacing = vec2(8.0, 6.0);
-        style.spacing.button_padding = vec2(9.0, 5.0);
-        style.spacing.window_margin = egui::Margin::same(8.0);
-        cc.egui_ctx.set_style(style);
+        // 保存済みのテーマ（ダーク / ライト）を復元して適用
+        crate::theme::init(&cc.egui_ctx);
 
         let gpu_info = cc
             .wgpu_render_state
@@ -363,6 +440,7 @@ impl OpenAviApp {
             show_plugins: false,
             show_about: false,
             new_project_modal: NewProjectModalState::default(),
+            export_modal: ExportModalState::default(),
             last_title: String::new(),
         }
     }
@@ -448,6 +526,13 @@ impl TabViewer for Viewer<'_> {
 
 impl eframe::App for OpenAviApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.update_ui(ctx);
+    }
+}
+
+impl OpenAviApp {
+    /// 1 フレーム分の UI 構築（`eframe::Frame` に依存しないため、ヘッドレスのスナップショットテストからも呼べる）。
+    pub(crate) fn update_ui(&mut self, ctx: &egui::Context) {
         // ウィンドウ閉じる要求 (Alt+F4 や [X] ボタン) を検知
         if ctx.input(|i| i.viewport().close_requested()) {
             if self.st.dirty {
@@ -482,6 +567,9 @@ impl eframe::App for OpenAviApp {
         if ctx.input_mut(|i| i.consume_shortcut(&SC_NEW)) {
             self.new_project_modal.is_open = true;
         }
+        if ctx.input_mut(|i| i.consume_shortcut(&SC_EXPORT)) {
+            self.export_modal.open_for_state(&self.st);
+        }
 
         handle_shortcuts(ctx, &mut self.st);
         self.st.tick();
@@ -514,6 +602,7 @@ impl eframe::App for OpenAviApp {
 
         if self.show_about {
             egui::Window::new("OpenAvi について")
+                .frame(egui::Frame::window(&ctx.style()).fill(crate::theme::surface()))
                 .open(&mut self.show_about)
                 .collapsible(false)
                 .resizable(false)
@@ -529,6 +618,8 @@ impl eframe::App for OpenAviApp {
 
         // 新規プロジェクト事前設定モーダルダイアログ
         self.new_project_dialog(ctx);
+        // 動画・音声の書き出しモーダルダイアログ
+        self.export_dialog(ctx);
     }
 }
 
@@ -541,9 +632,9 @@ impl OpenAviApp {
                     ui.add_space(2.0);
                     toggle_switch_ui(ui, &mut self.st.autosave.enabled);
                     let label_color = if self.st.autosave.enabled {
-                        Color32::from_rgb(147, 197, 253)
+                        crate::theme::accent_text()
                     } else {
-                        Color32::from_gray(160)
+                        crate::theme::text_muted()
                     };
                     let text = if self.st.autosave.enabled {
                         RichText::new("自動保存: ON").color(label_color).strong().size(12.0)
@@ -618,6 +709,20 @@ impl OpenAviApp {
                         ui.close_menu();
                         self.st.export_exo_dialog();
                     }
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("🎬 動画・音声の書き出し (MP4 / AVI / GIF / WAV)...")
+                                    .strong()
+                                    .color(crate::theme::accent_text()),
+                            )
+                            .shortcut_text(ctx.format_shortcut(&SC_EXPORT)),
+                        )
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        self.export_modal.open_for_state(&self.st);
+                    }
                     ui.separator();
                     if ui.button("🔄 サンプルプロジェクトを再読み込み").clicked() {
                         self.st.load_exo(SAMPLE_EXO, None);
@@ -642,6 +747,14 @@ impl OpenAviApp {
                     ui.separator();
                     ui.radio_value(&mut self.layout, LayoutMode::Docked, "シングルウィンドウ（ドッキング）");
                     ui.radio_value(&mut self.layout, LayoutMode::Separated, "マルチウィンドウ（AviUtl 風）");
+                    ui.separator();
+                    let cur_mode = crate::theme::mode();
+                    let mut sel_mode = cur_mode;
+                    ui.radio_value(&mut sel_mode, crate::theme::ThemeMode::Dark, "🌙 ダークモード");
+                    ui.radio_value(&mut sel_mode, crate::theme::ThemeMode::Light, "☀ ライトモード");
+                    if sel_mode != cur_mode {
+                        crate::theme::set_mode(ctx, sel_mode);
+                    }
                     ui.separator();
                     if ui.button("レイアウトを初期化").clicked() {
                         self.dock = default_dock();
@@ -693,7 +806,7 @@ impl OpenAviApp {
                     ui.menu_button(
                         egui::RichText::new(format!("🎬 シーン: {}", cur_name))
                             .strong()
-                            .color(Color32::from_rgb(147, 197, 253)),
+                            .color(crate::theme::accent_text()),
                         |ui| {
                             for (sc_id, sc_name, cnt) in scene_list {
                                 let is_cur = sc_name == cur_name;
@@ -723,6 +836,39 @@ impl OpenAviApp {
                         }
                     }
                 }
+
+                // メニューバー右端に「🎬 動画書き出し」と「🌙 / ☀ テーマ切り替え」ボタンを配置
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(4.0);
+                    let exp_btn = egui::Button::new(
+                        RichText::new("🎬 動画書き出し")
+                            .color(Color32::WHITE)
+                            .strong()
+                            .size(12.5),
+                    )
+                    .min_size(vec2(110.0, 26.0))
+                    .fill(crate::theme::accent());
+                    if ui
+                        .add(exp_btn)
+                        .on_hover_text("現在のシーンを動画 (MP4 / AVI / MOV / WebM / GIF) または音声 (WAV) として書き出します (Ctrl+E)")
+                        .clicked()
+                    {
+                        self.export_modal.open_for_state(&self.st);
+                    }
+
+                    ui.add_space(6.0);
+                    let theme_label = if crate::theme::is_dark() { "🌙 ダーク" } else { "☀ ライト" };
+                    let next_mode = crate::theme::mode().toggled();
+                    let theme_btn = egui::Button::new(RichText::new(theme_label).size(12.0))
+                        .min_size(vec2(76.0, 26.0));
+                    if ui
+                        .add(theme_btn)
+                        .on_hover_text(format!("クリックで{}に切り替えます", next_mode.label()))
+                        .clicked()
+                    {
+                        crate::theme::set_mode(ctx, next_mode);
+                    }
+                });
             });
         });
     }
@@ -745,7 +891,7 @@ impl OpenAviApp {
                 ui.monospace(format!("{}x{} {:.3}fps", s.width, s.height, s.frame_rate.as_f64()));
                 ui.separator();
                 if !self.st.warnings.is_empty() {
-                    ui.colored_label(Color32::YELLOW, format!("⚠ 警告 {}", self.st.warnings.len()))
+                    ui.colored_label(crate::theme::warn_text(), format!("⚠ 警告 {}", self.st.warnings.len()))
                         .on_hover_text(self.st.warnings.join("\n"));
                     ui.separator();
                 }
@@ -771,11 +917,12 @@ impl OpenAviApp {
             _ => None,
         };
 
+        let (banner_bg, banner_stroke) = crate::theme::warn_banner();
         egui::TopBottomPanel::top("ffmpeg_banner")
             .frame(
                 egui::Frame::none()
-                    .fill(Color32::from_rgb(48, 38, 16))
-                    .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(230, 170, 60)))
+                    .fill(banner_bg)
+                    .stroke(egui::Stroke::new(1.0_f32, banner_stroke))
                     .inner_margin(egui::Margin::symmetric(12.0, 6.0)),
             )
             .show(ctx, |ui| {
@@ -783,24 +930,30 @@ impl OpenAviApp {
                     if running {
                         ui.spinner();
                         ui.colored_label(
-                            Color32::from_rgb(255, 210, 120),
+                            crate::theme::warn_text(),
                             "FFmpeg をダウンロード中です（約 80MB）。完了すると動画・音声が自動で使えるようになります...",
                         );
                     } else {
                         ui.colored_label(
-                            Color32::from_rgb(255, 210, 120),
+                            crate::theme::warn_text(),
                             "⚠ 動画・音声のデコーダー (FFmpeg) が見つかりません。動画の映像と MP3 等の音声を再生するには FFmpeg が必要です",
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let dl_btn = egui::Button::new(
+                                egui::RichText::new("⬇ FFmpeg を自動ダウンロード")
+                                    .color(Color32::WHITE)
+                                    .strong(),
+                            )
+                            .fill(crate::theme::accent());
                             if ui
-                                .button(egui::RichText::new("⬇ FFmpeg を自動ダウンロード").color(Color32::WHITE).strong())
+                                .add(dl_btn)
                                 .on_hover_text("gyan.dev 配布の FFmpeg をダウンロードし %LOCALAPPDATA%\\OpenAvi\\bin に導入します")
                                 .clicked()
                             {
                                 self.st.start_ffmpeg_download();
                             }
                             if let Some(e) = &failed {
-                                ui.colored_label(Color32::from_rgb(255, 120, 120), format!("失敗: {e}"));
+                                ui.colored_label(crate::theme::danger_text(), format!("失敗: {e}"));
                             }
                         });
                     }
@@ -817,17 +970,18 @@ impl OpenAviApp {
         let first = missing[0].clone();
         let count = missing.len();
 
+        let (banner_bg, banner_stroke) = crate::theme::error_banner();
         egui::TopBottomPanel::top("missing_media_banner")
             .frame(
                 egui::Frame::none()
-                    .fill(Color32::from_rgb(50, 24, 24))
-                    .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(220, 70, 70)))
+                    .fill(banner_bg)
+                    .stroke(egui::Stroke::new(1.0_f32, banner_stroke))
                     .inner_margin(egui::Margin::symmetric(12.0, 6.0)),
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.colored_label(
-                        Color32::from_rgb(255, 120, 120),
+                        crate::theme::danger_text(),
                         format!(
                             "⚠ プロジェクト内のメディア（{}）が見つかりません (リンク切れ: {} 件) - 「{}」",
                             first.kind_name,
@@ -837,12 +991,14 @@ impl OpenAviApp {
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let is_audio = first.kind_name.contains("音声");
+                        let relink_btn = egui::Button::new(
+                            egui::RichText::new("📁 素材フォルダを指定して一括割り当て...")
+                                .color(Color32::WHITE)
+                                .strong(),
+                        )
+                        .fill(crate::theme::accent());
                         if ui
-                            .button(
-                                egui::RichText::new("📁 素材フォルダを指定して一括割り当て...")
-                                    .color(Color32::WHITE)
-                                    .strong(),
-                            )
+                            .add(relink_btn)
                             .on_hover_text(
                                 "AviUtl のプロジェクト(.aup)は音声・画像・動画の本体を含まず、元の PC 上のパスだけを保存しています。\n素材が入ったフォルダを指定すると、ファイル名から全ての素材を自動で割り当てます。",
                             )
@@ -871,6 +1027,7 @@ impl OpenAviApp {
         }
         let mut open = self.show_plugins;
         egui::Window::new("プラグイン・スクリプト管理")
+            .frame(egui::Frame::window(&ctx.style()).fill(crate::theme::surface()))
             .open(&mut open)
             .default_size([680.0, 420.0])
             .show(ctx, |ui| {
@@ -907,9 +1064,9 @@ impl OpenAviApp {
                                     ui.label(p.arch.label());
                                     ui.vertical(|ui| {
                                         let color = match p.status {
-                                            SupportStatus::Supported => Color32::from_rgb(100, 220, 120),
-                                            SupportStatus::PartialScript => Color32::from_rgb(240, 200, 90),
-                                            _ => Color32::from_rgb(180, 180, 195),
+                                            SupportStatus::Supported => crate::theme::ok_text(),
+                                            SupportStatus::PartialScript => crate::theme::warn_text(),
+                                            _ => crate::theme::text_muted(),
                                         };
                                         ui.label(RichText::new(p.status.summary()).color(color));
                                         if !p.description.is_empty() {
@@ -918,14 +1075,15 @@ impl OpenAviApp {
                                         if !p.exports.is_empty() {
                                             ui.small(
                                                 RichText::new(format!("エクスポートシンボル: {}", p.exports.join(", ")))
-                                                    .color(Color32::from_rgb(147, 197, 253)),
+                                                    .color(crate::theme::accent_text()),
                                             );
                                         }
                                         for e in &p.entries {
+                                            let clean_entry_name = au2_plugin::clean_script_name(&e.display_name);
                                             let tracks: Vec<&str> = e.tracks.iter().map(|t| t.name.as_str()).collect();
                                             ui.small(format!(
                                                 "・{} (トラック: [{}])",
-                                                e.display_name,
+                                                clean_entry_name,
                                                 tracks.join(", ")
                                             ));
                                         }
@@ -1006,14 +1164,14 @@ impl OpenAviApp {
             return;
         }
 
-        // 半透明の暗い背景オーバーレイ（画面全体のクリックをガード）
+        // 半透明の背景オーバーレイ（画面全体のクリックをガード）
         egui::Area::new(egui::Id::new("new_project_backdrop"))
             .interactable(true)
             .order(egui::Order::Middle)
             .fixed_pos([0.0, 0.0])
             .show(ctx, |ui| {
                 let screen_rect = ctx.screen_rect();
-                ui.painter().rect_filled(screen_rect, 0.0, Color32::from_black_alpha(160));
+                ui.painter().rect_filled(screen_rect, 0.0, crate::theme::backdrop());
             });
 
         let mut close_modal = false;
@@ -1021,6 +1179,7 @@ impl OpenAviApp {
 
         egui::Window::new("📄 新規プロジェクトの作成")
             .id(egui::Id::new("new_project_modal_window"))
+            .frame(egui::Frame::window(&ctx.style()).fill(crate::theme::surface()))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -1030,7 +1189,7 @@ impl OpenAviApp {
                 ui.spacing_mut().item_spacing = vec2(10.0, 10.0);
 
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("🎬").size(28.0).color(Color32::from_rgb(96, 165, 250)));
+                    ui.label(RichText::new("🎬").size(28.0).color(crate::theme::accent_text()));
                     ui.vertical(|ui| {
                         ui.strong(RichText::new("新規プロジェクトの設定").size(15.0));
                         ui.weak("プロジェクト名とファイル形式、および自動保存を設定して編集を開始します。");
@@ -1041,8 +1200,8 @@ impl OpenAviApp {
 
                 // 1. プロジェクト基本情報（名前・保存先フォルダー・形式）
                 egui::Frame::none()
-                    .fill(Color32::from_rgb(20, 22, 27))
-                    .stroke(Stroke::new(1.0_f32, Color32::from_gray(38)))
+                    .fill(crate::theme::surface_alt())
+                    .stroke(Stroke::new(1.0_f32, crate::theme::border()))
                     .rounding(egui::Rounding::same(6.0))
                     .inner_margin(egui::Margin::same(10.0))
                     .show(ui, |ui| {
@@ -1115,14 +1274,14 @@ impl OpenAviApp {
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("保存先パス:").weak().size(11.0));
-                            ui.label(RichText::new(target_display.display().to_string()).color(Color32::from_rgb(147, 197, 253)).size(11.0));
+                            ui.label(RichText::new(target_display.display().to_string()).color(crate::theme::accent_text()).size(11.0));
                         });
                     });
 
                 // 2. 映像フォーマット（プリセット & 解像度・フレームレート）
                 egui::Frame::none()
-                    .fill(Color32::from_rgb(20, 22, 27))
-                    .stroke(Stroke::new(1.0_f32, Color32::from_gray(38)))
+                    .fill(crate::theme::surface_alt())
+                    .stroke(Stroke::new(1.0_f32, crate::theme::border()))
                     .rounding(egui::Rounding::same(6.0))
                     .inner_margin(egui::Margin::same(10.0))
                     .show(ui, |ui| {
@@ -1178,7 +1337,7 @@ impl OpenAviApp {
                                         self.new_project_modal.preset = ProjectPreset::Custom;
                                     }
                                     let fps_val = self.new_project_modal.fps_num as f64 / self.new_project_modal.fps_den.max(1) as f64;
-                                    ui.label(RichText::new(format!("= {:.3} fps", fps_val)).color(Color32::from_rgb(147, 197, 253)));
+                                    ui.label(RichText::new(format!("= {:.3} fps", fps_val)).color(crate::theme::accent_text()));
                                 });
                                 ui.end_row();
 
@@ -1195,15 +1354,15 @@ impl OpenAviApp {
 
                 // 3. 💾 自動保存設定
                 egui::Frame::none()
-                    .fill(Color32::from_rgb(20, 22, 27))
-                    .stroke(Stroke::new(1.0_f32, Color32::from_gray(38)))
+                    .fill(crate::theme::surface_alt())
+                    .stroke(Stroke::new(1.0_f32, crate::theme::border()))
                     .rounding(egui::Rounding::same(6.0))
                     .inner_margin(egui::Margin::same(10.0))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.checkbox(&mut self.new_project_modal.autosave_enabled, RichText::new("💾 編集時の自動保存を有効にする").strong());
                             if self.new_project_modal.autosave_enabled {
-                                ui.label(RichText::new("推奨").color(Color32::from_rgb(100, 220, 120)).size(11.0));
+                                ui.label(RichText::new("推奨").color(crate::theme::ok_text()).size(11.0));
                             }
                         });
                         ui.add_space(2.0);
@@ -1213,7 +1372,7 @@ impl OpenAviApp {
 
                 // エラーメッセージがある場合は表示
                 if let Some(err) = &self.new_project_modal.error_message {
-                    ui.colored_label(Color32::from_rgb(255, 120, 120), format!("⚠ {err}"));
+                    ui.colored_label(crate::theme::danger_text(), format!("⚠ {err}"));
                 }
 
                 ui.separator();
@@ -1224,15 +1383,17 @@ impl OpenAviApp {
                         RichText::new("🚀 作成して編集を開始")
                             .color(Color32::WHITE)
                             .strong()
-                            .size(14.0),
+                            .size(13.5),
                     )
-                    .fill(Color32::from_rgb(37, 99, 235));
+                    .min_size(vec2(170.0, 32.0))
+                    .fill(crate::theme::accent());
 
                     if ui.add(create_btn).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
                         do_create = true;
                     }
 
-                    if ui.button("キャンセル").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
+                    let cancel_btn = egui::Button::new("キャンセル").min_size(vec2(90.0, 32.0));
+                    if ui.add(cancel_btn).clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
                         close_modal = true;
                     }
                 });
@@ -1273,6 +1434,424 @@ impl OpenAviApp {
         if close_modal {
             self.new_project_modal.is_open = false;
             self.new_project_modal.error_message = None;
+        }
+    }
+
+    /// 動画・音声の書き出し（エクスポート / レンダリング）設定＆進捗モーダルダイアログ。
+    fn export_dialog(&mut self, ctx: &egui::Context) {
+        if !self.export_modal.is_open {
+            return;
+        }
+
+        // 書き出しセッションが実行中なら 1 ティックにつき数フレーム進める
+        if let Some(mut session) = self.export_modal.session.take() {
+            match session.step_frames(&mut self.st, 1000) {
+                Ok(true) => {
+                    let out_path = session.config.output_path.clone();
+                    let elapsed = session.started_at.elapsed().as_secs_f32();
+                    self.st.status = format!(
+                        "動画を書き出しました: {} ({elapsed:.1}秒)",
+                        out_path.display()
+                    );
+                    self.export_modal.finished_path = Some(out_path);
+                    self.export_modal.error_message = None;
+                }
+                Ok(false) => {
+                    self.export_modal.session = Some(session);
+                    ctx.request_repaint();
+                }
+                Err(e) => {
+                    self.export_modal.error_message = Some(e);
+                }
+            }
+        }
+
+        egui::Area::new(egui::Id::new("export_modal_backdrop"))
+            .interactable(true)
+            .order(egui::Order::Middle)
+            .fixed_pos([0.0, 0.0])
+            .show(ctx, |ui| {
+                let screen_rect = ctx.screen_rect();
+                ui.painter().rect_filled(screen_rect, 0.0, crate::theme::backdrop());
+            });
+
+        let mut close_modal = false;
+        let mut do_start = false;
+        let mut do_cancel = false;
+        let is_running = self.export_modal.session.is_some();
+        let has_ffmpeg = self.st.media.has_ffmpeg();
+
+        egui::Window::new("🎬 動画・音声の書き出し (エクスポート)")
+            .id(egui::Id::new("export_modal_window"))
+            .frame(egui::Frame::window(&ctx.style()).fill(crate::theme::surface()))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .order(egui::Order::Foreground)
+            .fixed_size([560.0, 500.0])
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing = vec2(10.0, 9.0);
+
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("🎞").size(26.0).color(crate::theme::accent_text()));
+                    ui.vertical(|ui| {
+                        ui.strong(RichText::new("動画・音声ファイルの書き出し").size(15.0));
+                        ui.weak("現在のタイムライン（図形・テキスト・画像・動画・音声・スクリプト効果）をファイルに出力します。");
+                    });
+                });
+
+                ui.separator();
+
+                ui.add_enabled_ui(!is_running, |ui| {
+                    // 1. 出力形式と出力先ファイルパス
+                    egui::Frame::none()
+                        .fill(crate::theme::surface_alt())
+                        .stroke(Stroke::new(1.0_f32, crate::theme::border()))
+                        .rounding(egui::Rounding::same(6.0))
+                        .inner_margin(egui::Margin::same(10.0))
+                        .show(ui, |ui| {
+                            egui::Grid::new("export-format-grid")
+                                .num_columns(2)
+                                .spacing([12.0, 8.0])
+                                .show(ui, |ui| {
+                                    ui.label(RichText::new("出力フォーマット:").strong());
+                                    let prev_fmt = self.export_modal.config.format;
+                                    egui::ComboBox::from_id_salt("export-format-combo")
+                                        .selected_text(self.export_modal.config.format.label())
+                                        .width(340.0)
+                                        .show_ui(ui, |ui| {
+                                            for &fmt in ExportFormat::ALL {
+                                                ui.selectable_value(
+                                                    &mut self.export_modal.config.format,
+                                                    fmt,
+                                                    fmt.label(),
+                                                );
+                                            }
+                                        });
+                                    if self.export_modal.config.format != prev_fmt {
+                                        let new_ext = self.export_modal.config.format.extension();
+                                        self.export_modal.config.output_path.set_extension(new_ext);
+                                    }
+                                    ui.end_row();
+
+                                    ui.label(RichText::new("出力先ファイル:").strong());
+                                    ui.horizontal(|ui| {
+                                        let mut path_str = self.export_modal.config.output_path.display().to_string();
+                                        if ui
+                                            .add(
+                                                egui::TextEdit::singleline(&mut path_str)
+                                                    .desired_width(270.0),
+                                            )
+                                            .changed()
+                                        {
+                                            self.export_modal.config.output_path = PathBuf::from(path_str);
+                                        }
+                                        if ui.button("📁 参照...").clicked() {
+                                            let ext = self.export_modal.config.format.extension();
+                                            let mut dlg = rfd::FileDialog::new()
+                                                .set_title("書き出し先のファイルを指定")
+                                                .add_filter(self.export_modal.config.format.label(), &[ext]);
+                                            if let Some(parent) = self.export_modal.config.output_path.parent() {
+                                                if parent.exists() {
+                                                    dlg = dlg.set_directory(parent);
+                                                }
+                                            }
+                                            if let Some(fname) = self
+                                                .export_modal
+                                                .config
+                                                .output_path
+                                                .file_name()
+                                                .and_then(|n| n.to_str())
+                                            {
+                                                dlg = dlg.set_file_name(fname);
+                                            }
+                                            if let Some(picked) = dlg.save_file() {
+                                                self.export_modal.config.output_path = picked;
+                                            }
+                                        }
+                                    });
+                                    ui.end_row();
+                                });
+                        });
+
+                    // 2. 解像度・フレームレート・画質・フレーム範囲
+                    egui::Frame::none()
+                        .fill(crate::theme::surface_alt())
+                        .stroke(Stroke::new(1.0_f32, crate::theme::border()))
+                        .rounding(egui::Rounding::same(6.0))
+                        .inner_margin(egui::Margin::same(10.0))
+                        .show(ui, |ui| {
+                            egui::Grid::new("export-video-params-grid")
+                                .num_columns(2)
+                                .spacing([12.0, 7.0])
+                                .show(ui, |ui| {
+                                    if !self.export_modal.config.format.is_audio_only() {
+                                        ui.label("出力解像度:");
+                                        ui.horizontal(|ui| {
+                                            ui.add(
+                                                egui::DragValue::new(&mut self.export_modal.config.width)
+                                                    .range(16..=4096)
+                                                    .speed(2),
+                                            );
+                                            ui.label("×");
+                                            ui.add(
+                                                egui::DragValue::new(&mut self.export_modal.config.height)
+                                                    .range(16..=4096)
+                                                    .speed(2),
+                                            );
+                                            ui.label(RichText::new("px").weak());
+                                            if ui.small_button("シーン設定と同じ").clicked() {
+                                                self.export_modal.config.width =
+                                                    ((self.st.scene.settings.width.max(16) + 1) / 2) * 2;
+                                                self.export_modal.config.height =
+                                                    ((self.st.scene.settings.height.max(16) + 1) / 2) * 2;
+                                            }
+                                            if ui.small_button("1080p").clicked() {
+                                                self.export_modal.config.width = 1920;
+                                                self.export_modal.config.height = 1080;
+                                            }
+                                            if ui.small_button("720p").clicked() {
+                                                self.export_modal.config.width = 1280;
+                                                self.export_modal.config.height = 720;
+                                            }
+                                        });
+                                        ui.end_row();
+
+                                        ui.label("フレームレート:");
+                                        ui.horizontal(|ui| {
+                                            ui.add(
+                                                egui::DragValue::new(&mut self.export_modal.config.fps_num)
+                                                    .range(1..=240),
+                                            );
+                                            ui.label("/");
+                                            ui.add(
+                                                egui::DragValue::new(&mut self.export_modal.config.fps_den)
+                                                    .range(1..=1001),
+                                            );
+                                            let fps = self.export_modal.config.fps_f64();
+                                            ui.label(
+                                                RichText::new(format!("= {fps:.2} fps"))
+                                                    .color(crate::theme::accent_text()),
+                                            );
+                                            if ui.small_button("60fps").clicked() {
+                                                self.export_modal.config.fps_num = 60;
+                                                self.export_modal.config.fps_den = 1;
+                                            }
+                                            if ui.small_button("30fps").clicked() {
+                                                self.export_modal.config.fps_num = 30;
+                                                self.export_modal.config.fps_den = 1;
+                                            }
+                                            if ui.small_button("24fps").clicked() {
+                                                self.export_modal.config.fps_num = 24;
+                                                self.export_modal.config.fps_den = 1;
+                                            }
+                                        });
+                                        ui.end_row();
+
+                                        ui.label("画質設定:");
+                                        ui.horizontal(|ui| {
+                                            for q in [
+                                                ExportQuality::High,
+                                                ExportQuality::Standard,
+                                                ExportQuality::Compact,
+                                            ] {
+                                                ui.radio_value(&mut self.export_modal.config.quality, q, q.label());
+                                            }
+                                        });
+                                        ui.end_row();
+                                    }
+
+                                    ui.label("書き出し範囲:");
+                                    ui.vertical(|ui| {
+                                        let content_end = self.st.scene.content_end().saturating_sub(1);
+                                        let scene_last = self.st.last_frame();
+                                        ui.horizontal(|ui| {
+                                            ui.label("開始フレーム:");
+                                            let mut start_1 = self.export_modal.config.start_frame + 1;
+                                            if ui
+                                                .add(egui::DragValue::new(&mut start_1).range(1..=(scene_last + 1)))
+                                                .changed()
+                                            {
+                                                self.export_modal.config.start_frame = start_1.saturating_sub(1);
+                                                if self.export_modal.config.end_frame < self.export_modal.config.start_frame {
+                                                    self.export_modal.config.end_frame = self.export_modal.config.start_frame;
+                                                }
+                                            }
+                                            ui.label("〜 終了フレーム:");
+                                            let mut end_1 = self.export_modal.config.end_frame + 1;
+                                            if ui
+                                                .add(
+                                                    egui::DragValue::new(&mut end_1)
+                                                        .range((self.export_modal.config.start_frame + 1)..=(scene_last + 10000)),
+                                                )
+                                                .changed()
+                                            {
+                                                self.export_modal.config.end_frame = end_1.saturating_sub(1);
+                                            }
+                                        });
+                                        ui.horizontal(|ui| {
+                                            if ui
+                                                .small_button(format!("オブジェクト終端まで (1〜{}F)", content_end + 1))
+                                                .clicked()
+                                            {
+                                                self.export_modal.config.start_frame = 0;
+                                                self.export_modal.config.end_frame = content_end;
+                                            }
+                                            if ui
+                                                .small_button(format!("シーン全体 (1〜{}F)", scene_last + 1))
+                                                .clicked()
+                                            {
+                                                self.export_modal.config.start_frame = 0;
+                                                self.export_modal.config.end_frame = scene_last;
+                                            }
+                                            let total_f = self.export_modal.config.total_frames();
+                                            let dur_sec = total_f as f64 / self.export_modal.config.fps_f64().max(1.0);
+                                            ui.weak(format!("(計 {total_f} フレーム / 約 {dur_sec:.1} 秒)"));
+                                        });
+                                    });
+                                    ui.end_row();
+
+                                    if !self.export_modal.config.format.is_audio_only()
+                                        && self.export_modal.config.format.supports_audio()
+                                    {
+                                        ui.label("音声出力:");
+                                        ui.checkbox(
+                                            &mut self.export_modal.config.include_audio,
+                                            "音声トラックを合成して動画に含める (44.1kHz ステレオ)",
+                                        );
+                                        ui.end_row();
+                                    }
+                                });
+                        });
+                });
+
+                // 3. FFmpeg 未導入警告 / 進捗バー / 完了通知 / エラー表示
+                if !has_ffmpeg && !self.export_modal.config.format.is_audio_only() {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(
+                            crate::theme::warn_text(),
+                            "⚠ 動画書き出しには FFmpeg が必要です。",
+                        );
+                        if ui.button("⬇ FFmpeg を自動ダウンロード").clicked() {
+                            self.st.start_ffmpeg_download();
+                        }
+                    });
+                }
+
+                if let Some(session) = &self.export_modal.session {
+                    let ratio = session.progress_ratio();
+                    let done = session.current_frame.saturating_sub(session.config.start_frame);
+                    let total = session.config.total_frames();
+                    let eta_text = match session.eta_seconds() {
+                        Some(s) => format!("残り約 {}", format_remaining(s)),
+                        None => "残り時間を計算中...".to_string(),
+                    };
+                    ui.add(
+                        egui::ProgressBar::new(ratio)
+                            .show_percentage()
+                            .animate(true)
+                            .text(format!(
+                                "レンダリング中... {done} / {total} フレーム ({:.0}%) [{eta_text}]",
+                                ratio * 100.0
+                            )),
+                    );
+                } else if let Some(done_path) = &self.export_modal.finished_path {
+                    let (ok_bg, ok_stroke) = crate::theme::ok_banner();
+                    egui::Frame::none()
+                        .fill(ok_bg)
+                        .stroke(Stroke::new(1.0_f32, ok_stroke))
+                        .rounding(egui::Rounding::same(6.0))
+                        .inner_margin(egui::Margin::same(8.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.colored_label(
+                                    crate::theme::ok_text(),
+                                    format!("✅ 書き出しが完了しました: {}", done_path.display()),
+                                );
+                                if let Some(_parent) = done_path.parent() {
+                                    if ui.small_button("📂 保存先フォルダを開く").clicked() {
+                                        #[cfg(windows)]
+                                        {
+                                            let _ = std::process::Command::new("explorer")
+                                                .arg("/select,")
+                                                .arg(done_path)
+                                                .spawn();
+                                        }
+                                    }
+                                }
+                            });
+                        });
+                }
+
+                if let Some(err) = &self.export_modal.error_message {
+                    ui.colored_label(crate::theme::danger_text(), format!("⚠ {err}"));
+                }
+
+                ui.separator();
+
+                // 下部アクションボタン
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if is_running {
+                        let cancel_btn = egui::Button::new(
+                            RichText::new("⏹ 書き出しを中止")
+                                .color(Color32::WHITE)
+                                .strong(),
+                        )
+                        .min_size(vec2(130.0, 32.0))
+                        .fill(Color32::from_rgb(185, 45, 45));
+                        if ui.add(cancel_btn).clicked() {
+                            do_cancel = true;
+                        }
+                    } else {
+                        let can_export = has_ffmpeg || self.export_modal.config.format.is_audio_only();
+                        let start_btn = egui::Button::new(
+                            RichText::new("🎬 書き出しを開始")
+                                .color(Color32::WHITE)
+                                .strong()
+                                .size(13.5),
+                        )
+                        .min_size(vec2(150.0, 32.0))
+                        .fill(crate::theme::accent());
+
+                        if ui.add_enabled(can_export, start_btn).clicked() {
+                            do_start = true;
+                        }
+                        let close_btn = egui::Button::new("閉じる").min_size(vec2(80.0, 32.0));
+                        if ui.add(close_btn).clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
+                            close_modal = true;
+                        }
+                    }
+                });
+            });
+
+        if do_start {
+            // 再生中なら停止してから書き出し開始
+            if self.st.playing {
+                self.st.toggle_play();
+            }
+            self.export_modal.finished_path = None;
+            self.export_modal.error_message = None;
+            match ExportSession::start(&mut self.st, self.export_modal.config.clone()) {
+                Ok(session) => {
+                    self.export_modal.session = Some(session);
+                    ctx.request_repaint();
+                }
+                Err(e) => {
+                    self.export_modal.error_message = Some(e);
+                }
+            }
+        }
+
+        if do_cancel {
+            if let Some(mut session) = self.export_modal.session.take() {
+                session.cancel();
+            }
+            self.st.status = "動画の書き出しをキャンセルしました".into();
+        }
+
+        if close_modal {
+            self.export_modal.is_open = false;
+            self.export_modal.error_message = None;
         }
     }
 }

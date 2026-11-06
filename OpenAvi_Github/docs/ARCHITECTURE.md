@@ -20,7 +20,7 @@ au2-app ──► au2-aup ──► au2-exo ──► au2-core
 | `au2-plugin` | `.anm/.obj/.cam/.scn/.tra`（Lua 互換 VM: `lua_vm.rs`）と PE プラグイン解析（`pe_loader.rs`） | PE 解析は純粋なバイト列処理（OS 非依存） |
 | `au2-media` | 画像・動画・音声のデコード、FFmpeg 探索、音声出力エンジン | **音声出力のみ Windows 専用（下記）** |
 | `au2-platform` | **OS 依存の窓口**（ホーム/デスクトップ/ユーザーデータ領域、`.exe` 拡張子、コンソール非表示） | 他クレートは環境変数や `cfg(windows)` を直接使わずここを経由する |
-| `au2-app` | eframe/egui の GUI（`state.rs` = 編集状態、`panels/` = 各パネル、`app.rs` = ウィンドウ/メニュー） | |
+| `au2-app` | eframe/egui の GUI（`state.rs` = 編集状態、`panels/` = 各パネル、`export.rs` = 動画/音声書き出し、`app.rs` = ウィンドウ/メニュー） | |
 
 ## クロスプラットフォーム対応状況
 
@@ -28,6 +28,7 @@ au2-app ──► au2-aup ──► au2-exo ──► au2-core
 |---|---|
 | データモデル / `.aup` `.aup2` `.exo` `.exa` / Lua VM / PE 解析 | 移植済み（OS 非依存） |
 | GUI（eframe + wgpu） / ファイルダイアログ（rfd） / フォント | 移植可能（OS 別フォールバックあり） |
+| 動画・音声の書き出し（`export.rs`） | OS 非依存（ソフトウェアラスタライザ + WAV 合成 + FFmpeg パイプライン） |
 | FFmpeg 探索 | OS 非依存（Windows 固有の探索先は `cfg!(windows)` で分離） |
 | FFmpeg 自動ダウンロード | Windows のみ（他 OS は案内メッセージを返す） |
 | 保存確認ダイアログ | Windows: Win32 API でボタン文言を変更 / 他 OS: `rfd` 標準ダイアログ（`app.rs`） |

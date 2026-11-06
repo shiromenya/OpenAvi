@@ -22,13 +22,13 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     ui.set_max_width(total_w);
 
     // 下部のシークバー＆再生コントロール領域の高さ（76px 固定）を残して上部にプレビューキャンバスを配置
-    let control_height = 76.0_f32;
+    let control_height = 78.0_f32 + 8.0;
     let preview_h = (total_h - control_height).max(64.0);
     let preview_size = vec2(total_w.max(64.0), preview_h);
 
     let (resp, painter) = ui.allocate_painter(preview_size, Sense::click());
     let area = resp.rect;
-    painter.rect_filled(area, 0.0, Color32::from_gray(24));
+    painter.rect_filled(area, 0.0, crate::theme::flip(Color32::from_gray(24)));
 
     let s = &st.scene.settings;
     let (sw, sh) = (s.width.max(1) as f32, s.height.max(1) as f32);
@@ -111,7 +111,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     );
 
     // 3. 動画プレビュー下部にシークバーと再生コントロールボタンを配置
-    ui.add_space(4.0);
+    // (間隔は ui.spacing().item_spacing.y で確保)
     bottom_transport_bar(ui, st);
 }
 
@@ -154,28 +154,28 @@ fn bottom_transport_bar(ui: &mut egui::Ui, st: &mut EditorState) {
     let last = st.last_frame();
     let mut f = st.frame;
 
-    // トランスポートバー全体の外枠を完全な整数ピクセル座標で確保し、内部のレイアウト計算による横揺れを物理的にゼロにする
-    let bar_w = ui.available_width().floor().max(120.0);
-    let bar_h = 68.0_f32;
+    // トランスポートバー全体のカード（高さ固定。内部は実測ベースのレイアウトで重なりを防ぐ）
+    let bar_w = ui.available_width().floor().max(160.0);
+    let bar_h = 78.0_f32;
     let (bar_rect, _) = ui.allocate_exact_size(vec2(bar_w, bar_h), Sense::hover());
-
     ui.painter().rect(
         bar_rect,
-        egui::Rounding::same(6.0),
-        Color32::from_rgb(20, 22, 27),
-        Stroke::new(1.0_f32, Color32::from_gray(38)),
+        egui::Rounding::same(8.0),
+        crate::theme::surface(),
+        Stroke::new(1.0_f32, crate::theme::border()),
     );
 
-    let inner = bar_rect.shrink2(vec2(10.0, 6.0));
+    let inner = bar_rect.shrink2(vec2(12.0, 8.0));
 
-    // 1段目：シークバー（上段 24px 固定領域）
-    let row1_rect = Rect::from_min_size(inner.min, vec2(inner.width(), 22.0));
+    // 1段目：シークバー
+    let row1_rect = Rect::from_min_size(inner.min, vec2(inner.width(), 24.0));
     let mut row1_ui = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(row1_rect)
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
-    row1_ui.spacing_mut().slider_width = (row1_rect.width() - 4.0).floor().max(60.0);
+    row1_ui.spacing_mut().slider_width = (row1_rect.width() - 8.0).floor().max(60.0);
+    row1_ui.style_mut().visuals.slider_trailing_fill = true;
     if row1_ui
         .add(egui::Slider::new(&mut f, 0..=last).show_value(false))
         .on_hover_text("シークバー（ドラッグで再生位置を移動）")
@@ -184,77 +184,80 @@ fn bottom_transport_bar(ui: &mut egui::Ui, st: &mut EditorState) {
         st.set_frame(f);
     }
 
-    // 2段目：タイムコード＆再生コントロールボタン（下段 26px 固定領域、各要素のX座標を完全固定）
-    let row2_top = (inner.bottom() - 26.0).floor();
-    let row2_rect = Rect::from_min_size(pos2(inner.left().floor(), row2_top), vec2(inner.width().floor(), 26.0));
+    // 2段目：タイムコード（左）／再生ボタン群（中央）／解像度（右）
+    let row2_h = 30.0_f32;
+    let row2_rect = Rect::from_min_size(
+        pos2(inner.left().floor(), (inner.bottom() - row2_h).floor()),
+        vec2(inner.width().floor(), row2_h),
+    );
+    let center_y = row2_rect.center().y.floor();
 
     let rate = st.scene.settings.frame_rate;
     let tc = rate.timecode(st.frame);
     let total_digits = ((last + 1).max(1) as f64).log10().floor() as usize + 1;
-    let frame_str = format!("({:>width$} / {} F)", st.frame + 1, last + 1, width = total_digits);
+    let frame_str = format!("{:>width$} / {} F", st.frame + 1, last + 1, width = total_digits);
 
-    // 左カラム（タイムコード表示）：完全固定座標で直接描画し、文字の増減によるレイアウト再計算を一切発生させない
-    let tc_badge_rect = Rect::from_min_size(pos2(row2_rect.left(), row2_rect.top() + 1.0), vec2(26.0, 24.0));
+    // 左：TC バッジ + タイムコード + フレーム番号（等幅セルで描画して横揺れを防止）
+    let tc_badge_rect = Rect::from_min_size(pos2(row2_rect.left(), center_y - 12.0), vec2(30.0, 24.0));
     ui.painter().rect(
         tc_badge_rect,
-        egui::Rounding::same(4.0),
-        Color32::from_rgb(28, 34, 46),
-        Stroke::new(1.0_f32, Color32::from_rgb(45, 60, 90)),
+        egui::Rounding::same(5.0),
+        crate::theme::flip(Color32::from_rgb(28, 34, 46)),
+        Stroke::new(1.0_f32, crate::theme::flip(Color32::from_rgb(45, 60, 90))),
     );
     ui.painter().text(
         tc_badge_rect.center(),
         Align2::CENTER_CENTER,
         "TC",
         FontId::monospace(10.0),
-        Color32::from_rgb(147, 197, 253),
+        crate::theme::accent_text(),
     );
-
-    let tc_text_x = (tc_badge_rect.right() + 6.0).floor();
-    let center_y = row2_rect.center().y.floor();
+    let tc_text_x = (tc_badge_rect.right() + 8.0).floor();
+    let tc_w = tc.chars().count() as f32 * 8.0;
     draw_fixed_pitch_text(
         ui.painter(),
         pos2(tc_text_x, center_y),
         Align2::LEFT_CENTER,
         &tc,
         FontId::proportional(13.0),
-        Color32::from_rgb(240, 244, 252),
+        crate::theme::text(),
         8.0,
     );
-    let frame_text_x = (tc_text_x + 12.0 * 8.0 + 8.0).floor();
+    let frame_text_x = (tc_text_x + tc_w + 10.0).floor();
+    let frame_w = frame_str.chars().count() as f32 * 7.0;
     draw_fixed_pitch_text(
         ui.painter(),
         pos2(frame_text_x, center_y),
         Align2::LEFT_CENTER,
         &frame_str,
         FontId::proportional(11.0),
-        Color32::from_gray(145),
+        crate::theme::text_muted(),
         7.0,
     );
+    let left_end = frame_text_x + frame_w;
 
-    // 区切り線（左端から 220px の完全固定位置）
-    let sep_x = (row2_rect.left() + 220.0).floor();
-    ui.painter().line_segment(
-        [pos2(sep_x, row2_rect.top() + 3.0), pos2(sep_x, row2_rect.bottom() - 3.0)],
-        Stroke::new(1.0_f32, Color32::from_gray(45)),
-    );
-
-    // 中央カラム（再生・コマ送りボタン群）：開始X座標を (sep_x + 10.0) に完全固定
-    let btn_start_x = (sep_x + 10.0).floor();
-    let btn_area_w = (row2_rect.right() - btn_start_x).max(10.0);
-    let btn_rect = Rect::from_min_size(pos2(btn_start_x, row2_rect.top()), vec2(btn_area_w, 26.0));
+    // 中央：再生ボタン群（左のテキストと重ならない位置に配置）
+    let nav_w = 36.0_f32;
+    let play_w = 108.0_f32;
+    let gap = 6.0_f32;
+    let btn_h = 28.0_f32;
+    let group_w = nav_w * 4.0 + play_w + gap * 4.0;
+    let mut group_x = (row2_rect.center().x - group_w * 0.5).floor();
+    if group_x < left_end + 16.0 {
+        group_x = (left_end + 16.0).floor();
+    }
+    group_x = group_x.min(row2_rect.right() - group_w).max(row2_rect.left());
+    let btn_rect = Rect::from_min_size(pos2(group_x, center_y - btn_h * 0.5), vec2(group_w, btn_h));
     let mut btn_ui = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(btn_rect)
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
-    btn_ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
+    btn_ui.spacing_mut().item_spacing = vec2(gap, 0.0);
 
     let nav_btn = |ui: &mut egui::Ui, text: &'static str, tip: &'static str| -> egui::Response {
-        ui.add_sized(
-            vec2(28.0, 24.0),
-            egui::Button::new(egui::RichText::new(text).size(12.0).color(Color32::from_gray(225))),
-        )
-        .on_hover_text(tip)
+        ui.add_sized(vec2(nav_w, btn_h), egui::Button::new(egui::RichText::new(text).size(13.0)))
+            .on_hover_text(tip)
     };
 
     if nav_btn(&mut btn_ui, "⏮", "先頭フレームへ (Home)").clicked() {
@@ -267,14 +270,12 @@ fn bottom_transport_bar(ui: &mut egui::Ui, st: &mut EditorState) {
     let (play_label, play_color) = if st.playing {
         ("⏸ 一時停止", Color32::from_rgb(220, 38, 38))
     } else {
-        ("▶ 再生", Color32::from_rgb(37, 99, 235))
+        ("▶ 再生", crate::theme::accent())
     };
-    let play_btn = egui::Button::new(
-        egui::RichText::new(play_label).strong().size(12.0).color(Color32::WHITE),
-    )
-    .fill(play_color);
+    let play_btn =
+        egui::Button::new(egui::RichText::new(play_label).strong().size(13.0).color(Color32::WHITE)).fill(play_color);
     if btn_ui
-        .add_sized(vec2(96.0, 24.0), play_btn)
+        .add_sized(vec2(play_w, btn_h), play_btn)
         .on_hover_text("再生 / 一時停止 (Space)")
         .clicked()
     {
@@ -288,15 +289,17 @@ fn bottom_transport_bar(ui: &mut egui::Ui, st: &mut EditorState) {
         st.set_frame(last);
     }
 
-    // 右端の解像度表示（十分な余白がある時のみ右端固定座標に描画）
-    if row2_rect.width() >= 540.0 {
-        let s = &st.scene.settings;
+    // 右端：解像度表示（ボタン群と重ならない余白がある時のみ）
+    let s = &st.scene.settings;
+    let res_text = format!("{}×{}  {:.0}fps", s.width, s.height, s.frame_rate.as_f64());
+    let res_w = res_text.chars().count() as f32 * 7.0;
+    if row2_rect.right() - (group_x + group_w) >= res_w + 16.0 {
         ui.painter().text(
             pos2(row2_rect.right().floor(), center_y),
             Align2::RIGHT_CENTER,
-            format!("{}×{}  {:.0}fps", s.width, s.height, s.frame_rate.as_f64()),
+            res_text,
             FontId::monospace(11.0),
-            Color32::from_gray(145),
+            crate::theme::text_muted(),
         );
     }
 }
@@ -664,15 +667,15 @@ impl Camera3D {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct GroupTransform {
-    ox: f64,
-    oy: f64,
-    oz: f64,
-    zoom: f64,
-    rx: f64,
-    ry: f64,
-    rz: f64,
-    alpha: f64,
+pub(crate) struct GroupTransform {
+    pub(crate) ox: f64,
+    pub(crate) oy: f64,
+    pub(crate) oz: f64,
+    pub(crate) zoom: f64,
+    pub(crate) rx: f64,
+    pub(crate) ry: f64,
+    pub(crate) rz: f64,
+    pub(crate) alpha: f64,
 }
 
 impl Default for GroupTransform {
@@ -691,20 +694,20 @@ impl Default for GroupTransform {
 }
 
 #[derive(Clone, Copy)]
-struct DrawCtx<'a> {
-    painter: &'a egui::Painter,
-    canvas: Rect,
-    scale: f32,
-    fps: f64,
-    screen_w: f64,
-    screen_h: f64,
-    textures: &'a std::collections::HashMap<ObjectId, (egui::TextureId, [usize; 2])>,
-    plugins: &'a PluginRegistry,
-    scenes: &'a std::collections::BTreeMap<u32, au2_core::Scene>,
-    has_ffmpeg: bool,
-    camera: Option<Camera3D>,
-    group_transform: Option<GroupTransform>,
-    scene_depth: u32,
+pub(crate) struct DrawCtx<'a> {
+    pub(crate) painter: &'a egui::Painter,
+    pub(crate) canvas: Rect,
+    pub(crate) scale: f32,
+    pub(crate) fps: f64,
+    pub(crate) screen_w: f64,
+    pub(crate) screen_h: f64,
+    pub(crate) textures: &'a std::collections::HashMap<ObjectId, (egui::TextureId, [usize; 2])>,
+    pub(crate) plugins: &'a PluginRegistry,
+    pub(crate) scenes: &'a std::collections::BTreeMap<u32, au2_core::Scene>,
+    pub(crate) has_ffmpeg: bool,
+    pub(crate) camera: Option<Camera3D>,
+    pub(crate) group_transform: Option<GroupTransform>,
+    pub(crate) scene_depth: u32,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -746,7 +749,7 @@ struct FilterVisuals {
 }
 
 /// 指定したシーン (`scene`) の `frame` における描画を実行します（サブシーン呼び出し・カメラ制御・グループ制御・時間制御・クリッピング対応）。
-fn render_scene_at(
+pub(crate) fn render_scene_at(
     base_ctx: &DrawCtx,
     scene: &au2_core::Scene,
     frame: Frame,

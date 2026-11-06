@@ -21,3 +21,6 @@ egui_dock.workspace = true
 rfd.workspace = true
 log.workspace = true
 env_logger.workspace = true
+
+[dev-dependencies]
+image.workspace = true
