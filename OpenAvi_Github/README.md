@@ -71,7 +71,7 @@ openavi/
 
 設計の詳細・移植状況は [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) を参照してください。
 
-> **対応 OS**: Windows（フル機能）。Linux / macOS は GUI・ファイル読み書きは動作する想定ですが、**音声出力は未対応**（Windows の winmm 依存）で、FFmpeg の自動ダウンロードも Windows のみです。
+> **対応 OS**: Windows / macOS / Linux（クロスプラットフォーム対応）。音声出力（Windows: `winmm` / macOS: `AudioToolbox` / Linux: `PipeWire・PulseAudio・ALSA`）および FFmpeg の自動検出・自動ダウンロードも全 OS に対応しています。
 
 ---
 

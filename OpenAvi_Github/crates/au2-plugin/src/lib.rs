@@ -719,6 +719,19 @@ impl PluginRegistry {
                 extra_paths.sort();
                 for p in extra_paths {
                     let fname = p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+                    let lower = fname.to_ascii_lowercase();
+                    // 外部フォルダ自動スキャン時は、第三者製の外部出力エンコーダプラグイン (x264guiEx 等) を取り込まない
+                    if lower.contains("x264")
+                        || lower.contains("guiex")
+                        || lower.contains("x265")
+                        || lower.contains("qsvencc")
+                        || lower.contains("nvenc")
+                        || lower.contains("vceencc")
+                        || lower.ends_with(".auo")
+                        || lower.ends_with(".auo2")
+                    {
+                        continue;
+                    }
                     if !self.plugins.iter().any(|existing| existing.file_name == fname) {
                         if let Some(desc) = inspect_plugin_file(&p) {
                             self.plugins.push(desc);

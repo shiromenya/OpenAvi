@@ -18,8 +18,8 @@ au2-app ──► au2-aup ──► au2-exo ──► au2-core
 | `au2-exo` | `.exo` / `.exa`（拡張編集エイリアス）の読み書き、文字コード判別 | ラウンドトリップ保持が必須 |
 | `au2-aup` | `.aup2`（AviUtl2）と `.aup`（初代バイナリ。`legacy_aup.rs`）の読み書き | 旧 `.aup` は内部で `.exo` テキストに変換して `au2-exo` に渡す |
 | `au2-plugin` | `.anm/.obj/.cam/.scn/.tra`（Lua 互換 VM: `lua_vm.rs`）と PE プラグイン解析（`pe_loader.rs`） | PE 解析は純粋なバイト列処理（OS 非依存） |
-| `au2-media` | 画像・動画・音声のデコード、FFmpeg 探索、音声出力エンジン | **音声出力のみ Windows 専用（下記）** |
-| `au2-platform` | **OS 依存の窓口**（ホーム/デスクトップ/ユーザーデータ領域、`.exe` 拡張子、コンソール非表示） | 他クレートは環境変数や `cfg(windows)` を直接使わずここを経由する |
+| `au2-media` | 画像・動画・音声のデコード、FFmpeg 探索・自動導入、音声出力エンジン | Windows / macOS / Linux 両対応 |
+| `au2-platform` | **OS 依存の窓口**（ホーム/デスクトップ/ユーザーデータ領域、`.exe` 拡張子、コンソール非表示、ファイラ表示） | 他クレートは環境変数や `cfg(windows)` を直接使わずここを経由する |
 | `au2-app` | eframe/egui の GUI（`state.rs` = 編集状態、`panels/` = 各パネル、`export.rs` = 動画/音声書き出し、`app.rs` = ウィンドウ/メニュー） | |
 
 ## クロスプラットフォーム対応状況
@@ -27,15 +27,12 @@ au2-app ──► au2-aup ──► au2-exo ──► au2-core
 | 領域 | 状態 |
 |---|---|
 | データモデル / `.aup` `.aup2` `.exo` `.exa` / Lua VM / PE 解析 | 移植済み（OS 非依存） |
-| GUI（eframe + wgpu） / ファイルダイアログ（rfd） / フォント | 移植可能（OS 別フォールバックあり） |
+| GUI（eframe + wgpu） / ファイルダイアログ（rfd） / フォント | 移植済み（OS 別フォールバックあり） |
 | 動画・音声の書き出し（`export.rs`） | OS 非依存（ソフトウェアラスタライザ + WAV 合成 + FFmpeg パイプライン） |
-| FFmpeg 探索 | OS 非依存（Windows 固有の探索先は `cfg!(windows)` で分離） |
-| FFmpeg 自動ダウンロード | Windows のみ（他 OS は案内メッセージを返す） |
+| FFmpeg 探索 | Windows（WinGet / Scoop / Chocolatey）・macOS（Homebrew / MacPorts）・Linux（標準パス / Snap / Nix）対応 |
+| FFmpeg 自動ダウンロード | Windows（gyan.dev）・macOS（evermeet.cx）・Linux（BtbN static x64/arm64）対応 |
 | 保存確認ダイアログ | Windows: Win32 API でボタン文言を変更 / 他 OS: `rfd` 標準ダイアログ（`app.rs`） |
-| **音声出力** | **Windows のみ**（`au2-media/src/audio.rs` の winmm `waveOut`）。他 OS は無音のスタブ |
-
-> 他 OS 対応で最優先の課題は音声出力です。`AudioEngine::worker_loop` の `#[cfg(not(windows))]` 実装を
-> `cpal` 等で置き換えれば、残りのコードは変更不要です。
+| 音声出力 | Windows: `winmm` (`waveOut`) / macOS: `AudioToolbox` (`AudioQueue`) / Linux: `PipeWire` (`pw-cat`)・`PulseAudio` (`pacat`)・`ALSA` (`aplay`)・`ffplay` |
 
 ## 規約
 

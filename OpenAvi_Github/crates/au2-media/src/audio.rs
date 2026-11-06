@@ -1,6 +1,10 @@
 //! # audio
 //!
-//! Windows 標準の `winmm.dll` (waveOut) を用いたゼロ依存・低遅延オーディオ再生エンジン。
+//! クロスプラットフォーム対応のゼロ依存・低遅延オーディオ再生エンジン。
+//! - **Windows**: 標準の `winmm.dll` (`waveOut`)
+//! - **macOS**: 標準の `AudioToolbox.framework` (`AudioQueue`)
+//! - **Linux / Unix**: `PipeWire` (`pw-cat`) / `PulseAudio` (`pacat`) / `ALSA` (`aplay`) / `ffplay` パイプ出力
+//!
 //! 動画および音声ファイルから抽出された 44.1kHz 16-bit ステレオ PCM を
 //! サンプル単位で欠落・重複なく連続ストリーミング再生します。
 
@@ -364,7 +368,132 @@ extern "system" {
     fn waveOutClose(hwo: usize) -> u32;
 }
 
-/// Windows ネイティブのリアルタイム・オーディオ出力エンジン。
+/// `cursor_sample_frame` から `chunk_frames` サンプルフレーム分の音声を全トラックから合成し、
+/// リトルエンディアン 16-bit ステレオ PCM バイト列として `target_buf` に書き込みます。
+pub fn mix_audio_chunk(
+    tracks: &[AudioTrackItem],
+    cursor_sample_frame: usize,
+    chunk_frames: usize,
+    fps: f64,
+    target_buf: &mut [u8],
+) {
+    let mut mix_buf = vec![0.0f32; chunk_frames * (CHANNELS as usize)];
+    let chunk_start_sec = cursor_sample_frame as f64 / SAMPLE_RATE as f64;
+    let chunk_end_sec = (cursor_sample_frame + chunk_frames) as f64 / SAMPLE_RATE as f64;
+    let fps_safe = fps.max(1.0);
+
+    for trk in tracks {
+        let track_start_sec = trk.start_frame as f64 / fps_safe;
+        let track_end_sec = (trk.end_frame + 1) as f64 / fps_safe;
+        if chunk_end_sec <= track_start_sec || chunk_start_sec >= track_end_sec {
+            continue;
+        }
+
+        let track_start_sample_frame = (track_start_sec * SAMPLE_RATE as f64).round() as isize;
+        let offset_sample_frame = (trk.offset_sec * SAMPLE_RATE as f64).round() as isize;
+        let vol = trk.volume.clamp(0.0, 2.0);
+        let total_interleaved = trk.audio.len();
+
+        for f in 0..chunk_frames {
+            let timeline_sf = (cursor_sample_frame + f) as isize;
+            let rel_sf = timeline_sf - track_start_sample_frame + offset_sample_frame;
+            if rel_sf < 0 {
+                continue;
+            }
+            let base = (rel_sf as usize) * (CHANNELS as usize);
+            if base + 1 < total_interleaved {
+                mix_buf[f * 2] += trk.audio[base] as f32 * vol;
+                mix_buf[f * 2 + 1] += trk.audio[base + 1] as f32 * vol;
+            }
+        }
+    }
+
+    for (i, &sample_f32) in mix_buf.iter().enumerate() {
+        let clamped = sample_f32.clamp(-32768.0, 32767.0) as i16;
+        let b = clamped.to_le_bytes();
+        if i * 2 + 1 < target_buf.len() {
+            target_buf[i * 2] = b[0];
+            target_buf[i * 2 + 1] = b[1];
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[allow(non_snake_case)]
+struct AudioStreamBasicDescription {
+    mSampleRate: f64,
+    mFormatID: u32,
+    mFormatFlags: u32,
+    mBytesPerPacket: u32,
+    mFramesPerPacket: u32,
+    mBytesPerFrame: u32,
+    mChannelsPerFrame: u32,
+    mBitsPerChannel: u32,
+    mReserved: u32,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[allow(non_snake_case)]
+struct AudioQueueBuffer {
+    mAudioDataBytesCapacity: u32,
+    mAudioData: *mut u8,
+    mAudioDataByteSize: u32,
+    mUserData: *mut std::ffi::c_void,
+    mPacketDescriptionCapacity: u32,
+    mPacketDescriptions: *const std::ffi::c_void,
+    mPacketDescriptionCount: u32,
+}
+
+#[cfg(target_os = "macos")]
+type AudioQueueRef = *mut std::ffi::c_void;
+
+#[cfg(target_os = "macos")]
+#[link(name = "AudioToolbox", kind = "framework")]
+extern "C" {
+    fn AudioQueueNewOutput(
+        inFormat: *const AudioStreamBasicDescription,
+        inCallbackProc: extern "C" fn(*mut std::ffi::c_void, AudioQueueRef, *mut AudioQueueBuffer),
+        inUserData: *mut std::ffi::c_void,
+        inCallbackRunLoop: *mut std::ffi::c_void,
+        inCallbackRunLoopMode: *mut std::ffi::c_void,
+        inFlags: u32,
+        outAQ: *mut AudioQueueRef,
+    ) -> i32;
+    fn AudioQueueAllocateBuffer(
+        inAQ: AudioQueueRef,
+        inBufferByteSize: u32,
+        outBuffer: *mut *mut AudioQueueBuffer,
+    ) -> i32;
+    fn AudioQueueEnqueueBuffer(
+        inAQ: AudioQueueRef,
+        inBuffer: *mut AudioQueueBuffer,
+        inNumPacketDescs: u32,
+        inPacketDescs: *const std::ffi::c_void,
+    ) -> i32;
+    fn AudioQueueStart(inAQ: AudioQueueRef, inStartTime: *const std::ffi::c_void) -> i32;
+    fn AudioQueueReset(inAQ: AudioQueueRef) -> i32;
+    fn AudioQueueStop(inAQ: AudioQueueRef, inImmediate: u8) -> i32;
+    fn AudioQueueDispose(inAQ: AudioQueueRef, inImmediate: u8) -> i32;
+}
+
+#[cfg(target_os = "macos")]
+extern "C" fn macos_aq_callback(
+    _user_data: *mut std::ffi::c_void,
+    _aq: AudioQueueRef,
+    buf: *mut AudioQueueBuffer,
+) {
+    unsafe {
+        if !buf.is_null() && !(*buf).mUserData.is_null() {
+            let flag = &*((*buf).mUserData as *const AtomicBool);
+            flag.store(false, Ordering::Release);
+        }
+    }
+}
+
+/// クロスプラットフォーム対応のリアルタイム・オーディオ出力エンジン。
 pub struct AudioEngine {
     shared: Arc<Mutex<EngineSharedState>>,
     running: Arc<AtomicBool>,
@@ -419,7 +548,7 @@ impl AudioEngine {
             } else if !playing && st.playing {
                 st.seek_instant = None;
             } else if playing {
-                // 再生中に大きくシークまたはループバックした場合のみ再シーク（許容差を1.0秒に設定し、描画負荷によるwaveOutReset誤爆を防止）
+                // 再生中に大きくシークまたはループバックした場合のみ再シーク（許容差を1.0秒に設定し、描画負荷によるリセット誤爆を防止）
                 if let Some(inst) = st.seek_instant {
                     let expected_sec = st.seek_start_sec + inst.elapsed().as_secs_f64();
                     if (cur_sec - expected_sec).abs() > 1.0 {
@@ -570,43 +699,8 @@ impl AudioEngine {
             }
 
             // `cursor_sample_frame` から正確に `CHUNK_FRAMES` 分をミックスして書き込む
-            let mut mix_buf = vec![0.0f32; CHUNK_FRAMES * (CHANNELS as usize)];
-            let chunk_start_sec = cursor_sample_frame as f64 / SAMPLE_RATE as f64;
-            let chunk_end_sec = (cursor_sample_frame + CHUNK_FRAMES) as f64 / SAMPLE_RATE as f64;
-
-            for trk in &tracks {
-                let track_start_sec = trk.start_frame as f64 / fps;
-                let track_end_sec = (trk.end_frame + 1) as f64 / fps;
-                if chunk_end_sec <= track_start_sec || chunk_start_sec >= track_end_sec {
-                    continue;
-                }
-
-                let track_start_sample_frame = (track_start_sec * SAMPLE_RATE as f64).round() as isize;
-                let offset_sample_frame = (trk.offset_sec * SAMPLE_RATE as f64).round() as isize;
-                let vol = trk.volume.clamp(0.0, 2.0);
-                let total_interleaved = trk.audio.len();
-
-                for f in 0..CHUNK_FRAMES {
-                    let timeline_sf = (cursor_sample_frame + f) as isize;
-                    let rel_sf = timeline_sf - track_start_sample_frame + offset_sample_frame;
-                    if rel_sf < 0 {
-                        continue;
-                    }
-                    let base = (rel_sf as usize) * (CHANNELS as usize);
-                    if base + 1 < total_interleaved {
-                        mix_buf[f * 2] += trk.audio[base] as f32 * vol;
-                        mix_buf[f * 2 + 1] += trk.audio[base + 1] as f32 * vol;
-                    }
-                }
-            }
-
             let target_buf = &mut raw_buffers[buf_idx];
-            for (i, &sample_f32) in mix_buf.iter().enumerate() {
-                let clamped = sample_f32.clamp(-32768.0, 32767.0) as i16;
-                let b = clamped.to_le_bytes();
-                target_buf[i * 2] = b[0];
-                target_buf[i * 2 + 1] = b[1];
-            }
+            mix_audio_chunk(&tracks, cursor_sample_frame, CHUNK_FRAMES, fps, target_buf);
 
             let hdr = &mut hdrs[buf_idx];
             hdr.lpData = target_buf.as_mut_ptr();
@@ -642,11 +736,238 @@ impl AudioEngine {
         }
     }
 
-    #[cfg(not(windows))]
-    fn worker_loop(_shared: Arc<Mutex<EngineSharedState>>, running: Arc<AtomicBool>) {
-        while running.load(Ordering::Relaxed) {
-            thread::sleep(Duration::from_millis(100));
+    #[cfg(target_os = "macos")]
+    fn worker_loop(shared: Arc<Mutex<EngineSharedState>>, running: Arc<AtomicBool>) {
+        let bytes_per_frame = (CHANNELS * BITS_PER_SAMPLE / 8) as u32;
+        let desc = AudioStreamBasicDescription {
+            mSampleRate: SAMPLE_RATE as f64,
+            mFormatID: 0x6c70636d, // 'lpcm' (kAudioFormatLinearPCM)
+            mFormatFlags: 0x0C,    // kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked
+            mBytesPerPacket: bytes_per_frame,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: bytes_per_frame,
+            mChannelsPerFrame: CHANNELS as u32,
+            mBitsPerChannel: BITS_PER_SAMPLE as u32,
+            mReserved: 0,
+        };
+
+        let mut aq: AudioQueueRef = std::ptr::null_mut();
+        let status = unsafe {
+            AudioQueueNewOutput(
+                &desc,
+                macos_aq_callback,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+                &mut aq,
+            )
+        };
+        if status != 0 || aq.is_null() {
+            log::warn!("AudioQueueNewOutput failed ({status}), falling back to external audio sink");
+            Self::stream_via_audio_sink_loop(shared, running);
+            return;
         }
+
+        const CHUNK_FRAMES: usize = 2048;
+        const BUFFER_COUNT: usize = 8;
+        let buf_byte_size = (CHUNK_FRAMES * (CHANNELS as usize) * 2) as u32;
+        let in_queue: Vec<AtomicBool> = (0..BUFFER_COUNT).map(|_| AtomicBool::new(false)).collect();
+        let mut aq_buffers: Vec<*mut AudioQueueBuffer> = vec![std::ptr::null_mut(); BUFFER_COUNT];
+
+        for i in 0..BUFFER_COUNT {
+            unsafe {
+                if AudioQueueAllocateBuffer(aq, buf_byte_size, &mut aq_buffers[i]) == 0 && !aq_buffers[i].is_null() {
+                    (*aq_buffers[i]).mUserData = &in_queue[i] as *const AtomicBool as *mut std::ffi::c_void;
+                }
+            }
+        }
+
+        let mut buf_idx = 0;
+        let mut last_was_playing = false;
+        let mut local_generation: u64 = 0;
+        let mut cursor_sample_frame: usize = 0;
+
+        while running.load(Ordering::Relaxed) {
+            let (is_playing, gen, seek_sec, fps, tracks) = {
+                if let Ok(st) = shared.lock() {
+                    (
+                        st.playing,
+                        st.seek_generation,
+                        st.seek_start_sec,
+                        st.fps,
+                        st.tracks.clone(),
+                    )
+                } else {
+                    (false, 0, 0.0, 30.0, Vec::new())
+                }
+            };
+
+            if !is_playing {
+                if last_was_playing {
+                    unsafe {
+                        let _ = AudioQueueReset(aq);
+                        let _ = AudioQueueStop(aq, 1);
+                    }
+                    for flag in &in_queue {
+                        flag.store(false, Ordering::Release);
+                    }
+                    last_was_playing = false;
+                }
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+
+            if !last_was_playing || gen != local_generation {
+                unsafe {
+                    let _ = AudioQueueReset(aq);
+                }
+                for flag in &in_queue {
+                    flag.store(false, Ordering::Release);
+                }
+                local_generation = gen;
+                last_was_playing = true;
+                cursor_sample_frame = (seek_sec.max(0.0) * SAMPLE_RATE as f64).round() as usize;
+                buf_idx = 0;
+            }
+
+            if in_queue[buf_idx].load(Ordering::Acquire) {
+                thread::sleep(Duration::from_millis(4));
+                continue;
+            }
+
+            let buf_ptr = aq_buffers[buf_idx];
+            if !buf_ptr.is_null() {
+                unsafe {
+                    let slice = std::slice::from_raw_parts_mut((*buf_ptr).mAudioData, buf_byte_size as usize);
+                    mix_audio_chunk(&tracks, cursor_sample_frame, CHUNK_FRAMES, fps, slice);
+                    (*buf_ptr).mAudioDataByteSize = buf_byte_size;
+                    in_queue[buf_idx].store(true, Ordering::Release);
+                    if AudioQueueEnqueueBuffer(aq, buf_ptr, 0, std::ptr::null()) == 0 {
+                        let _ = AudioQueueStart(aq, std::ptr::null());
+                    } else {
+                        in_queue[buf_idx].store(false, Ordering::Release);
+                    }
+                }
+            }
+
+            cursor_sample_frame += CHUNK_FRAMES;
+            buf_idx = (buf_idx + 1) % BUFFER_COUNT;
+        }
+
+        unsafe {
+            let _ = AudioQueueStop(aq, 1);
+            let _ = AudioQueueDispose(aq, 1);
+        }
+    }
+
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    fn worker_loop(shared: Arc<Mutex<EngineSharedState>>, running: Arc<AtomicBool>) {
+        Self::stream_via_audio_sink_loop(shared, running);
+    }
+
+    /// Linux / Unix 環境向けの汎用 PCM ストリーミング出力ループ。
+    /// システム上の `pw-cat` (PipeWire) / `pacat` (PulseAudio) / `aplay` (ALSA) / `ffplay` を自動検出して低遅延再生します。
+    #[cfg(not(windows))]
+    fn stream_via_audio_sink_loop(shared: Arc<Mutex<EngineSharedState>>, running: Arc<AtomicBool>) {
+        use std::io::Write;
+        use std::process::Child;
+
+        fn spawn_sink() -> Option<Child> {
+            let candidates: &[(&str, &[&str])] = &[
+                ("pw-cat", &["--playback", "--rate", "44100", "--channels", "2", "--format", "s16", "-"]),
+                ("pacat", &["--playback", "--rate=44100", "--channels=2", "--format=s16le", "--latency-msec=50"]),
+                ("aplay", &["-q", "-f", "S16_LE", "-t", "raw", "-r", "44100", "-c", "2", "--buffer-size=8192", "-"]),
+                ("ffplay", &["-nodisp", "-autoexit", "-loglevel", "quiet", "-f", "s16le", "-ar", "44100", "-ac", "2", "-i", "-"]),
+            ];
+            for (program, args) in candidates {
+                let mut cmd = Command::new(program);
+                au2_platform::hide_console_window(&mut cmd);
+                if let Ok(child) = cmd
+                    .args(*args)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                {
+                    return Some(child);
+                }
+            }
+            None
+        }
+
+        fn close_sink(sink: &mut Option<Child>) {
+            if let Some(mut child) = sink.take() {
+                drop(child.stdin.take());
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+
+        const CHUNK_FRAMES: usize = 2048;
+        let mut pcm_buf = vec![0u8; CHUNK_FRAMES * (CHANNELS as usize) * 2];
+        let mut sink: Option<Child> = None;
+        let mut last_was_playing = false;
+        let mut local_generation: u64 = 0;
+        let mut cursor_sample_frame: usize = 0;
+        let mut origin_sample_frame: usize = 0;
+        let mut origin_instant = Instant::now();
+
+        while running.load(Ordering::Relaxed) {
+            let (is_playing, gen, seek_sec, fps, tracks) = {
+                if let Ok(st) = shared.lock() {
+                    (
+                        st.playing,
+                        st.seek_generation,
+                        st.seek_start_sec,
+                        st.fps,
+                        st.tracks.clone(),
+                    )
+                } else {
+                    (false, 0, 0.0, 30.0, Vec::new())
+                }
+            };
+
+            if !is_playing {
+                if last_was_playing {
+                    close_sink(&mut sink);
+                    last_was_playing = false;
+                }
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+
+            if !last_was_playing || gen != local_generation {
+                close_sink(&mut sink);
+                sink = spawn_sink();
+                local_generation = gen;
+                last_was_playing = true;
+                cursor_sample_frame = (seek_sec.max(0.0) * SAMPLE_RATE as f64).round() as usize;
+                origin_sample_frame = cursor_sample_frame;
+                origin_instant = Instant::now();
+            }
+
+            // 実時間に対して最大約 140ms (3チャンク分) 先行して書き込むようペーシング
+            let written_sec = cursor_sample_frame.saturating_sub(origin_sample_frame) as f64 / SAMPLE_RATE as f64;
+            let elapsed_sec = origin_instant.elapsed().as_secs_f64();
+            if written_sec > elapsed_sec + 0.14 {
+                thread::sleep(Duration::from_millis(8));
+                continue;
+            }
+
+            mix_audio_chunk(&tracks, cursor_sample_frame, CHUNK_FRAMES, fps, &mut pcm_buf);
+            if let Some(child) = &mut sink {
+                if let Some(stdin) = &mut child.stdin {
+                    if stdin.write_all(&pcm_buf).is_err() {
+                        close_sink(&mut sink);
+                    }
+                }
+            }
+
+            cursor_sample_frame += CHUNK_FRAMES;
+        }
+
+        close_sink(&mut sink);
     }
 }
 
@@ -740,5 +1061,33 @@ mod tests {
         assert_eq!(decoded.channels, 2);
         // 480 サンプル @ 48kHz -> 約 441 サンプル @ 44.1kHz * 2ch = 882
         assert!((decoded.samples.len() as i32 - 882).abs() <= 4);
+    }
+
+    #[test]
+    fn test_mix_audio_chunk_multi_track() {
+        let trk1 = AudioTrackItem {
+            audio: Arc::new(vec![1000i16, -1000, 2000, -2000]),
+            start_frame: 0,
+            end_frame: 30,
+            offset_sec: 0.0,
+            volume: 1.0,
+        };
+        let trk2 = AudioTrackItem {
+            audio: Arc::new(vec![500i16, 500, 1000, 1000]),
+            start_frame: 0,
+            end_frame: 30,
+            offset_sec: 0.0,
+            volume: 0.5,
+        };
+        let mut buf = vec![0u8; 2 * 4]; // 2 frames * 2ch * 2bytes
+        mix_audio_chunk(&[trk1, trk2], 0, 2, 30.0, &mut buf);
+        let s0_l = i16::from_le_bytes([buf[0], buf[1]]);
+        let s0_r = i16::from_le_bytes([buf[2], buf[3]]);
+        let s1_l = i16::from_le_bytes([buf[4], buf[5]]);
+        let s1_r = i16::from_le_bytes([buf[6], buf[7]]);
+        assert_eq!(s0_l, 1250);
+        assert_eq!(s0_r, -750);
+        assert_eq!(s1_l, 2500);
+        assert_eq!(s1_r, -1500);
     }
 }

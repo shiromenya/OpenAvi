@@ -108,7 +108,7 @@ pub struct EditorState {
     pub timeline: TimelineView,
     pub plugins: PluginRegistry,
     pub media: MediaCache,
-    /// リアルタイムオーディオ出力エンジン（winmm による低遅延再生）
+    /// リアルタイムオーディオ出力エンジン（Windows: winmm / macOS: AudioToolbox / Linux: PipeWire・PulseAudio・ALSA）
     pub audio: AudioEngine,
     /// ソースパネルに登録されたメディア素材一覧
     pub sources: Vec<SourceMediaItem>,
@@ -382,7 +382,7 @@ impl EditorState {
                 .any(|s| matches!(s.kind, MediaKind::Video | MediaKind::Audio))
     }
 
-    /// FFmpeg を別スレッドでダウンロードして `%LOCALAPPDATA%\OpenAvi\bin` に導入します。
+    /// FFmpeg を別スレッドでダウンロードしてユーザーデータ領域（`OpenAvi/bin`）に導入します。
     pub fn start_ffmpeg_download(&mut self) {
         if matches!(self.ffmpeg_dl, FfmpegDownload::Running(_)) {
             return;

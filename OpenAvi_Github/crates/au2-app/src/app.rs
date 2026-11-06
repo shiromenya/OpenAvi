@@ -945,9 +945,12 @@ impl OpenAviApp {
                                     .strong(),
                             )
                             .fill(crate::theme::accent());
+                            let tip_dir = au2_media::user_ffmpeg_dir()
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_else(|| "OpenAvi/bin".into());
                             if ui
                                 .add(dl_btn)
-                                .on_hover_text("gyan.dev 配布の FFmpeg をダウンロードし %LOCALAPPDATA%\\OpenAvi\\bin に導入します")
+                                .on_hover_text(format!("お使いの OS 向けの FFmpeg を自動ダウンロードし {tip_dir} に導入します"))
                                 .clicked()
                             {
                                 self.st.start_ffmpeg_download();
@@ -1770,13 +1773,7 @@ impl OpenAviApp {
                                 );
                                 if let Some(_parent) = done_path.parent() {
                                     if ui.small_button("📂 保存先フォルダを開く").clicked() {
-                                        #[cfg(windows)]
-                                        {
-                                            let _ = std::process::Command::new("explorer")
-                                                .arg("/select,")
-                                                .arg(done_path)
-                                                .spawn();
-                                        }
+                                        au2_platform::reveal_in_file_manager(done_path);
                                     }
                                 }
                             });

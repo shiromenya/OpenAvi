@@ -1,7 +1,7 @@
 //! # au2-media
 //!
 //! OpenAvi の画像・動画デコード、完全非同期バックグラウンド・動画ストリーミングキャッシュ、
-//! および Windows ネイティブオーディオ再生パイプライン。
+//! およびクロスプラットフォーム対応の低遅延オーディオ再生パイプライン。
 //!
 //! - **画像ファイル**: `.png`, `.jpg`, `.jpeg`, `.bmp`, `.webp`, `.gif` をネイティブデコード。
 //! - **動画ファイル**: バックグラウンドスレッドで `ffmpeg` 連続パイプを駆動し、メインスレッドの待ち時間 0ms で 60fps 滑らかな再生を実現。
@@ -651,27 +651,50 @@ pub fn user_ffmpeg_dir() -> Option<PathBuf> {
     au2_platform::user_data_dir().map(|p| p.join("OpenAvi").join("bin"))
 }
 
-/// FFmpeg (Windows x64 essentials ビルド) の配布 URL。自動ダウンロードは Windows のみ対応。
+/// FFmpeg (Windows x64 essentials ビルド) の配布 URL。
 pub const FFMPEG_DOWNLOAD_URL: &str = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
+/// FFmpeg (Linux x86_64 static ビルド) の配布 URL。
+pub const FFMPEG_LINUX_X64_URL: &str =
+    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz";
+/// FFmpeg (Linux aarch64 static ビルド) の配布 URL。
+pub const FFMPEG_LINUX_ARM64_URL: &str =
+    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linuxarm64-gpl.tar.xz";
+/// FFmpeg / FFprobe (macOS static ビルド) の配布 URL。
+pub const FFMPEG_MACOS_FFMPEG_URL: &str = "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip";
+pub const FFMPEG_MACOS_FFPROBE_URL: &str = "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip";
 
 /// FFmpeg / FFprobe をダウンロードして [`user_ffmpeg_dir`] に展開します（ブロッキング。別スレッドから呼び出すこと）。
-/// 成功時は配置先ディレクトリを返します。Windows 以外では OS のパッケージマネージャ経由での導入を案内するエラーを返します。
+/// Windows / macOS / Linux 各 OS 向けの静的バイナリ自動取得に対応し、成功時は配置先ディレクトリを返します。
 pub fn download_ffmpeg_blocking() -> Result<PathBuf, String> {
-    if !cfg!(windows) {
-        return Err(
-            "自動ダウンロードは Windows のみ対応です。お使いの OS のパッケージマネージャ（apt / brew など）で ffmpeg を導入してください"
-                .to_string(),
-        );
-    }
     let dest = user_ffmpeg_dir().ok_or_else(|| "ユーザーデータ領域が取得できません".to_string())?;
     std::fs::create_dir_all(&dest).map_err(|e| format!("配置先を作成できません: {e}"))?;
 
     let work = std::env::temp_dir().join("openavi-ffmpeg-download");
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work).map_err(|e| format!("作業フォルダを作成できません: {e}"))?;
+
+    let result = if cfg!(windows) {
+        download_ffmpeg_windows(&work, &dest)
+    } else if cfg!(target_os = "macos") {
+        download_ffmpeg_macos(&work, &dest)
+    } else if cfg!(target_os = "linux") {
+        download_ffmpeg_linux(&work, &dest)
+    } else {
+        Err("お使いの OS のパッケージマネージャで ffmpeg を導入してください".to_string())
+    };
+
+    let _ = std::fs::remove_dir_all(&work);
+    result?;
+
+    if !dest.join(au2_platform::exe_name("ffmpeg")).is_file() {
+        return Err("ffmpeg を配置できませんでした".to_string());
+    }
+    Ok(dest)
+}
+
+fn download_ffmpeg_windows(work: &Path, dest: &Path) -> Result<(), String> {
     let zip = work.join("ffmpeg.zip");
     let extract = work.join("extract");
-
     let q = |p: &Path| p.to_string_lossy().replace('\'', "''");
     let script = format!(
         "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; \
@@ -686,7 +709,7 @@ pub fn download_ffmpeg_blocking() -> Result<PathBuf, String> {
         url = FFMPEG_DOWNLOAD_URL,
         zip = q(&zip),
         extract = q(&extract),
-        dest = q(&dest),
+        dest = q(dest),
     );
 
     let mut cmd = Command::new("powershell");
@@ -695,16 +718,81 @@ pub fn download_ffmpeg_blocking() -> Result<PathBuf, String> {
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script])
         .output()
         .map_err(|e| format!("PowerShell を起動できません: {e}"))?;
-    let _ = std::fs::remove_dir_all(&work);
 
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
         return Err(format!("ダウンロードに失敗しました: {}", err.trim()));
     }
-    if !dest.join(au2_platform::exe_name("ffmpeg")).is_file() {
-        return Err("ffmpeg を配置できませんでした".to_string());
+    Ok(())
+}
+
+fn download_ffmpeg_macos(work: &Path, dest: &Path) -> Result<(), String> {
+    let q = |p: &Path| p.to_string_lossy().replace('\'', "'\\''");
+    let script = format!(
+        "set -e; \
+         curl -fL -sS '{ffmpeg_url}' -o '{work}/ffmpeg.zip'; \
+         unzip -qo '{work}/ffmpeg.zip' -d '{dest}'; \
+         curl -fL -sS '{ffprobe_url}' -o '{work}/ffprobe.zip' && unzip -qo '{work}/ffprobe.zip' -d '{dest}' || true; \
+         chmod +x '{dest}/ffmpeg' '{dest}/ffprobe' 2>/dev/null || true; \
+         xattr -dr com.apple.quarantine '{dest}/ffmpeg' '{dest}/ffprobe' 2>/dev/null || true",
+        ffmpeg_url = FFMPEG_MACOS_FFMPEG_URL,
+        ffprobe_url = FFMPEG_MACOS_FFPROBE_URL,
+        work = q(work),
+        dest = q(dest),
+    );
+
+    let output = Command::new("sh")
+        .args(["-c", &script])
+        .output()
+        .map_err(|e| format!("シェルを起動できません: {e}"))?;
+
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "ダウンロードに失敗しました ({})。Homebrew (`brew install ffmpeg`) での導入もお試しください",
+            err.trim()
+        ));
     }
-    Ok(dest)
+    Ok(())
+}
+
+fn download_ffmpeg_linux(work: &Path, dest: &Path) -> Result<(), String> {
+    let url = if cfg!(target_arch = "aarch64") {
+        FFMPEG_LINUX_ARM64_URL
+    } else {
+        FFMPEG_LINUX_X64_URL
+    };
+    let archive = work.join("ffmpeg.tar.xz");
+    let extract = work.join("extract");
+    let _ = std::fs::create_dir_all(&extract);
+    let q = |p: &Path| p.to_string_lossy().replace('\'', "'\\''");
+    let script = format!(
+        "set -e; \
+         curl -fL -sS '{url}' -o '{archive}'; \
+         tar -xJf '{archive}' -C '{extract}'; \
+         f=$(find '{extract}' -type f -name ffmpeg | head -n 1); \
+         p=$(find '{extract}' -type f -name ffprobe | head -n 1); \
+         [ -n \"$f\" ] && cp -f \"$f\" '{dest}/ffmpeg' && chmod +x '{dest}/ffmpeg'; \
+         [ -n \"$p\" ] && cp -f \"$p\" '{dest}/ffprobe' && chmod +x '{dest}/ffprobe' || true",
+        url = url,
+        archive = q(&archive),
+        extract = q(&extract),
+        dest = q(dest),
+    );
+
+    let output = Command::new("sh")
+        .args(["-c", &script])
+        .output()
+        .map_err(|e| format!("シェルを起動できません: {e}"))?;
+
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "ダウンロードに失敗しました ({})。パッケージマネージャ (`sudo apt install ffmpeg` 等) での導入もお試しください",
+            err.trim()
+        ));
+    }
+    Ok(())
 }
 
 /// FFmpeg / FFprobe の実行ファイルを探索します。
@@ -737,7 +825,7 @@ fn locate_ffmpeg_tools() -> (Option<PathBuf>, Option<PathBuf>) {
         search_dirs.push(cur_dir.join("tools"));
     }
 
-    // 3. Windows 固有: インストール先 (%LOCALAPPDATA%\Programs\OpenAvi) / Scoop / Chocolatey
+    // 3. OS 固有の既知パッケージ配置先
     if cfg!(windows) {
         if let Some(local_app_data) = au2_platform::user_data_dir() {
             let install_dir = local_app_data.join("Programs").join("OpenAvi");
@@ -748,6 +836,20 @@ fn locate_ffmpeg_tools() -> (Option<PathBuf>, Option<PathBuf>) {
             search_dirs.push(home.join("scoop").join("shims"));
         }
         search_dirs.push(PathBuf::from(r"C:\ProgramData\chocolatey\bin"));
+    } else if cfg!(target_os = "macos") {
+        // Finder から GUI 起動した場合でも Homebrew / MacPorts の FFmpeg を確実に検出する
+        search_dirs.push(PathBuf::from("/opt/homebrew/bin"));
+        search_dirs.push(PathBuf::from("/usr/local/bin"));
+        search_dirs.push(PathBuf::from("/opt/local/bin"));
+    } else {
+        search_dirs.push(PathBuf::from("/usr/local/bin"));
+        search_dirs.push(PathBuf::from("/usr/bin"));
+        search_dirs.push(PathBuf::from("/snap/bin"));
+        search_dirs.push(PathBuf::from("/home/linuxbrew/.linuxbrew/bin"));
+        if let Some(home) = au2_platform::home_dir() {
+            search_dirs.push(home.join(".local").join("bin"));
+            search_dirs.push(home.join(".nix-profile").join("bin"));
+        }
     }
 
     // ディレクトリ候補から ffmpeg / ffprobe を探索

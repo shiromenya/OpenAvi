@@ -4,7 +4,7 @@
 //! 他のクレートは `USERPROFILE` / `LOCALAPPDATA` / `.exe` / `cfg(windows)` を直接扱わず、
 //! ここの関数を経由してください（クロスプラットフォーム対応の窓口）。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// ユーザーのホームディレクトリ（Windows: `USERPROFILE`、その他: `HOME`）。
@@ -52,6 +52,23 @@ pub fn hide_console_window(cmd: &mut Command) {
     #[cfg(not(windows))]
     {
         let _ = cmd;
+    }
+}
+
+/// 指定したファイルまたは親フォルダを OS 標準のファイルマネージャ（Explorer / Finder / xdg-open）で開きます。
+pub fn reveal_in_file_manager(path: &Path) {
+    #[cfg(windows)]
+    {
+        let _ = Command::new("explorer").arg("/select,").arg(path).spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("open").arg("-R").arg(path).spawn();
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        let dir = path.parent().unwrap_or(path);
+        let _ = Command::new("xdg-open").arg(dir).spawn();
     }
 }
 
