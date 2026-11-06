@@ -4,6 +4,7 @@ description = "OpenAvi desktop application"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+build = "build.rs"
 
 [[bin]]
 name = "openavi"
@@ -21,6 +22,7 @@ egui_dock.workspace = true
 rfd.workspace = true
 log.workspace = true
 env_logger.workspace = true
+image.workspace = true
 
 [dev-dependencies]
 image.workspace = true

@@ -11,7 +11,7 @@ use au2_media::MediaKind;
 use au2_plugin::{PluginKind, SupportStatus};
 use eframe::egui::{self, vec2, CollapsingHeader, RichText, ScrollArea};
 
-use super::{button_grid, small_button};
+use super::{button_grid, small_button, tiny_button};
 use crate::state::EditorState;
 use crate::theme;
 
@@ -233,40 +233,50 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                     PluginKind::Mod2Dll => "📦",
                     PluginKind::Aux2Dll => "⚙",
                 };
-                ui.horizontal(|ui| {
-                    ui.label(format!("{icon} {}", p.file_name));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_space(8.0);
-                        ui.colored_label(badge_color, format!("[{}]", p.arch.label()))
-                            .on_hover_text(p.arch.description());
-                    });
-                });
-                for entry in &p.entries {
-                    let clean_name = au2_plugin::clean_script_name(&entry.display_name);
-                    ui.horizontal(|ui| {
-                        ui.add_space(10.0);
-                        ui.label(RichText::new(format!("・{clean_name}")).size(12.0));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.add_space(8.0);
-                            if p.kind.can_place_as_object()
-                                && small_button(ui, "＋配置")
-                                    .on_hover_text("このスクリプト/フィルタを単体オブジェクトとしてタイムラインに配置")
-                                    .clicked()
-                            {
-                                place_object = Some((p.kind, entry.clone()));
-                            }
-                            if p.kind.can_apply_to_object()
-                                && st.selected.is_some()
-                                && small_button(ui, "＋適用")
-                                    .on_hover_text("選択中のオブジェクトにこの効果を追加")
-                                    .clicked()
-                            {
-                                apply_effect = Some((p.kind, entry.clone()));
-                            }
+                let group_header = format!("{icon} {} ({})", p.file_name, p.entries.len());
+                let header_id = ui.make_persistent_id(format!("src_plugin_grp_{}_{}", idx, p.file_name));
+                CollapsingHeader::new(RichText::new(group_header).strong().size(12.5))
+                    .id_salt(header_id)
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.horizontal(|ui| {
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new(format!("種別: {}", p.kind.label()))
+                                    .size(11.0)
+                                    .color(theme::text_muted()),
+                            );
+                            ui.colored_label(badge_color, format!("[{}]", p.arch.label()))
+                                .on_hover_text(p.arch.description());
                         });
+                        for entry in &p.entries {
+                            let clean_name = au2_plugin::clean_script_name(&entry.display_name);
+                            ui.horizontal(|ui| {
+                                ui.add_space(8.0);
+                                ui.label(RichText::new(format!("・{clean_name}")).size(12.0));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.add_space(4.0);
+                                    if p.kind.can_place_as_object()
+                                        && tiny_button(ui, "＋配置")
+                                            .on_hover_text("このスクリプト/フィルタを単体オブジェクトとしてタイムラインに配置")
+                                            .clicked()
+                                    {
+                                        place_object = Some((p.kind, entry.clone()));
+                                    }
+                                    if p.kind.can_apply_to_object()
+                                        && st.selected.is_some()
+                                        && tiny_button(ui, "＋適用")
+                                            .on_hover_text("選択中のオブジェクトにこの効果を追加")
+                                            .clicked()
+                                    {
+                                        apply_effect = Some((p.kind, entry.clone()));
+                                    }
+                                });
+                            });
+                        }
                     });
-                }
-                ui.add_space(2.0);
+                ui.add_space(1.0);
             }
             if let Some((kind, entry)) = apply_effect {
                 if let Some(sel_id) = st.selected {

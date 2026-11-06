@@ -8,58 +8,96 @@ Set-Location $PSScriptRoot
 
 $env:PATH = "$env:USERPROFILE\.cargo\bin;C:\Users\user\AppData\Local\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin;$env:PATH"
 
-# 1. Generate assets/openavi.ico (256x256 32-bit ICO for Windows Explorer)
+# 1. Generate assets/openavi.ico and assets/openavi_icon.png from OpenAvi Logo
 New-Item -ItemType Directory -Force -Path "assets" | Out-Null
 Add-Type -AssemblyName System.Drawing
-$bmp = New-Object System.Drawing.Bitmap(256, 256, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
-$g = [System.Drawing.Graphics]::FromImage($bmp)
-$g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-$g.Clear([System.Drawing.Color]::Transparent)
 
-$rect = New-Object System.Drawing.Rectangle(16, 16, 224, 224)
-$brush = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
-    $rect,
-    [System.Drawing.Color]::FromArgb(255, 26, 35, 126),
-    [System.Drawing.Color]::FromArgb(255, 233, 69, 96),
-    45.0
+$logoCandidates = @(
+    (Join-Path $PSScriptRoot "assets\openavi_logo.png"),
+    (Join-Path $PSScriptRoot "assets\OpenAvi Logo.png")
 )
-$g.FillEllipse($brush, $rect)
+$logoPath = $null
+foreach ($cand in $logoCandidates) {
+    if (Test-Path $cand) {
+        $logoPath = $cand
+        break
+    }
+}
 
-$pts = @(
-    (New-Object System.Drawing.Point(96, 72)),
-    (New-Object System.Drawing.Point(96, 184)),
-    (New-Object System.Drawing.Point(184, 128))
-)
-$whiteBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::White)
-$g.FillPolygon($whiteBrush, $pts)
-$g.Dispose()
+# 256x256 正方形 PNG アイコン生成関数
+function Create-SquareLogo {
+    param(
+        $img,
+        [int]$size
+    )
+    $bmp = New-Object System.Drawing.Bitmap($size, $size, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+    $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+    $g.Clear([System.Drawing.Color]::Transparent)
 
-$msPng = New-Object System.IO.MemoryStream
-$bmp.Save($msPng, [System.Drawing.Imaging.ImageFormat]::Png)
-$pngBytes = $msPng.ToArray()
-$msPng.Dispose()
-$bmp.Dispose()
+    $targetW = [int]($size * 0.94)
+    $targetH = [int]($targetW * ($img.Height / $img.Width))
+    $x = [int](($size - $targetW) / 2)
+    $y = [int](($size - $targetH) / 2)
+
+    $g.DrawImage($img, $x, $y, $targetW, $targetH)
+    $g.Dispose()
+    return ,$bmp
+}
 
 $icoPath = Join-Path $PSScriptRoot "assets\openavi.ico"
-$fs = [System.IO.File]::Create($icoPath)
-$bw = New-Object System.IO.BinaryWriter($fs)
-# ICONDIR (Reserved=0, Type=1, Count=1)
-$bw.Write([uint16]0)
-$bw.Write([uint16]1)
-$bw.Write([uint16]1)
-# ICONDIRENTRY (Width=0 [256], Height=0 [256], ColorCount=0, Reserved=0, Planes=1, BitCount=32, BytesInRes, ImageOffset=22)
-$bw.Write([byte]0)
-$bw.Write([byte]0)
-$bw.Write([byte]0)
-$bw.Write([byte]0)
-$bw.Write([uint16]1)
-$bw.Write([uint16]32)
-$bw.Write([uint32]$pngBytes.Length)
-$bw.Write([uint32]22)
-$bw.Write($pngBytes)
-$bw.Close()
-$fs.Close()
-Write-Host "Generated icon: $icoPath"
+if ($logoPath) {
+    $srcImg = [System.Drawing.Image]::FromFile($logoPath)
+
+    $bmp256 = Create-SquareLogo -img $srcImg -size 256
+    $bmp256.Save((Join-Path $PSScriptRoot "assets\openavi_icon.png"), [System.Drawing.Imaging.ImageFormat]::Png)
+    $bmp256.Dispose()
+
+    # マルチサイズ ICO 生成 (16, 32, 48, 64, 128, 256)
+    $sizes = @(16, 32, 48, 64, 128, 256)
+    $images = @()
+    foreach ($s in $sizes) {
+        $bmp = Create-SquareLogo -img $srcImg -size $s
+        $ms = New-Object System.IO.MemoryStream
+        $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+        $bmp.Dispose()
+        $images += [PSCustomObject]@{
+            Size = $s
+            Bytes = $ms.ToArray()
+        }
+        $ms.Dispose()
+    }
+    $srcImg.Dispose()
+
+    $fs = [System.IO.File]::Create($icoPath)
+    $bw = New-Object System.IO.BinaryWriter($fs)
+    $bw.Write([uint16]0)
+    $bw.Write([uint16]1)
+    $bw.Write([uint16]$images.Count)
+    $offset = 6 + ($images.Count * 16)
+    foreach ($img in $images) {
+        $dim = if ($img.Size -ge 256) { 0 } else { [byte]$img.Size }
+        $bw.Write([byte]$dim)
+        $bw.Write([byte]$dim)
+        $bw.Write([byte]0)
+        $bw.Write([byte]0)
+        $bw.Write([uint16]1)
+        $bw.Write([uint16]32)
+        $bw.Write([uint32]$img.Bytes.Length)
+        $bw.Write([uint32]$offset)
+        $offset += $img.Bytes.Length
+    }
+    foreach ($img in $images) {
+        $bw.Write($img.Bytes)
+    }
+    $bw.Close()
+    $fs.Close()
+    Write-Host "Generated multi-size icon from logo: $icoPath"
+} else {
+    Write-Host "Logo not found, keeping existing icon: $icoPath"
+}
 
 # 2. Build or locate binary
 if (-not $SkipBuild) {
@@ -126,8 +164,6 @@ if ($ffprobePath -and (Test-Path $ffprobePath)) {
 Copy-Item "assets" (Join-Path $stage "assets") -Recurse -Force
 Copy-Item "samples" (Join-Path $stage "samples") -Recurse -Force
 Copy-Item "plugins" (Join-Path $stage "plugins") -Recurse -Force
-Copy-Item "install.bat" (Join-Path $stage "install.bat") -Force
-Copy-Item "Launch-OpenAvi.bat" (Join-Path $stage "Launch-OpenAvi.bat") -Force
 Copy-Item "README.md" (Join-Path $stage "README.md") -Force
 Copy-Item "LICENSE" (Join-Path $stage "LICENSE") -Force
 

@@ -17,6 +17,8 @@ pub fn parse_color(hex: &str) -> Option<Color32> {
 pub const BUTTON_H: f32 = 30.0;
 /// 行内に置く小さめボタンの標準高さ。
 pub const SMALL_BUTTON_H: f32 = 26.0;
+/// 行内に置くスリムな極小ボタンの標準高さ。
+pub const TINY_BUTTON_H: f32 = 21.0;
 
 /// 利用可能幅いっぱいに、同じ幅のボタンを整列して並べます（最終行は残りの数で等分）。
 /// 各項目は `(ラベル, ツールチップ)`。クリックされた項目の添字を返します。
@@ -48,4 +50,9 @@ pub fn button_grid(ui: &mut egui::Ui, items: &[(egui::WidgetText, &str)], min_co
 /// 一覧の行末などに置く、文字が切れない最小幅・十分な高さを持つ小ボタン。
 pub fn small_button(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) -> egui::Response {
     ui.add(egui::Button::new(text).min_size(vec2(64.0, SMALL_BUTTON_H)))
+}
+
+/// 一覧の行末などに置く、省スペースでスリムな極小ボタン。
+pub fn tiny_button(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) -> egui::Response {
+    ui.add(egui::Button::new(text).min_size(vec2(46.0, TINY_BUTTON_H)))
 }

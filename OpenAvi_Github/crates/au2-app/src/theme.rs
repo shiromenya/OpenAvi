@@ -5,13 +5,41 @@
 //!   または [`flip`] / [`fg`]（ダーク前提で書かれた色をライト用に変換）を経由して取得します。
 //! - 選択したテーマは `<user_data_dir>/OpenAvi/theme.txt` に保存され、次回起動時に復元されます。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use eframe::egui::{self, ecolor::Hsva, vec2, Color32, Rounding, Stroke};
 
 static DARK: AtomicBool = AtomicBool::new(true);
+static PREF: AtomicU8 = AtomicU8::new(0); // 0 = Dark, 1 = Light, 2 = System
 
-/// テーマ種別。
+/// テーマ設定（ダーク / ライト / システム設定に従う）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemePreference {
+    Dark,
+    Light,
+    System,
+}
+
+impl ThemePreference {
+    #[allow(dead_code)]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dark => "🌙 ダークモード",
+            Self::Light => "☀ ライトモード",
+            Self::System => "💻 システム設定に従う",
+        }
+    }
+
+    pub fn cycled(self) -> Self {
+        match self {
+            Self::Dark => Self::Light,
+            Self::Light => Self::System,
+            Self::System => Self::Dark,
+        }
+    }
+}
+
+/// 実際に適用されるテーマ種別。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThemeMode {
     Dark,
@@ -19,6 +47,7 @@ pub enum ThemeMode {
 }
 
 impl ThemeMode {
+    #[allow(dead_code)]
     pub fn label(self) -> &'static str {
         match self {
             Self::Dark => "🌙 ダークモード",
@@ -34,6 +63,14 @@ impl ThemeMode {
     }
 }
 
+pub fn preference() -> ThemePreference {
+    match PREF.load(Ordering::Relaxed) {
+        1 => ThemePreference::Light,
+        2 => ThemePreference::System,
+        _ => ThemePreference::Dark,
+    }
+}
+
 pub fn mode() -> ThemeMode {
     if DARK.load(Ordering::Relaxed) {
         ThemeMode::Dark
@@ -46,14 +83,69 @@ pub fn is_dark() -> bool {
     DARK.load(Ordering::Relaxed)
 }
 
-/// テーマを切り替えて egui のスタイルへ反映し、設定ファイルへ保存します。
+/// OS / システムのテーマ設定がダークであるかを判定します。
+pub fn is_system_dark(ctx: &egui::Context) -> bool {
+    if let Some(t) = ctx.system_theme() {
+        return matches!(t, egui::Theme::Dark);
+    }
+    // システムテーマが取得できない場合の安全なデフォルト（ダーク）
+    true
+}
+
+/// テーマ設定を切り替えて egui のスタイルへ反映し、設定ファイルへ保存します。
+pub fn set_preference(ctx: &egui::Context, pref: ThemePreference) {
+    PREF.store(
+        match pref {
+            ThemePreference::Dark => 0,
+            ThemePreference::Light => 1,
+            ThemePreference::System => 2,
+        },
+        Ordering::Relaxed,
+    );
+
+    let is_dark_target = match pref {
+        ThemePreference::Dark => true,
+        ThemePreference::Light => false,
+        ThemePreference::System => is_system_dark(ctx),
+    };
+
+    DARK.store(is_dark_target, Ordering::Relaxed);
+    apply(ctx);
+    save_preference(pref);
+}
+
+/// システムテーマ（OS 設定）の変化を追従します（System 設定時のみ）。
+pub fn update_system_theme(ctx: &egui::Context) {
+    if preference() == ThemePreference::System {
+        let sys_dark = is_system_dark(ctx);
+        if sys_dark != is_dark() {
+            DARK.store(sys_dark, Ordering::Relaxed);
+            apply(ctx);
+        }
+    }
+}
+
+/// 互換用: テーマを直接切り替えて反映・保存します。
+#[allow(dead_code)]
 pub fn set_mode(ctx: &egui::Context, m: ThemeMode) {
-    set_mode_no_save(ctx, m);
-    save(m);
+    set_preference(
+        ctx,
+        match m {
+            ThemeMode::Dark => ThemePreference::Dark,
+            ThemeMode::Light => ThemePreference::Light,
+        },
+    );
 }
 
 /// 設定ファイルへ保存せずにテーマだけ切り替えます（テスト用）。
 pub fn set_mode_no_save(ctx: &egui::Context, m: ThemeMode) {
+    PREF.store(
+        match m {
+            ThemeMode::Dark => 0,
+            ThemeMode::Light => 1,
+        },
+        Ordering::Relaxed,
+    );
     DARK.store(m == ThemeMode::Dark, Ordering::Relaxed);
     apply(ctx);
 }
@@ -62,29 +154,60 @@ fn config_path() -> Option<std::path::PathBuf> {
     au2_platform::user_data_dir().map(|p| p.join("OpenAvi").join("theme.txt"))
 }
 
-/// 保存済みのテーマを読み込みます（未保存ならダーク）。
-pub fn load_saved() -> ThemeMode {
+/// 保存済みのテーマ設定を読み込みます（未保存ならダーク）。
+pub fn load_saved_preference() -> ThemePreference {
     let Some(path) = config_path() else {
-        return ThemeMode::Dark;
+        return ThemePreference::Dark;
     };
     match std::fs::read_to_string(path) {
-        Ok(s) if s.trim().eq_ignore_ascii_case("light") => ThemeMode::Light,
+        Ok(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "light" => ThemePreference::Light,
+            "system" => ThemePreference::System,
+            _ => ThemePreference::Dark,
+        },
+        _ => ThemePreference::Dark,
+    }
+}
+
+#[allow(dead_code)]
+pub fn load_saved() -> ThemeMode {
+    match load_saved_preference() {
+        ThemePreference::Light => ThemeMode::Light,
         _ => ThemeMode::Dark,
     }
 }
 
-fn save(m: ThemeMode) {
+fn save_preference(pref: ThemePreference) {
     if let Some(path) = config_path() {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(path, if m == ThemeMode::Light { "light" } else { "dark" });
+        let txt = match pref {
+            ThemePreference::Dark => "dark",
+            ThemePreference::Light => "light",
+            ThemePreference::System => "system",
+        };
+        let _ = std::fs::write(path, txt);
     }
 }
 
 /// 起動時に保存済みテーマを読み込んで適用します。
 pub fn init(ctx: &egui::Context) {
-    DARK.store(load_saved() == ThemeMode::Dark, Ordering::Relaxed);
+    let pref = load_saved_preference();
+    PREF.store(
+        match pref {
+            ThemePreference::Dark => 0,
+            ThemePreference::Light => 1,
+            ThemePreference::System => 2,
+        },
+        Ordering::Relaxed,
+    );
+    let target_dark = match pref {
+        ThemePreference::Dark => true,
+        ThemePreference::Light => false,
+        ThemePreference::System => is_system_dark(ctx),
+    };
+    DARK.store(target_dark, Ordering::Relaxed);
     apply(ctx);
 }
 

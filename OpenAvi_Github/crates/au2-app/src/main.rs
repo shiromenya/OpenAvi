@@ -12,8 +12,20 @@ use std::sync::Arc;
 
 use eframe::egui;
 
-/// ウィンドウおよびタスクバー用のアプリアイコン (64x64 RGBA) を生成します。
+/// ウィンドウおよびタスクバー用のアプリアイコンを生成します。
+/// `assets/openavi_icon.png` のロゴ画像を読み込み、失敗時はフォールバックします。
 fn build_app_icon() -> Arc<egui::IconData> {
+    const ICON_PNG: &[u8] = include_bytes!("../../../assets/openavi_icon.png");
+    if let Ok(img) = image::load_from_memory(ICON_PNG) {
+        let rgba_img = img.to_rgba8();
+        let (w, h) = rgba_img.dimensions();
+        return Arc::new(egui::IconData {
+            rgba: rgba_img.into_raw(),
+            width: w,
+            height: h,
+        });
+    }
+
     let w = 64u32;
     let h = 64u32;
     let mut rgba = vec![0u8; (w * h * 4) as usize];

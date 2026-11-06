@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/openavi_logo.svg" alt="OpenAvi Logo" width="480">
+</p>
+
 # OpenAvi
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -75,13 +79,14 @@ openavi/
 
 ---
 
-## ダウンロード＆ワンクリック起動（一般ユーザー向け）
+## ダウンロード＆起動方法（一般ユーザー向け）
 
-1. 配布パッケージ **`OpenAvi-windows-x64.zip`** を解凍します。
-2. フォルダ内の **`install.bat`** を実行すると：
-   - `%LOCALAPPDATA%\Programs\OpenAvi` にアプリ本体がインストールされます。
-   - **デスクトップ** と **スタートメニュー** に **「OpenAvi」ショートカット** が自動作成されます。
-3. デスクトップの **「OpenAvi」アイコンをダブルクリックするだけ** で起動できます（フォルダ内の `openavi.exe` または `Launch-OpenAvi.bat` から直接ポータブル起動することも可能です）。
+インストール不要のポータブル設計（AviUtl スタイル）です。
+
+1. [Releases](../../releases) から **`OpenAvi-windows-x64.zip`** をダウンロードして解凍します。
+2. フォルダ内の **`openavi.exe` をダブルクリックするだけ** で即座に起動します。
+   - インストーラーによるレジストリ登録等は行わないため、フォルダごと自由な場所に移動したり、USB メモリに入れて持ち運ぶことも可能です。
+   - 動画・音声の読み込みに必要な FFmpeg 等もあらかじめ同梱・自動連携されているため、追加設定なしですぐにお使いいただけます。
 
 ---
 

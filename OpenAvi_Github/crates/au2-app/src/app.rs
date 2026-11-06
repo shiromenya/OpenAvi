@@ -53,6 +53,7 @@ pub struct OpenAviApp {
     new_project_modal: NewProjectModalState,
     export_modal: ExportModalState,
     last_title: String,
+    logo_texture: Option<egui::TextureHandle>,
 }
 
 /// 動画・音声書き出し（エクスポート）モーダルダイアログの状態。
@@ -398,6 +399,7 @@ impl OpenAviApp {
             new_project_modal: NewProjectModalState::default(),
             export_modal: ExportModalState::default(),
             last_title: String::new(),
+            logo_texture: None,
         }
     }
 
@@ -442,6 +444,7 @@ impl OpenAviApp {
             new_project_modal: NewProjectModalState::default(),
             export_modal: ExportModalState::default(),
             last_title: String::new(),
+            logo_texture: None,
         }
     }
 }
@@ -533,6 +536,9 @@ impl eframe::App for OpenAviApp {
 impl OpenAviApp {
     /// 1 フレーム分の UI 構築（`eframe::Frame` に依存しないため、ヘッドレスのスナップショットテストからも呼べる）。
     pub(crate) fn update_ui(&mut self, ctx: &egui::Context) {
+        // システムテーマ（OS 設定）の変化を追従
+        crate::theme::update_system_theme(ctx);
+
         // ウィンドウ閉じる要求 (Alt+F4 や [X] ボタン) を検知
         if ctx.input(|i| i.viewport().close_requested()) {
             if self.st.dirty {
@@ -601,13 +607,25 @@ impl OpenAviApp {
         self.plugins_window(ctx);
 
         if self.show_about {
+            let logo_tex = self.ensure_logo_texture(ctx);
             egui::Window::new("OpenAvi について")
                 .frame(egui::Frame::window(&ctx.style()).fill(crate::theme::surface()))
                 .open(&mut self.show_about)
                 .collapsible(false)
                 .resizable(false)
+                .default_width(320.0)
                 .show(ctx, |ui| {
-                    ui.heading("OpenAvi");
+                    if let Some(tex) = &logo_tex {
+                        let aspect = tex.aspect_ratio();
+                        let display_w = 260.0f32;
+                        let display_h = (display_w / aspect).round();
+                        ui.vertical_centered(|ui| {
+                            ui.image((tex.id(), egui::vec2(display_w, display_h)));
+                        });
+                        ui.add_space(8.0);
+                    } else {
+                        ui.heading("OpenAvi");
+                    }
                     ui.label(format!("バージョン {}", env!("CARGO_PKG_VERSION")));
                     ui.label("AviUtl 互換の次世代 64bit オープンソース動画編集ソフトウェア");
                     ui.separator();
@@ -623,7 +641,21 @@ impl OpenAviApp {
     }
 }
 
+const LOGO_PNG: &[u8] = include_bytes!("../../../assets/openavi_logo.png");
+
 impl OpenAviApp {
+    fn ensure_logo_texture(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
+        if self.logo_texture.is_none() {
+            if let Ok(img) = image::load_from_memory(LOGO_PNG) {
+                let rgba = img.to_rgba8();
+                let size = [rgba.width() as usize, rgba.height() as usize];
+                let color_image = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+                self.logo_texture = Some(ctx.load_texture("openavi_logo", color_image, egui::TextureOptions::LINEAR));
+            }
+        }
+        self.logo_texture.clone()
+    }
+
     fn menu_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -641,14 +673,12 @@ impl OpenAviApp {
                     } else {
                         RichText::new("自動保存: OFF").color(label_color).size(12.0)
                     };
-                    if ui.add(egui::Label::new(text).sense(egui::Sense::click())).clicked() {
+                    let lbl = ui.add(egui::Label::new(text).sense(egui::Sense::click()));
+                    if lbl.clicked() {
                         self.st.autosave.enabled = !self.st.autosave.enabled;
                     }
-                    if self.st.autosave.enabled {
-                        ui.weak("（編集時に即時上書き）")
-                            .on_hover_text("有効時: レイヤーやオブジェクトの変更があるたびに、プロジェクトファイルへ自動上書き保存されます。");
-                    }
-                    ui.add_space(6.0);
+                    lbl.on_hover_text("有効時: レイヤーやオブジェクトの変更があるたびに、プロジェクトファイルへ自動上書き保存されます。");
+                    ui.add_space(4.0);
                 });
                 ui.separator();
 
@@ -748,12 +778,13 @@ impl OpenAviApp {
                     ui.radio_value(&mut self.layout, LayoutMode::Docked, "シングルウィンドウ（ドッキング）");
                     ui.radio_value(&mut self.layout, LayoutMode::Separated, "マルチウィンドウ（AviUtl 風）");
                     ui.separator();
-                    let cur_mode = crate::theme::mode();
-                    let mut sel_mode = cur_mode;
-                    ui.radio_value(&mut sel_mode, crate::theme::ThemeMode::Dark, "🌙 ダークモード");
-                    ui.radio_value(&mut sel_mode, crate::theme::ThemeMode::Light, "☀ ライトモード");
-                    if sel_mode != cur_mode {
-                        crate::theme::set_mode(ctx, sel_mode);
+                    let cur_pref = crate::theme::preference();
+                    let mut sel_pref = cur_pref;
+                    ui.radio_value(&mut sel_pref, crate::theme::ThemePreference::Dark, "🌙 ダークモード");
+                    ui.radio_value(&mut sel_pref, crate::theme::ThemePreference::Light, "☀ ライトモード");
+                    ui.radio_value(&mut sel_pref, crate::theme::ThemePreference::System, "💻 システム設定に従う");
+                    if sel_pref != cur_pref {
+                        crate::theme::set_preference(ctx, sel_pref);
                     }
                     ui.separator();
                     if ui.button("レイアウトを初期化").clicked() {
@@ -857,16 +888,26 @@ impl OpenAviApp {
                     }
 
                     ui.add_space(6.0);
-                    let theme_label = if crate::theme::is_dark() { "🌙 ダーク" } else { "☀ ライト" };
-                    let next_mode = crate::theme::mode().toggled();
+                    let (theme_label, hover_text) = match crate::theme::preference() {
+                        crate::theme::ThemePreference::Dark => ("🌙 ダーク", "クリックでライトモードに切り替えます"),
+                        crate::theme::ThemePreference::Light => ("☀ ライト", "クリックでシステム設定に切り替えます"),
+                        crate::theme::ThemePreference::System => {
+                            if crate::theme::is_dark() {
+                                ("💻 システム", "システム設定（現在: ダーク）に追従中。クリックでダークモードに固定します")
+                            } else {
+                                ("💻 システム", "システム設定（現在: ライト）に追従中。クリックでダークモードに固定します")
+                            }
+                        }
+                    };
+                    let next_pref = crate::theme::preference().cycled();
                     let theme_btn = egui::Button::new(RichText::new(theme_label).size(12.0))
-                        .min_size(vec2(76.0, 26.0));
+                        .min_size(vec2(80.0, 26.0));
                     if ui
                         .add(theme_btn)
-                        .on_hover_text(format!("クリックで{}に切り替えます", next_mode.label()))
+                        .on_hover_text(hover_text)
                         .clicked()
                     {
-                        crate::theme::set_mode(ctx, next_mode);
+                        crate::theme::set_preference(ctx, next_pref);
                     }
                 });
             });
