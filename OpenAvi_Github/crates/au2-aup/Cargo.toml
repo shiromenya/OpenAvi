@@ -1,0 +1,12 @@
+[package]
+name = "au2-aup"
+description = "AviUtl Project File (.aup) binary parser and writer for OpenAvi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+au2-core.workspace = true
+au2-exo.workspace = true
+encoding_rs.workspace = true
+thiserror.workspace = true

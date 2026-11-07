@@ -1,0 +1,8 @@
+[package]
+name = "au2-core"
+description = "OpenAvi core data model (project / scene / layer / object / keyframe)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
