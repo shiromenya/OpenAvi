@@ -730,9 +730,17 @@ fn download_ffmpeg_macos(work: &Path, dest: &Path) -> Result<(), String> {
     let q = |p: &Path| p.to_string_lossy().replace('\'', "'\\''");
     let script = format!(
         "set -e; \
-         curl -fL -sS '{ffmpeg_url}' -o '{work}/ffmpeg.zip'; \
-         unzip -qo '{work}/ffmpeg.zip' -d '{dest}'; \
-         curl -fL -sS '{ffprobe_url}' -o '{work}/ffprobe.zip' && unzip -qo '{work}/ffprobe.zip' -d '{dest}' || true; \
+         if [ -x /opt/homebrew/bin/ffmpeg ]; then \
+             cp -f /opt/homebrew/bin/ffmpeg '{dest}/ffmpeg'; \
+             [ -x /opt/homebrew/bin/ffprobe ] && cp -f /opt/homebrew/bin/ffprobe '{dest}/ffprobe' || true; \
+         elif [ -x /usr/local/bin/ffmpeg ]; then \
+             cp -f /usr/local/bin/ffmpeg '{dest}/ffmpeg'; \
+             [ -x /usr/local/bin/ffprobe ] && cp -f /usr/local/bin/ffprobe '{dest}/ffprobe' || true; \
+         else \
+             curl -fL -sS '{ffmpeg_url}' -o '{work}/ffmpeg.zip'; \
+             unzip -qo '{work}/ffmpeg.zip' -d '{dest}'; \
+             curl -fL -sS '{ffprobe_url}' -o '{work}/ffprobe.zip' && unzip -qo '{work}/ffprobe.zip' -d '{dest}' || true; \
+         fi; \
          chmod +x '{dest}/ffmpeg' '{dest}/ffprobe' 2>/dev/null || true; \
          xattr -dr com.apple.quarantine '{dest}/ffmpeg' '{dest}/ffprobe' 2>/dev/null || true",
         ffmpeg_url = FFMPEG_MACOS_FFMPEG_URL,

@@ -875,10 +875,10 @@ impl AudioEngine {
 
         fn spawn_sink() -> Option<Child> {
             let candidates: &[(&str, &[&str])] = &[
-                ("pw-cat", &["--playback", "--rate", "44100", "--channels", "2", "--format", "s16", "-"]),
-                ("pacat", &["--playback", "--rate=44100", "--channels=2", "--format=s16le", "--latency-msec=50"]),
-                ("aplay", &["-q", "-f", "S16_LE", "-t", "raw", "-r", "44100", "-c", "2", "--buffer-size=8192", "-"]),
-                ("ffplay", &["-nodisp", "-autoexit", "-loglevel", "quiet", "-f", "s16le", "-ar", "44100", "-ac", "2", "-i", "-"]),
+                ("pw-cat", &["--playback", "--rate", "44100", "--channels", "2", "--format", "s16", "--latency", "30ms", "-"]),
+                ("pacat", &["--playback", "--rate=44100", "--channels=2", "--format=s16le", "--latency-msec=30"]),
+                ("aplay", &["-q", "-f", "S16_LE", "-t", "raw", "-r", "44100", "-c", "2", "--buffer-size=4096", "-"]),
+                ("ffplay", &["-nodisp", "-autoexit", "-loglevel", "quiet", "-fflags", "nobuffer", "-flags", "low_delay", "-f", "s16le", "-ar", "44100", "-ac", "2", "-i", "-"]),
             ];
             for (program, args) in candidates {
                 let mut cmd = Command::new(program);
@@ -904,7 +904,7 @@ impl AudioEngine {
             }
         }
 
-        const CHUNK_FRAMES: usize = 2048;
+        const CHUNK_FRAMES: usize = 1024;
         let mut pcm_buf = vec![0u8; CHUNK_FRAMES * (CHANNELS as usize) * 2];
         let mut sink: Option<Child> = None;
         let mut last_was_playing = false;
@@ -938,8 +938,11 @@ impl AudioEngine {
             }
 
             if !last_was_playing || gen != local_generation {
-                close_sink(&mut sink);
-                sink = spawn_sink();
+                // シーク時は既存のオーディオシンクプロセスを殺さず常時接続のまま維持し、
+                // プロセス再起動による遅延やポップノイズをゼロにする
+                if sink.is_none() {
+                    sink = spawn_sink();
+                }
                 local_generation = gen;
                 last_was_playing = true;
                 cursor_sample_frame = (seek_sec.max(0.0) * SAMPLE_RATE as f64).round() as usize;
@@ -947,11 +950,11 @@ impl AudioEngine {
                 origin_instant = Instant::now();
             }
 
-            // 実時間に対して最大約 140ms (3チャンク分) 先行して書き込むようペーシング
+            // 実時間に対して最大約 70ms (約3チャンク分) 先行して書き込むようペーシング
             let written_sec = cursor_sample_frame.saturating_sub(origin_sample_frame) as f64 / SAMPLE_RATE as f64;
             let elapsed_sec = origin_instant.elapsed().as_secs_f64();
-            if written_sec > elapsed_sec + 0.14 {
-                thread::sleep(Duration::from_millis(8));
+            if written_sec > elapsed_sec + 0.07 {
+                thread::sleep(Duration::from_millis(4));
                 continue;
             }
 
@@ -960,6 +963,8 @@ impl AudioEngine {
                 if let Some(stdin) = &mut child.stdin {
                     if stdin.write_all(&pcm_buf).is_err() {
                         close_sink(&mut sink);
+                    } else {
+                        let _ = stdin.flush();
                     }
                 }
             }
