@@ -1,0 +1,52 @@
+@リングパーティクル
+--track0:個数,3,36,12,1
+--track1:半径,20,600,180,1
+--track2:サイズ,5,200,36,1
+--track3:速度,-360,360,60,1
+--dialog:色/col,local col=0x00e5ff;
+obj.load("figure", "円", col, obj.track2)
+local n = math.floor(obj.track0)
+local r = obj.track1
+local base = obj.time * obj.track3
+for i = 1, n do
+    local a = (base + (i - 1) * 360 / n) * math.pi / 180
+    local pulse = 0.7 + 0.3 * math.sin(obj.time * 4 + i)
+    obj.draw(math.cos(a) * r, math.sin(a) * r, 0, pulse, 0.9)
+end
+
+@デジタルタイマー
+--track0:サイズ,10,300,64,1
+--check0:ミリ秒表示,1
+--dialog:文字色/col,local col=0xffffff;
+obj.setfont("MS UI Gothic", obj.track0, 0, col)
+local sec = math.floor(obj.time)
+local min = math.floor(sec / 60)
+local rem = sec % 60
+local ms = math.floor((obj.time - sec) * 100)
+if (obj.check0) then
+    obj.mes(string.format("%02d:%02d.%02d", min, rem, ms))
+else
+    obj.mes(string.format("%02d:%02d", min, rem))
+end
+
+@オーディオスペクトラム風バー
+--track0:本数,4,32,16,1
+--track1:幅,100,1600,600,1
+--track2:最大高,20,600,180,1
+--track3:動き速さ,1,30,8,0.5
+--dialog:色/col,local col=0x38bdf8;
+local n = math.floor(obj.track0)
+local total_w = obj.track1
+local max_h = obj.track2
+local spd = obj.track3
+local bar_w = (total_w / n) * 0.65
+obj.load("figure", "四角形", col, bar_w)
+for i = 1, n do
+    local x = (i - 0.5 - n / 2) * (total_w / n)
+    local h_ratio = 0.2 + 0.8 * math.abs(math.sin(obj.time * spd + i * 0.7) * math.cos(obj.time * spd * 0.6 - i * 0.4))
+    local steps = math.max(1, math.floor((max_h * h_ratio) / (bar_w * 0.8)))
+    for j = 1, steps do
+        local y = (max_h * 0.5) - (j - 0.5) * (bar_w * 0.85)
+        obj.draw(x, y, 0, 1.0, 0.85)
+    end
+end
