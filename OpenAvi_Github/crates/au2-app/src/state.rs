@@ -118,6 +118,8 @@ pub struct EditorState {
     static_textures: HashMap<PathBuf, (TextureHandle, [usize; 2])>,
     /// 動画再生フレーム用の In-Place 更新 GPU テクスチャキャッシュ (Path -> (Handle, 現在フレーム番号, 解像度))
     stream_textures: HashMap<PathBuf, (TextureHandle, u32, [usize; 2])>,
+    /// PSD / PSB レイヤー合成状態ごとの GPU テクスチャキャッシュ ((Path, StateHash) -> (Handle, 解像度))
+    psd_textures: HashMap<(PathBuf, u64), (TextureHandle, [usize; 2])>,
     /// ファイルパス解決のキャッシュ（毎フレームの OS ディスク IO / exists 呼び出しを削減）
     pub resolved_paths: HashMap<String, Option<PathBuf>>,
     /// ユーザーが「フォルダから一括再リンク」で指定した追加の素材検索フォルダ。
@@ -354,6 +356,7 @@ impl Default for EditorState {
             selected_source: None,
             static_textures: HashMap::new(),
             stream_textures: HashMap::new(),
+            psd_textures: HashMap::new(),
             resolved_paths: HashMap::new(),
             extra_search_dirs: Vec::new(),
             ffmpeg_dl: FfmpegDownload::Idle,
@@ -595,6 +598,7 @@ impl EditorState {
             selected_source: None,
             static_textures: HashMap::new(),
             stream_textures: HashMap::new(),
+            psd_textures: HashMap::new(),
             resolved_paths: HashMap::new(),
             extra_search_dirs: Vec::new(),
             ffmpeg_dl: FfmpegDownload::Idle,
@@ -853,7 +857,7 @@ impl EditorState {
                 if let Some(stem) = &orig_stem {
                     let target_stem_key = normalize_match_key(stem);
                     const COMPAT_EXTS: &[&str] = &[
-                        "wav", "mp3", "m4a", "aac", "flac", "ogg", "wma", "mp4", "avi", "mov", "mkv", "webm",
+                        "wav", "mp3", "m4a", "aac", "flac", "ogg", "wma", "mp4", "avi", "mov", "mkv", "webm", "psd", "psb",
                     ];
                     'stem_match: for dir in &search_dirs {
                         for ext in COMPAT_EXTS {
@@ -1185,6 +1189,131 @@ impl EditorState {
         Some((id, display_size))
     }
 
+    /// 指定フレーム位置におけるタイムライン上の音声トラックの振幅（0.0..=1.0）を計算します（PSD 口パク連動用）。
+    pub fn sample_audio_amplitude_at(&mut self, abs_frame: Frame) -> f32 {
+        let fps = self.scene.settings.frame_rate.as_f64().max(1.0);
+        let mut active_audio_items: Vec<(String, f64, f32)> = Vec::new();
+        for layer in &self.scene.layers {
+            if !layer.visible {
+                continue;
+            }
+            for obj in &layer.objects {
+                if !obj.contains(abs_frame) {
+                    continue;
+                }
+                let Some(src) = obj.source().filter(|s| s.enabled) else {
+                    continue;
+                };
+                if !matches!(src.kind, EffectKind::AudioFile | EffectKind::VideoFile) {
+                    continue;
+                }
+                let Some(file_str) = src.text("file").filter(|s| !s.trim().is_empty()) else {
+                    continue;
+                };
+                let rel = abs_frame - obj.frame_start;
+                let start_pos = if src.kind == EffectKind::AudioFile {
+                    src.eval("再生位置", rel, 0.0).max(0.0)
+                } else {
+                    ((src.eval("再生位置", rel, 1.0) - 1.0) / fps).max(0.0)
+                };
+                let speed = (src.eval("再生速度", rel, 100.0) / 100.0).max(0.0);
+                let audio_sec = start_pos + (rel as f64 / fps) * speed;
+                let volume = (obj
+                    .effect(&EffectKind::StandardPlayback)
+                    .map(|e| e.eval("音量", rel, 100.0))
+                    .unwrap_or(100.0)
+                    / 100.0) as f32;
+                active_audio_items.push((file_str.to_string(), audio_sec, volume));
+            }
+        }
+
+        let mut max_amp = 0.0f32;
+        let window_stereo_frames = ((44100.0 / fps).round() as usize).clamp(256, 4410);
+        for (file_str, audio_sec, volume) in active_audio_items {
+            if volume <= 0.001 {
+                continue;
+            }
+            let Some(path) = self.resolve_cached_path(&file_str) else {
+                continue;
+            };
+            let Some(pcm) = self.media.get_audio_pcm(&path) else {
+                continue;
+            };
+            let start_sample_idx = ((audio_sec * 44100.0).round() as usize).saturating_mul(2);
+            let end_sample_idx = (start_sample_idx + window_stereo_frames * 2).min(pcm.len());
+            if start_sample_idx >= end_sample_idx {
+                continue;
+            }
+            let slice = &pcm[start_sample_idx..end_sample_idx];
+            let mut sum_sq = 0.0f64;
+            for &s in slice {
+                let norm = (s as f64) / 32768.0;
+                sum_sq += norm * norm;
+            }
+            let rms = (sum_sq / (slice.len() as f64)).sqrt() as f32 * volume;
+            if rms > max_amp {
+                max_amp = rms;
+            }
+        }
+        max_amp.clamp(0.0, 1.0)
+    }
+
+    /// PSD / PSB オブジェクトのレイヤー表示設定・目パチ・口パクを反映した GPU テクスチャを取得します。
+    pub fn get_psd_object_texture(
+        &mut self,
+        ctx: &egui::Context,
+        file_str: &str,
+        overrides: &str,
+        blink_str: &str,
+        lipsync_str: &str,
+        rel_frame: u32,
+        abs_frame: Frame,
+    ) -> Option<(egui::TextureId, [usize; 2])> {
+        let path = self.resolve_cached_path(file_str)?;
+        if !au2_media::is_psd_path(&path) {
+            return None;
+        }
+        let fps = self.scene.settings.frame_rate.as_f64().max(1.0);
+        let blink = au2_media::PsdBlinkConfig::parse(blink_str);
+        let lipsync = au2_media::PsdLipSyncConfig::parse(lipsync_str);
+        let audio_amp = if lipsync.mode == au2_media::PsdLipSyncMode::AudioSync {
+            self.sample_audio_amplitude_at(abs_frame)
+        } else {
+            0.0
+        };
+
+        let (state_hash, rgba) = self.media.get_psd_composited_frame(
+            &path,
+            overrides,
+            &blink,
+            &lipsync,
+            rel_frame,
+            fps,
+            audio_amp,
+        )?;
+
+        let cache_key = (path.clone(), state_hash);
+        if let Some((handle, size)) = self.psd_textures.get(&cache_key) {
+            return Some((handle.id(), *size));
+        }
+
+        if self.psd_textures.len() >= 64 {
+            self.psd_textures.clear();
+        }
+
+        let tex_size = [rgba.width as usize, rgba.height as usize];
+        let display_size = [rgba.original_width as usize, rgba.original_height as usize];
+        let color_img = ColorImage::from_rgba_unmultiplied(tex_size, &rgba.pixels);
+        let handle = ctx.load_texture(
+            format!("media_psd:{}:{:x}", path.display(), state_hash),
+            color_img,
+            TextureOptions::LINEAR,
+        );
+        let id = handle.id();
+        self.psd_textures.insert(cache_key, (handle, display_size));
+        Some((id, display_size))
+    }
+
     /// タイムラインにオブジェクトを追加し、選択状態にします。
     pub fn add_object_at(&mut self, preferred_layer: usize, obj: TimelineObject) {
         let name = obj.display_name();
@@ -1255,16 +1384,17 @@ impl EditorState {
     /// メディアファイルを複数選択してタイムライン＆ソースパネルに追加するダイアログ。
     pub fn add_media_dialog(&mut self, preferred_layer: usize, start_frame: Frame) {
         if let Some(paths) = rfd::FileDialog::new()
-            .set_title("動画・画像・音声ファイルを追加")
+            .set_title("動画・画像・PSD・音声ファイルを追加")
             .add_filter(
-                "メディアファイル (動画・画像・音声)",
+                "メディアファイル (動画・画像・PSD・音声)",
                 &[
                     "mp4", "avi", "mov", "mkv", "webm", "wmv", "png", "jpg", "jpeg", "bmp", "webp",
-                    "gif", "wav", "mp3", "ogg", "flac",
+                    "gif", "psd", "psb", "wav", "mp3", "ogg", "flac",
                 ],
             )
+            .add_filter("PSD 立ち絵ファイル (*.psd, *.psb)", &["psd", "psb"])
             .add_filter("動画ファイル", &["mp4", "avi", "mov", "mkv", "webm", "wmv"])
-            .add_filter("画像ファイル", &["png", "jpg", "jpeg", "bmp", "webp", "gif"])
+            .add_filter("画像ファイル", &["png", "jpg", "jpeg", "bmp", "webp", "gif", "psd", "psb"])
             .add_filter("音声ファイル", &["wav", "mp3", "ogg", "flac"])
             .pick_files()
         {
@@ -1279,12 +1409,13 @@ impl EditorState {
         if let Some(paths) = rfd::FileDialog::new()
             .set_title("ソースパネルにメディア素材を追加")
             .add_filter(
-                "メディアファイル (動画・画像・音声)",
+                "メディアファイル (動画・画像・PSD・音声)",
                 &[
                     "mp4", "avi", "mov", "mkv", "webm", "wmv", "png", "jpg", "jpeg", "bmp", "webp",
-                    "gif", "wav", "mp3", "ogg", "flac",
+                    "gif", "psd", "psb", "wav", "mp3", "ogg", "flac",
                 ],
             )
+            .add_filter("PSD 立ち絵ファイル (*.psd, *.psb)", &["psd", "psb"])
             .add_filter("すべてのファイル", &["*"])
             .pick_files()
         {
@@ -1542,10 +1673,10 @@ impl EditorState {
         if let Some(paths) = rfd::FileDialog::new()
             .set_title("ファイルを開く / 素材・プラグインを取り込む (自動判別)")
             .add_filter(
-                "すべての対応ファイル (.aup2, .aup, .exo, .exa, .object, 動画, 画像, 音声, プラグイン)",
+                "すべての対応ファイル (.aup2, .aup, .exo, .exa, .object, 動画, 画像, PSD, 音声, プラグイン)",
                 &[
                     "aup2", "aup", "exo", "exa", "object", "txt", "mp4", "avi", "mov", "mkv", "webm", "wmv", "png",
-                    "jpg", "jpeg", "bmp", "webp", "gif", "wav", "mp3", "ogg", "flac", "anm", "obj",
+                    "jpg", "jpeg", "bmp", "webp", "gif", "psd", "psb", "wav", "mp3", "ogg", "flac", "anm", "obj",
                     "cam", "scn", "tra", "auf", "aui", "auo", "auc", "anm2", "obj2", "cam2", "scn2",
                     "tra2", "auf2", "aui2", "auo2", "auc2", "mod2", "aux2",
                 ],
@@ -1555,10 +1686,10 @@ impl EditorState {
                 &["aup2", "aup", "exo", "exa", "object"],
             )
             .add_filter(
-                "動画・画像・音声メディア",
+                "動画・画像・PSD・音声メディア",
                 &[
                     "mp4", "avi", "mov", "mkv", "webm", "wmv", "png", "jpg", "jpeg", "bmp", "webp",
-                    "gif", "wav", "mp3", "ogg", "flac",
+                    "gif", "psd", "psb", "wav", "mp3", "ogg", "flac",
                 ],
             )
             .add_filter(

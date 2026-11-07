@@ -8,6 +8,7 @@
 //! - **音声ファイル / 動画音声**: 44.1kHz 16-bit ステレオ PCM にデコードし、低遅延リアルタイム出力。
 
 pub mod audio;
+pub mod psd;
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -19,6 +20,11 @@ use std::time::{Duration, Instant};
 
 pub use audio::{decode_audio_pcm, AudioEngine, AudioTrackItem, DecodedAudio};
 use image::AnimationDecoder;
+pub use psd::{
+    build_synthetic_character_psd, collect_part_groups, parse_pfv_bytes, parse_pfv_str, probe_psd_dimensions,
+    PsdBlendMode, PsdBlinkConfig, PsdDocument, PsdFavoritePreset, PsdLayer, PsdLayerKind, PsdLipSyncConfig,
+    PsdLipSyncMode,
+};
 
 /// RGBA8 ピクセルバッファ。
 #[derive(Debug, Clone)]
@@ -42,12 +48,19 @@ impl MediaKind {
     pub fn from_path(path: &Path) -> Option<Self> {
         let ext = path.extension()?.to_str()?.to_ascii_lowercase();
         match ext.as_str() {
-            "png" | "jpg" | "jpeg" | "bmp" | "webp" => Some(Self::Image),
+            "png" | "jpg" | "jpeg" | "bmp" | "webp" | "psd" | "psb" => Some(Self::Image),
             "gif" | "mp4" | "avi" | "mov" | "mkv" | "webm" | "wmv" | "m4v" => Some(Self::Video),
             "wav" | "mp3" | "ogg" | "flac" | "aac" | "m4a" => Some(Self::Audio),
             _ => None,
         }
     }
+}
+
+/// パスが PSD / PSB ファイルかどうかを判定します。
+pub fn is_psd_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("psd") || e.eq_ignore_ascii_case("psb"))
 }
 
 /// メディアファイルのメタデータ情報。
@@ -90,6 +103,7 @@ impl Drop for VideoStreamHandle {
 /// 静止画または動画のキャッシュエントリ。
 enum CachedAsset {
     Static(Arc<RgbaFrame>),
+    Psd(Arc<PsdDocument>),
     AnimatedGif(Vec<Arc<RgbaFrame>>),
     VideoStream(VideoStreamHandle),
     Failed,
@@ -143,6 +157,10 @@ impl MediaCache {
         }
         match self.assets.get(path)? {
             CachedAsset::Static(frame) => Some(Arc::clone(frame)),
+            CachedAsset::Psd(doc) => {
+                let vis = doc.default_visibility();
+                Some(doc.composite_with_visibility(&vis).1)
+            }
             CachedAsset::AnimatedGif(frames) if !frames.is_empty() => {
                 Some(Arc::clone(&frames[(frame_index as usize) % frames.len()]))
             }
@@ -196,7 +214,16 @@ impl MediaCache {
 
         let meta = match MediaKind::from_path(path) {
             Some(MediaKind::Image) => {
-                if let Ok(dim) = image::image_dimensions(path) {
+                if let Some((w, h)) = probe_psd_dimensions(path) {
+                    MediaMetadata {
+                        width: w,
+                        height: h,
+                        duration_sec: 5.0,
+                        fps: 30.0,
+                        has_audio: false,
+                        has_video: false,
+                    }
+                } else if let Ok(dim) = image::image_dimensions(path) {
                     MediaMetadata {
                         width: dim.0,
                         height: dim.1,
@@ -317,6 +344,7 @@ impl MediaCache {
 
             let asset = match ext.as_str() {
                 "gif" => load_gif_or_static(path),
+                "psd" | "psb" => load_psd_asset(path),
                 "png" | "jpg" | "jpeg" | "bmp" | "webp" => load_static_image(path),
                 _ => self.init_video_stream(path),
             };
@@ -325,6 +353,10 @@ impl MediaCache {
 
         match self.assets.get(path)? {
             CachedAsset::Static(frame) => Some(Arc::clone(frame)),
+            CachedAsset::Psd(doc) => {
+                let vis = doc.default_visibility();
+                Some(doc.composite_with_visibility(&vis).1)
+            }
             CachedAsset::AnimatedGif(frames) if !frames.is_empty() => {
                 Some(Arc::clone(&frames[(frame_index as usize) % frames.len()]))
             }
@@ -360,6 +392,40 @@ impl MediaCache {
             }
             _ => None,
         }
+    }
+
+    /// PSD / PSB ファイルの解析済み [`PsdDocument`] をキャッシュ経由で取得します。
+    pub fn get_psd_document(&mut self, path: &Path) -> Option<Arc<PsdDocument>> {
+        if !is_psd_path(path) {
+            return None;
+        }
+        if !self.assets.contains_key(path) {
+            if !path.exists() {
+                return None;
+            }
+            let asset = load_psd_asset(path);
+            self.assets.insert(path.to_path_buf(), asset);
+        }
+        match self.assets.get(path)? {
+            CachedAsset::Psd(doc) => Some(Arc::clone(doc)),
+            _ => None,
+        }
+    }
+
+    /// PSD / PSB ファイルについて、レイヤー表示オーバーライド・目パチ・口パクを反映して合成した [`RgbaFrame`] と状態ハッシュを返します。
+    pub fn get_psd_composited_frame(
+        &mut self,
+        path: &Path,
+        overrides: &str,
+        blink: &PsdBlinkConfig,
+        lipsync: &PsdLipSyncConfig,
+        rel_frame: u32,
+        fps: f64,
+        audio_amplitude: f32,
+    ) -> Option<(u64, Arc<RgbaFrame>)> {
+        let doc = self.get_psd_document(path)?;
+        let vis = doc.evaluate_animated_visibility(overrides, blink, lipsync, rel_frame, fps, audio_amplitude);
+        Some(doc.composite_with_visibility(&vis))
     }
 
     /// 互換性のための参照取得 API。
@@ -591,6 +657,16 @@ fn read_exact_or_eof<R: Read>(reader: &mut R, mut buf: &mut [u8]) -> std::io::Re
         }
     }
     Ok(true)
+}
+
+fn load_psd_asset(path: &Path) -> CachedAsset {
+    match PsdDocument::from_path(path) {
+        Ok(doc) => CachedAsset::Psd(Arc::new(doc)),
+        Err(e) => {
+            log::warn!("PSD の読み込み失敗 ({}): {e}", path.display());
+            CachedAsset::Failed
+        }
+    }
 }
 
 fn load_static_image(path: &Path) -> CachedAsset {

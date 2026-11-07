@@ -536,6 +536,7 @@ name = "au2-media"
 version = "0.1.0"
 dependencies = [
  "au2-platform",
+ "encoding_rs",
  "image",
  "log",
  "thiserror 1.0.69",

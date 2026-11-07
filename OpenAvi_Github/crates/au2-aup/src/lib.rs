@@ -1382,6 +1382,9 @@ fn normalize_aup2_text_value(eff_kind: &EffectKind, key: &str, raw_val: &str) ->
 }
 
 fn is_text_setting_key(key: &str) -> bool {
+    if key.starts_with("psd_") {
+        return true;
+    }
     matches!(
         key,
         "text"

@@ -1044,12 +1044,25 @@ fn context_menu_ui(ui: &mut egui::Ui, st: &mut EditorState) {
         if ui.button("画像ファイル...").clicked() {
             ui.close_menu();
             if let Some(path) = rfd::FileDialog::new()
-                .add_filter("画像ファイル", &["png", "jpg", "jpeg", "bmp", "webp", "gif"])
+                .add_filter("画像・PSDファイル", &["png", "jpg", "jpeg", "bmp", "webp", "gif", "psd", "psb"])
                 .add_filter("すべてのファイル", &["*"])
                 .pick_file()
             {
                 let obj = TimelineObject::new_image(start, end, path.to_string_lossy());
                 st.add_object_at(target.layer, obj);
+            } else {
+                let obj = TimelineObject::new_image(start, end, "");
+                st.add_object_at(target.layer, obj);
+            }
+        }
+        if ui.button("🎨 PSDファイル (立ち絵・レイヤー切替)...").clicked() {
+            ui.close_menu();
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("Photoshop PSD / PSB ファイル (*.psd, *.psb)", &["psd", "psb"])
+                .add_filter("すべてのファイル", &["*"])
+                .pick_file()
+            {
+                st.add_media_file(&path, target.layer, start);
             } else {
                 let obj = TimelineObject::new_image(start, end, "");
                 st.add_object_at(target.layer, obj);
@@ -1281,7 +1294,17 @@ fn is_render_or_playback(kind: &EffectKind) -> bool {
 fn clip_kind_icon(obj: &TimelineObject) -> &'static str {
     match obj.source().map(|s| &s.kind) {
         Some(EffectKind::VideoFile) => "🎬",
-        Some(EffectKind::ImageFile) => "🖼",
+        Some(EffectKind::ImageFile) => {
+            if obj
+                .source()
+                .and_then(effect_file_path)
+                .is_some_and(|p| p.to_ascii_lowercase().ends_with(".psd") || p.to_ascii_lowercase().ends_with(".psb"))
+            {
+                "🎨"
+            } else {
+                "🖼"
+            }
+        }
         Some(EffectKind::AudioFile) => "🔊",
         Some(EffectKind::Text) => "Ｔ",
         Some(EffectKind::Shape) => "◆",

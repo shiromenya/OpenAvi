@@ -96,7 +96,13 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                     for (idx, src) in st.sources.iter().enumerate() {
                         let icon = match src.kind {
                             MediaKind::Video => "🎞",
-                            MediaKind::Image => "🖼",
+                            MediaKind::Image => {
+                                if au2_media::is_psd_path(&src.path) {
+                                    "🎨"
+                                } else {
+                                    "🖼"
+                                }
+                            }
                             MediaKind::Audio => "🔊",
                         };
                         let selected = st.selected_source == Some(idx);
@@ -144,8 +150,9 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                 let start = st.frame;
                 let end = start + 149;
 
-                let items: [(egui::WidgetText, &str); 13] = [
+                let items: [(egui::WidgetText, &str); 14] = [
                     ("📝 テキスト".into(), ""),
+                    ("🎨 PSD立ち絵...".into(), "PSDファイル(.psd/.psb)を選択して立ち絵オブジェクトとして配置します"),
                     ("🔴 図形 (円)".into(), ""),
                     ("🟩 図形 (四角形)".into(), ""),
                     ("⭐ 図形 (星型)".into(), ""),
@@ -160,22 +167,32 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                     ("🎥 カメラ制御".into(), ""),
                 ];
                 if let Some(i) = button_grid(ui, &items, 130.0) {
-                    let obj = match i {
-                        0 => TimelineObject::new_text(start, end, "サンプルテキスト"),
-                        1 => TimelineObject::new_shape(start, end, 1, "e94560"),
-                        2 => TimelineObject::new_shape(start, end, 2, "0f9b8e"),
-                        3 => TimelineObject::new_shape(start, end, 6, "ffd166"),
-                        4 => TimelineObject::new_framebuffer(start, end),
-                        5 => TimelineObject::new_audio_waveform(start, end),
-                        6 => TimelineObject::new_particle_output(start, end),
-                        7 => TimelineObject::new_scene_object(start, end, 1),
-                        8 => TimelineObject::new_color_correction(start, end),
-                        9 => TimelineObject::new_scene_change(start, end, "発光", 0),
-                        10 => TimelineObject::new_time_control(start, end),
-                        11 => TimelineObject::new_group_control(start, end),
-                        _ => TimelineObject::new_camera_control(start, end),
-                    };
-                    st.add_object_at(layer, obj);
+                    if i == 1 {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Photoshop PSD / PSB ファイル (*.psd, *.psb)", &["psd", "psb"])
+                            .add_filter("すべてのファイル", &["*"])
+                            .pick_file()
+                        {
+                            st.add_media_file(&path, layer, start);
+                        }
+                    } else {
+                        let obj = match i {
+                            0 => TimelineObject::new_text(start, end, "サンプルテキスト"),
+                            2 => TimelineObject::new_shape(start, end, 1, "e94560"),
+                            3 => TimelineObject::new_shape(start, end, 2, "0f9b8e"),
+                            4 => TimelineObject::new_shape(start, end, 6, "ffd166"),
+                            5 => TimelineObject::new_framebuffer(start, end),
+                            6 => TimelineObject::new_audio_waveform(start, end),
+                            7 => TimelineObject::new_particle_output(start, end),
+                            8 => TimelineObject::new_scene_object(start, end, 1),
+                            9 => TimelineObject::new_color_correction(start, end),
+                            10 => TimelineObject::new_scene_change(start, end, "発光", 0),
+                            11 => TimelineObject::new_time_control(start, end),
+                            12 => TimelineObject::new_group_control(start, end),
+                            _ => TimelineObject::new_camera_control(start, end),
+                        };
+                        st.add_object_at(layer, obj);
+                    }
                 }
             });
 

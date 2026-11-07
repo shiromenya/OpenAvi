@@ -44,8 +44,18 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     let fps = s.frame_rate.as_f64();
     let frame = st.frame;
 
-    // 1. 現在フレーム（およびサブシーン内）に存在する画像・動画オブジェクトのテクスチャを事前取得
-    let mut media_requests: Vec<(ObjectId, String, u32, f64)> = Vec::new();
+    // 1. 現在フレーム（およびサブシーン内）に存在する画像・PSD・動画オブジェクトのテクスチャを事前取得
+    struct MediaReq {
+        id: ObjectId,
+        file_str: String,
+        media_frame: u32,
+        media_sec: f64,
+        rel: u32,
+        psd_layers: String,
+        psd_blink: String,
+        psd_lipsync: String,
+    }
+    let mut media_requests: Vec<MediaReq> = Vec::new();
     for (li, obj) in st.scene.objects_at(frame) {
         if !st.scene.layers[li].visible {
             continue;
@@ -58,7 +68,19 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                     let speed = (src.eval("再生速度", rel, 100.0) / 100.0).max(0.0);
                     let media_frame = (start_pos + rel as f64 * speed).floor() as u32;
                     let media_sec = media_frame as f64 / fps.max(1.0);
-                    media_requests.push((obj.id, file_str.to_string(), media_frame, media_sec));
+                    let psd_layers = src.text("psd_layers").unwrap_or_default().to_string();
+                    let psd_blink = src.text("psd_blink").unwrap_or_default().to_string();
+                    let psd_lipsync = src.text("psd_lipsync").unwrap_or_default().to_string();
+                    media_requests.push(MediaReq {
+                        id: obj.id,
+                        file_str: file_str.to_string(),
+                        media_frame,
+                        media_sec,
+                        rel,
+                        psd_layers,
+                        psd_blink,
+                        psd_lipsync,
+                    });
                 }
             }
         }
@@ -66,9 +88,23 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
 
     let mut resolved_textures: std::collections::HashMap<ObjectId, (egui::TextureId, [usize; 2])> =
         std::collections::HashMap::new();
-    for (id, file_str, media_frame, media_sec) in media_requests {
-        if let Some(tex) = st.get_media_texture(&egui_ctx, &file_str, media_frame, media_sec) {
-            resolved_textures.insert(id, tex);
+    for req in media_requests {
+        let lower = req.file_str.to_ascii_lowercase();
+        let tex_opt = if lower.ends_with(".psd") || lower.ends_with(".psb") {
+            st.get_psd_object_texture(
+                &egui_ctx,
+                &req.file_str,
+                &req.psd_layers,
+                &req.psd_blink,
+                &req.psd_lipsync,
+                req.rel,
+                frame,
+            )
+        } else {
+            st.get_media_texture(&egui_ctx, &req.file_str, req.media_frame, req.media_sec)
+        };
+        if let Some(tex) = tex_opt {
+            resolved_textures.insert(req.id, tex);
         }
     }
 
