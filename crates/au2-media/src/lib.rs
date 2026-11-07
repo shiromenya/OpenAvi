@@ -18,7 +18,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-pub use audio::{decode_audio_pcm, AudioEngine, AudioTrackItem, DecodedAudio};
+pub use audio::{
+    decode_audio_pcm, generate_waveform_peaks, AudioEngine, AudioTrackItem, AudioWaveformPeaks, DecodedAudio,
+};
 use image::AnimationDecoder;
 pub use psd::{
     build_synthetic_character_psd, collect_part_groups, parse_pfv_bytes, parse_pfv_str, probe_psd_dimensions,
@@ -115,6 +117,8 @@ pub struct MediaCache {
     metadata_cache: HashMap<PathBuf, MediaMetadata>,
     /// 音声キャッシュ (`None` の場合もキャッシュして毎フレームの失敗再試行を完全に防止)
     audio_cache: HashMap<PathBuf, Option<Arc<Vec<i16>>>>,
+    /// タイムライン描画用オーディオ波形ピークデータキャッシュ
+    waveform_cache: HashMap<PathBuf, Option<Arc<AudioWaveformPeaks>>>,
     ffmpeg_bin: Option<PathBuf>,
     ffprobe_bin: Option<PathBuf>,
 }
@@ -135,6 +139,7 @@ impl MediaCache {
             assets: HashMap::new(),
             metadata_cache: HashMap::new(),
             audio_cache: HashMap::new(),
+            waveform_cache: HashMap::new(),
             ffmpeg_bin,
             ffprobe_bin,
         }
@@ -203,6 +208,7 @@ impl MediaCache {
         self.assets.retain(|_, a| !matches!(a, CachedAsset::Failed));
         self.metadata_cache.clear();
         self.audio_cache.retain(|_, v| v.is_some());
+        self.waveform_cache.retain(|_, v| v.is_some());
         self.ffmpeg_bin.is_some()
     }
 
@@ -328,6 +334,22 @@ impl MediaCache {
         let result = decode_audio_pcm(ffmpeg, path).map(|d| d.samples);
         self.audio_cache.insert(path.to_path_buf(), result.clone());
         result
+    }
+
+    /// メディアのオーディオ波形ピークデータ（タイムライン描画用）を取得します。
+    /// 音声なしファイルも None としてキャッシュし、無駄な再計算・再探索を完全に防止します。
+    pub fn get_audio_waveform(&mut self, path: &Path) -> Option<Arc<AudioWaveformPeaks>> {
+        if let Some(cached) = self.waveform_cache.get(path) {
+            return cached.clone();
+        }
+        let pcm = self.get_audio_pcm(path);
+        let peaks = pcm.map(|samples| {
+            // 44.1kHz 2ch, 1秒あたり120サンプル（30fpsで1フレーム4サンプル）でピーク生成
+            let p = generate_waveform_peaks(&samples, 2, 44100, 120);
+            Arc::new(p)
+        });
+        self.waveform_cache.insert(path.to_path_buf(), peaks.clone());
+        peaks
     }
 
     /// 静止画または動画の指定フレームの [`Arc<RgbaFrame>`] をノンブロッキングで取得します。

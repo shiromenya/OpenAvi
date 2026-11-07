@@ -228,29 +228,8 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
         )
         .default_open(true)
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let studio_btn = egui::Button::new(
-                    RichText::new("🔄 .auf 仕様解析 & クロスプラットフォーム移植スタジオ")
-                        .strong()
-                        .size(11.5),
-                )
-                .min_size(vec2(ui.available_width(), super::SMALL_BUTTON_H));
-                if ui
-                    .add(studio_btn)
-                    .on_hover_text(
-                        ".auf / .auf2 ネイティブフィルタの PE バイナリ構造・トラックバー定義を自動解析し、\nWindows / Mac / Linux 全対応の .anm (Lua) / WGSL シェーダー / Rust コードへ自動変換します",
-                    )
-                    .clicked()
-                {
-                    st.open_auf_porter(None);
-                }
-            });
-            ui.add_space(3.0);
-
             let mut apply_effect = None;
             let mut place_object = None;
-            let mut inspect_auf_idx = None;
-            let mut convert_auf_idx = None;
             for &idx in &visible_plugin_indices {
                 let p = &st.plugins.plugins[idx];
                 let badge_color = match p.status {
@@ -287,38 +266,13 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                             );
                             ui.colored_label(badge_color, format!("[{}]", p.arch.label()))
                                 .on_hover_text(p.arch.description());
-                            if matches!(p.kind, PluginKind::FilterDll | PluginKind::Mod2Dll | PluginKind::Aux2Dll) {
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.add_space(4.0);
-                                    if tiny_button(ui, "✨.anm変換")
-                                        .on_hover_text("この .auf プラグインを Mac / Linux / Windows 全対応の .anm (Lua) スクリプトに自動変換して登録します")
-                                        .clicked()
-                                    {
-                                        convert_auf_idx = Some(idx);
-                                    }
-                                    if tiny_button(ui, "🔍解析・移植")
-                                        .on_hover_text("PE構造・トラックバー仕様の解析と .anm / WGSL / Rust コード変換スタジオを開きます")
-                                        .clicked()
-                                    {
-                                        inspect_auf_idx = Some(idx);
-                                    }
-                                });
-                            }
                         });
+
                         for entry in &p.entries {
                             let clean_name = au2_plugin::clean_script_name(&entry.display_name);
                             ui.horizontal(|ui| {
-                                ui.add_space(8.0);
-                                ui.label(RichText::new(format!("・{clean_name}")).size(12.0));
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     ui.add_space(4.0);
-                                    if p.kind.can_place_as_object()
-                                        && tiny_button(ui, "＋配置")
-                                            .on_hover_text("このスクリプト/フィルタを単体オブジェクトとしてタイムラインに配置")
-                                            .clicked()
-                                    {
-                                        place_object = Some((p.kind, entry.clone()));
-                                    }
                                     if p.kind.can_apply_to_object()
                                         && st.selected.is_some()
                                         && tiny_button(ui, "＋適用")
@@ -327,17 +281,22 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                                     {
                                         apply_effect = Some((p.kind, entry.clone()));
                                     }
+                                    if p.kind.can_place_as_object()
+                                        && tiny_button(ui, "＋配置")
+                                            .on_hover_text("このスクリプト/フィルタを単体オブジェクトとしてタイムラインに配置")
+                                            .clicked()
+                                    {
+                                        place_object = Some((p.kind, entry.clone()));
+                                    }
+                                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                        ui.add_space(8.0);
+                                        ui.label(RichText::new(format!("・{clean_name}")).size(12.0));
+                                    });
                                 });
                             });
                         }
                     });
                 ui.add_space(1.0);
-            }
-            if let Some(idx) = inspect_auf_idx {
-                st.open_auf_porter(Some(idx));
-            }
-            if let Some(idx) = convert_auf_idx {
-                st.convert_auf_to_anm(idx);
             }
             if let Some((kind, entry)) = apply_effect {
                 if let Some(sel_id) = st.selected {

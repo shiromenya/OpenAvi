@@ -63,6 +63,23 @@ pub enum LuaLoadedPrimitive {
     },
 }
 
+/// `obj.copybuffer` などで利用される仮想画像・描画状態バッファ。
+///
+/// プラットフォーム固有の Win32 GDI / DirectX への依存を排除し、
+/// 純粋な Rust データ構造として保持されるため、Mac / Linux / Windows すべてで共通動作します。
+#[derive(Debug, Clone, PartialEq)]
+pub struct LuaVirtualBuffer {
+    pub w: f64,
+    pub h: f64,
+    pub loaded_primitive: Option<LuaLoadedPrimitive>,
+    pub draw_calls: Vec<LuaDrawCall>,
+    pub poly_calls: Vec<LuaPolyCall>,
+    pub filter_calls: Vec<LuaFilterCall>,
+    pub clip: Option<[f64; 4]>,
+    pub zoom: f64,
+    pub alpha: f64,
+}
+
 /// スクリプト実行前後の `obj` テーブル状態。
 #[derive(Debug, Clone)]
 pub struct LuaObjState {
@@ -143,6 +160,40 @@ pub struct LuaObjState {
     pub point_decelerate: bool,
     /// `.tra` スクリプト等が `return` した数値結果
     pub return_value: Option<f64>,
+    /// `obj.copybuffer` などで利用される仮想画像・描画状態バッファプール ("cache", "tmp", "cache:名前" 等)
+    pub buffers: HashMap<String, LuaVirtualBuffer>,
+    /// ピクセル補間法設定 ("nearest", "bilinear", "bicubic" 等)
+    pub pixel_option: String,
+}
+
+impl LuaObjState {
+    /// 現在のオブジェクトの描画・フィルタ状態を仮想バッファとして抽出します。
+    pub fn snapshot_to_buffer(&self) -> LuaVirtualBuffer {
+        LuaVirtualBuffer {
+            w: self.w,
+            h: self.h,
+            loaded_primitive: self.loaded_primitive.clone(),
+            draw_calls: self.draw_calls.clone(),
+            poly_calls: self.poly_calls.clone(),
+            filter_calls: self.filter_calls.clone(),
+            clip: self.current_clip,
+            zoom: self.zoom,
+            alpha: self.alpha,
+        }
+    }
+
+    /// 仮想バッファの状態を現在のオブジェクトに復元・適用します。
+    pub fn restore_from_buffer(&mut self, buf: &LuaVirtualBuffer) {
+        self.w = buf.w;
+        self.h = buf.h;
+        self.loaded_primitive = buf.loaded_primitive.clone();
+        self.draw_calls = buf.draw_calls.clone();
+        self.poly_calls = buf.poly_calls.clone();
+        self.filter_calls = buf.filter_calls.clone();
+        self.current_clip = buf.clip;
+        self.zoom = buf.zoom;
+        self.alpha = buf.alpha;
+    }
 }
 
 impl Default for LuaObjState {
@@ -220,6 +271,8 @@ impl Default for LuaObjState {
             point_accelerate: false,
             point_decelerate: false,
             return_value: None,
+            buffers: HashMap::new(),
+            pixel_option: "bilinear".to_string(),
         }
     }
 }
@@ -2454,15 +2507,6 @@ impl<'a> Vm<'a> {
                     LuaVal::Num(0.0)
                 }
             }
-            "getpixel" => {
-                if args.is_empty() {
-                    self.multi_return = vec![LuaVal::Num(self.obj.h)];
-                    LuaVal::Num(self.obj.w)
-                } else {
-                    self.multi_return = vec![LuaVal::Num(1.0)];
-                    LuaVal::Num(0xFFFFFF as f64)
-                }
-            }
             "getoption" => {
                 let opt = args.first().map(|v| v.as_str()).unwrap_or_default();
                 match opt.as_str() {
@@ -2584,6 +2628,9 @@ impl<'a> Vm<'a> {
                 }
                 LuaVal::Nil
             }
+            // ------------------------------------------------------------------------
+            // [アンカー制御 API]
+            // ------------------------------------------------------------------------
             "setanchor" => {
                 let var_name = args.first().map(|v| v.as_str()).unwrap_or_default();
                 let num = args.get(1).map(|v| v.as_num() as usize).unwrap_or(1).clamp(1, 16);
@@ -2620,12 +2667,97 @@ impl<'a> Vm<'a> {
                 }
                 LuaVal::Num(num as f64)
             }
-            "putpixel" | "copypixel" | "pixeloption" => LuaVal::Nil,
-            "copybuffer" | "clearbuffer" | "putpixeldata" | "pixelshader" | "computeshader" => LuaVal::Bool(true),
-            "getpixeldata" => {
-                self.multi_return = vec![LuaVal::Num(self.obj.w), LuaVal::Num(self.obj.h)];
-                LuaVal::Table(HashMap::new(), Vec::new())
+
+            // ------------------------------------------------------------------------
+            // [仮想バッファ操作 API (残像・一時退避・多重露光)]
+            // クロスプラットフォーム仕様: Win32 GDI を排除し Pure Rust 構造体で管理
+            // ------------------------------------------------------------------------
+            "copybuffer" => {
+                let dst = args.first().map(|v| v.as_str()).unwrap_or_else(|| "cache".into());
+                let src = args.get(1).map(|v| v.as_str()).unwrap_or_else(|| "obj".into());
+
+                // コピー元バッファを抽出
+                let src_buf = if src == "obj" {
+                    Some(self.obj.snapshot_to_buffer())
+                } else {
+                    self.obj.buffers.get(&src).cloned()
+                };
+
+                if let Some(buf) = src_buf {
+                    if dst == "obj" {
+                        self.obj.restore_from_buffer(&buf);
+                    } else {
+                        self.obj.buffers.insert(dst, buf);
+                    }
+                    LuaVal::Bool(true)
+                } else {
+                    LuaVal::Bool(false)
+                }
             }
+            "clearbuffer" => {
+                let target = args.first().map(|v| v.as_str()).unwrap_or_else(|| "cache".into());
+                if target == "obj" {
+                    self.obj.draw_calls.clear();
+                    self.obj.poly_calls.clear();
+                    self.obj.filter_calls.clear();
+                } else {
+                    self.obj.buffers.remove(&target);
+                }
+                LuaVal::Bool(true)
+            }
+
+            // ------------------------------------------------------------------------
+            // [ピクセルデータ・補間法・シェーダー制御 API]
+            // ------------------------------------------------------------------------
+            "pixeloption" => {
+                if let Some(val) = args.get(1).or_else(|| args.first()) {
+                    let s = val.as_str();
+                    if s != "type" {
+                        self.obj.pixel_option = s;
+                    }
+                }
+                LuaVal::Str(self.obj.pixel_option.clone())
+            }
+            "getpixel" => {
+                if args.is_empty() {
+                    // 引数なし時は画像サイズ (w, h) をマルチリターン
+                    self.multi_return = vec![LuaVal::Num(self.obj.h)];
+                    LuaVal::Num(self.obj.w)
+                } else {
+                    // (x, y) 座標のピクセル色 (RGB) とアルファ (0.0〜1.0)
+                    self.multi_return = vec![LuaVal::Num(self.obj.alpha)];
+                    LuaVal::Num(0xFFFFFF as f64)
+                }
+            }
+            "putpixel" => {
+                // (x, y, col, a)
+                LuaVal::Nil
+            }
+            "copypixel" => {
+                // (dst_x, dst_y, src_x, src_y, w, h)
+                LuaVal::Nil
+            }
+            "getpixeldata" => {
+                let data_type = args.first().map(|v| v.as_str()).unwrap_or_else(|| "col".into());
+                let mut map = HashMap::new();
+                map.insert("type".into(), LuaVal::Str(data_type));
+                map.insert("w".into(), LuaVal::Num(self.obj.w));
+                map.insert("h".into(), LuaVal::Num(self.obj.h));
+                self.multi_return = vec![LuaVal::Num(self.obj.w), LuaVal::Num(self.obj.h)];
+                LuaVal::Table(map, Vec::new())
+            }
+            "putpixeldata" => {
+                if let Some(LuaVal::Table(map, _)) = args.first() {
+                    if let Some(w) = map.get("w") {
+                        self.obj.w = w.as_num().max(1.0);
+                    }
+                    if let Some(h) = map.get("h") {
+                        self.obj.h = h.as_num().max(1.0);
+                    }
+                }
+                LuaVal::Bool(true)
+            }
+            "pixelshader" | "computeshader" => LuaVal::Bool(true),
             "data" | "module" => LuaVal::Table(HashMap::new(), Vec::new()),
             "getaudio" => {
                 let n = args.get(3).or_else(|| args.get(2)).map(|v| v.as_num() as usize).unwrap_or(64).clamp(1, 512);
@@ -2753,11 +2885,21 @@ pub fn compile_lua_script(source: &str) -> Vec<Stmt> {
 /// コンパイル済み構文木 (AST) を `LuaObjState` に対して直接実行します。
 /// 毎フレームの字句解析・パース・ヒープ確保を完全にスキップするため極めて高速です。
 pub fn execute_compiled_script(stmts: &[Stmt], state: &mut LuaObjState) {
-    let mut vm = Vm::new(state);
-    if let Flow::Return(vals) = vm.exec_block(stmts) {
-        if let Some(first) = vals.first() {
-            state.return_value = Some(first.as_num());
-        }
+    let (ret, globals) = {
+        let mut vm = Vm::new(state);
+        let flow = vm.exec_block(stmts);
+        let ret = if let Flow::Return(vals) = flow {
+            vals.first().map(|v| v.as_num())
+        } else {
+            None
+        };
+        (ret, vm.globals)
+    };
+    if let Some(r) = ret {
+        state.return_value = Some(r);
+    }
+    for (k, v) in globals {
+        state.named_vars.insert(k, v);
     }
 }
 
@@ -2828,5 +2970,40 @@ mod tests {
         execute_lua_script(script, &mut st);
         assert_eq!(st.draw_calls.len(), 6);
         assert!((st.draw_calls[0].ox - 100.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_copybuffer_pixeloption_and_getpixeldata() {
+        let script = r#"
+            obj.load("figure", "四角形", 0xFF00FF, 120)
+            obj.draw(10, 20, 0, 1.5, 0.8)
+            -- 現在の obj 状態を cache バッファへ退避
+            local ok1 = obj.copybuffer("cache", "obj")
+            assert_cache = ok1
+
+            -- obj をクリア
+            obj.clearbuffer("obj")
+
+            -- cache バッファから obj へ復元
+            local ok2 = obj.copybuffer("obj", "cache")
+            assert_restored = ok2
+
+            -- 補間法の設定と取得
+            obj.pixeloption("type", "bicubic")
+
+            -- ピクセルデータ情報取得 (data, w, h)
+            data, w, h = obj.getpixeldata("col")
+        "#;
+        let mut st = LuaObjState::default();
+        execute_lua_script(script, &mut st);
+
+        assert_eq!(st.named_vars.get("assert_cache"), Some(&LuaVal::Bool(true)));
+        assert_eq!(st.named_vars.get("assert_restored"), Some(&LuaVal::Bool(true)));
+        assert_eq!(st.draw_calls.len(), 1);
+        assert_eq!(st.w, 120.0);
+        assert_eq!(st.h, 120.0);
+        assert_eq!(st.pixel_option, "bicubic");
+        assert_eq!(st.named_vars.get("w"), Some(&LuaVal::Num(120.0)));
+        assert_eq!(st.named_vars.get("h"), Some(&LuaVal::Num(120.0)));
     }
 }

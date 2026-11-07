@@ -871,6 +871,7 @@ mod tests {
             output_path: wav_path.clone(),
             format: export::ExportFormat::Wav,
             quality: export::ExportQuality::High,
+            encoder: export::VideoEncoder::Auto,
             width: 320,
             height: 180,
             fps_num: 30,
@@ -891,6 +892,7 @@ mod tests {
                 output_path: mp4_path.clone(),
                 format: export::ExportFormat::Mp4,
                 quality: export::ExportQuality::Standard,
+                encoder: export::VideoEncoder::Auto,
                 width: 320,
                 height: 180,
                 fps_num: 30,
@@ -906,6 +908,47 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&out_dir);
+    }
+
+    /// ハードウェアビデオエンコーダの自動判別および安全なCPUフォールバック動作の検証
+    #[test]
+    fn test_video_encoder_probing_and_fallback() {
+        use export::VideoEncoder;
+
+        // 1. ハードウェアアクセラレーション判定の検証
+        assert!(!VideoEncoder::Auto.is_hardware_accelerated());
+        assert!(!VideoEncoder::Cpu.is_hardware_accelerated());
+        assert!(VideoEncoder::Nvenc.is_hardware_accelerated());
+        assert!(VideoEncoder::Qsv.is_hardware_accelerated());
+        assert!(VideoEncoder::Amf.is_hardware_accelerated());
+        assert!(VideoEncoder::VideoToolbox.is_hardware_accelerated());
+        assert!(VideoEncoder::Vaapi.is_hardware_accelerated());
+        assert!(VideoEncoder::MediaFoundation.is_hardware_accelerated());
+
+        // 2. GPUのない環境（CPUのみ）の場合の解決ロジック
+        let cpu_only = [VideoEncoder::Auto, VideoEncoder::Cpu];
+        assert_eq!(VideoEncoder::Auto.resolve(&cpu_only), VideoEncoder::Cpu);
+        assert_eq!(VideoEncoder::Cpu.resolve(&cpu_only), VideoEncoder::Cpu);
+        // GPU非対応環境でユーザーが Nvenc を指定しても、安全に CPU へフォールバックすること
+        assert_eq!(VideoEncoder::Nvenc.resolve(&cpu_only), VideoEncoder::Cpu);
+        assert_eq!(VideoEncoder::Qsv.resolve(&cpu_only), VideoEncoder::Cpu);
+
+        // 3. GPU対応環境（例: NVENCあり）の場合の解決ロジック
+        let with_nvenc = [VideoEncoder::Auto, VideoEncoder::Cpu, VideoEncoder::Nvenc];
+        assert_eq!(VideoEncoder::Auto.resolve(&with_nvenc), VideoEncoder::Nvenc);
+        assert_eq!(VideoEncoder::Cpu.resolve(&with_nvenc), VideoEncoder::Cpu);
+        assert_eq!(VideoEncoder::Nvenc.resolve(&with_nvenc), VideoEncoder::Nvenc);
+        // 対応していない QSV は CPU にフォールバック
+        assert_eq!(VideoEncoder::Qsv.resolve(&with_nvenc), VideoEncoder::Cpu);
+
+        // 4. 実環境でのプローブ取得（クラッシュせず確実にリストが返ること）
+        let st = state::EditorState::default();
+        let encoders = export::available_video_encoders(st.media.ffmpeg_path());
+        assert!(encoders.contains(&VideoEncoder::Auto));
+        assert!(encoders.contains(&VideoEncoder::Cpu));
+        // resolve を呼んでも panic しないこと
+        let resolved = VideoEncoder::Auto.resolve(encoders);
+        assert!(resolved == VideoEncoder::Cpu || resolved.is_hardware_accelerated());
     }
 
     /// ダークモードとライトモードの切り替え、および各モードでの UI 描画が正常に行われること。

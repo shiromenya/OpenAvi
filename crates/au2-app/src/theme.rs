@@ -1,4 +1,4 @@
-//! アプリ全体のテーマ（ダーク / ライト）とデザイントークン。
+﻿//! アプリ全体のテーマ（ダーク / ライト）とデザイントークン。
 //!
 //! - [`apply`] で `egui` のスタイル（配色・余白・ボタン最小サイズ・角丸）を一括設定します。
 //! - 各パネルは色をハードコードせず、このモジュールの関数（[`surface`] / [`border`] / [`accent_text`] など）
@@ -429,4 +429,71 @@ pub fn danger_button(text: impl Into<String>) -> egui::Button<'static> {
     egui::Button::new(egui::RichText::new(text.into()).color(Color32::WHITE).strong())
         .fill(Color32::from_rgb(200, 50, 50))
         .min_size(vec2(96.0, 30.0))
+}
+
+// =========================================================================
+// デザイントークン: メトリクス定数（UIレイアウト・余白・角丸・タイポグラフィ）
+// =========================================================================
+
+/// 角丸（Rounding / Corner Radius）
+pub mod rounding {
+    use eframe::egui::Rounding;
+
+    /// 小さな要素（バッジ、タブ、インライン要素など）の角丸 (4px)
+    pub const SM_PX: f32 = 4.0;
+    /// 標準UI要素（ボタン、入力欄、カードなど）の角丸 (6px)
+    pub const MD_PX: f32 = 6.0;
+    /// パネル、カード枠、ダイアログなどの角丸 (8px)
+    pub const LG_PX: f32 = 8.0;
+
+    #[inline]
+    pub fn sm() -> Rounding {
+        Rounding::same(SM_PX)
+    }
+    #[inline]
+    pub fn md() -> Rounding {
+        Rounding::same(MD_PX)
+    }
+    #[inline]
+    pub fn lg() -> Rounding {
+        Rounding::same(LG_PX)
+    }
+}
+
+/// 余白・パディング（Spacing / Margins / Gaps）
+pub mod spacing {
+    use eframe::egui::{vec2, Vec2};
+
+    /// 極小の余白 (2px)
+    pub const XS: f32 = 2.0;
+    /// 小さな余白 (4px)
+    pub const SM: f32 = 4.0;
+    /// 標準の余白 (6px)
+    pub const MD: f32 = 6.0;
+    /// セクション間の余白 (8px)
+    pub const LG: f32 = 8.0;
+    /// パネル内の広い余白 (10px)
+    pub const XL: f32 = 10.0;
+    /// 大きな区切り余白 (12px)
+    pub const XXL: f32 = 12.0;
+
+    /// フォーム・設定ダイアログの標準グリッドスペーシング [12.0, 6.0]
+    pub const GRID_FORM: [f32; 2] = [12.0, 6.0];
+
+    /// ボタン内パディング [12.0, 6.0]
+    pub const BUTTON_PADDING: Vec2 = vec2(12.0, 6.0);
+}
+
+/// タイポグラフィ・フォントサイズ（Font Sizes）
+pub mod typography {
+    /// 注記・バッジ・サブテキストサイズ (10.5px)
+    pub const CAPTION: f32 = 10.5;
+    /// 標準テキストサイズ (11.0px)
+    pub const BODY_SM: f32 = 11.0;
+    /// 本文・入力テキストサイズ (12.0px)
+    pub const BODY: f32 = 12.0;
+    /// 小見出し・セクションタイトルサイズ (13.5px)
+    pub const SUBHEADING: f32 = 13.5;
+    /// ダイアログ見出し・タイトルサイズ (15.0px)
+    pub const HEADING: f32 = 15.0;
 }

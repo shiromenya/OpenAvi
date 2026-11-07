@@ -1,6 +1,6 @@
 //! エディタの状態（UI から独立したアプリケーション状態）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -54,6 +54,12 @@ pub struct TimelineView {
     pub context_target: ContextTarget,
     /// Premiere Pro 風のクリップ内ビジュアルプレビュー表示の ON/OFF（既定: ON）
     pub show_clip_previews: bool,
+    /// オブジェクト境界や再生ヘッドへの吸着（スナップ）有効/無効
+    pub snap_enabled: bool,
+    /// 直近に吸着（スナップ）が発生したフレーム位置（ガイド線表示用）
+    pub active_snap_line: Option<Frame>,
+    /// 現在選択されているアクティブなレイヤー番号
+    pub selected_layer: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -72,6 +78,8 @@ pub enum TimelineDrag {
     ScrollbarThumb { grab_rel: f32 },
     /// 右下タイムライン横縮尺（ズーム）スライダーのドラッグ
     ZoomSlider,
+    /// タイムライン上の矩形範囲選択（ラバーバンド選択）
+    BoxSelect { start_pos: egui::Pos2, current_pos: egui::Pos2 },
 }
 
 impl Default for TimelineView {
@@ -87,8 +95,56 @@ impl Default for TimelineView {
                 object_id: None,
             },
             show_clip_previews: true,
+            snap_enabled: true,
+            active_snap_line: None,
+            selected_layer: 0,
         }
     }
+}
+
+/// プロジェクトの編集履歴（Undo/Redo 用スナップショット）。
+#[derive(Clone, Debug)]
+pub struct HistorySnapshot {
+    pub scene: Scene,
+    pub scenes: std::collections::BTreeMap<u32, Scene>,
+    pub selected: Option<ObjectId>,
+    pub selected_objects: HashSet<ObjectId>,
+    pub description: String,
+}
+
+/// Undo / Redo の履歴スタック管理。
+#[derive(Debug, Clone)]
+pub struct HistoryManager {
+    pub undo_stack: Vec<HistorySnapshot>,
+    pub redo_stack: Vec<HistorySnapshot>,
+    pub max_depth: usize,
+    /// スライダーやドラッグ移動などの連続操作中に、操作開始前の状態を一時退避するスナップショット
+    pub pending_continuous_base: Option<HistorySnapshot>,
+}
+
+impl Default for HistoryManager {
+    fn default() -> Self {
+        Self {
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            max_depth: 60,
+            pending_continuous_base: None,
+        }
+    }
+}
+
+/// タイムラインオブジェクトのクリップボード保管データ。
+/// 複数選択されたクリップ群の相対的なレイヤー関係や開始時間差を正確に保持します。
+#[derive(Debug, Clone)]
+pub struct ClipboardItem {
+    /// コピー元選択集合の最小レイヤーに対する相対レイヤー番号
+    pub rel_layer: usize,
+    /// コピー元選択集合の最小開始フレームに対する相対フレームオフセット
+    pub rel_frame_start: Frame,
+    /// クリップの長さ (frame_end - frame_start)
+    pub duration: Frame,
+    /// オブジェクトのディープコピー（エフェクトや設定をすべて保持）
+    pub object: TimelineObject,
 }
 
 pub struct EditorState {
@@ -103,6 +159,12 @@ pub struct EditorState {
     /// 再生開始時刻と開始フレーム（ドリフトしないよう経過時間から算出する）
     play_origin: Option<(Instant, Frame)>,
     pub selected: Option<ObjectId>,
+    /// タイムライン上で現在選択されている全オブジェクトの ID 集合（複数選択対応）
+    pub selected_objects: HashSet<ObjectId>,
+    /// コピーされたタイムラインオブジェクトのクリップボード
+    pub clipboard: Vec<ClipboardItem>,
+    /// 操作の取り消し・やり直し履歴マネージャー (Undo / Redo)
+    pub history: HistoryManager,
     pub status: String,
     pub warnings: Vec<String>,
     pub timeline: TimelineView,
@@ -375,6 +437,9 @@ impl Default for EditorState {
             playing: false,
             play_origin: None,
             selected: None,
+            selected_objects: HashSet::new(),
+            clipboard: Vec::new(),
+            history: HistoryManager::default(),
             status: "準備完了".into(),
             warnings: Vec::new(),
             timeline: TimelineView::default(),
@@ -397,6 +462,381 @@ impl Default for EditorState {
 }
 
 impl EditorState {
+    /// 現在のシーンおよび選択状態のスナップショットを作成します。
+    pub fn capture_snapshot(&self, description: impl Into<String>) -> HistorySnapshot {
+        HistorySnapshot {
+            scene: self.scene.clone(),
+            scenes: self.scenes.clone(),
+            selected: self.selected,
+            selected_objects: self.selected_objects.clone(),
+            description: description.into(),
+        }
+    }
+
+    /// 単発の変更操作（オブジェクトの追加・削除・分割など）の直前にスナップショットを記録します。
+    pub fn push_undo(&mut self, description: impl Into<String>) {
+        let snap = self.capture_snapshot(description);
+        self.history.redo_stack.clear();
+        self.history.undo_stack.push(snap);
+        if self.history.undo_stack.len() > self.history.max_depth {
+            self.history.undo_stack.remove(0);
+        }
+        self.dirty = true;
+    }
+
+    /// ドラッグ移動・伸縮・スライダー操作などの連続操作を開始する際に、変更前の状態を退避します。
+    pub fn begin_continuous_edit(&mut self, description: impl Into<String>) {
+        if self.history.pending_continuous_base.is_none() {
+            self.history.pending_continuous_base = Some(self.capture_snapshot(description));
+        }
+    }
+
+    /// 連続操作（ドラッグ移動・スライダーなど）が完了した際、実際に状態が変化していれば 1 件の Undo 履歴としてコミットします。
+    pub fn commit_continuous_edit(&mut self) {
+        if let Some(base) = self.history.pending_continuous_base.take() {
+            if base.scene != self.scene || base.scenes != self.scenes {
+                self.history.redo_stack.clear();
+                self.history.undo_stack.push(base);
+                if self.history.undo_stack.len() > self.history.max_depth {
+                    self.history.undo_stack.remove(0);
+                }
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// 連続操作をキャンセル（変更前にロールバック）します。
+    #[allow(dead_code)]
+    pub fn cancel_continuous_edit(&mut self) {
+        if let Some(base) = self.history.pending_continuous_base.take() {
+            self.scene = base.scene;
+            self.scenes = base.scenes;
+            self.selected = base.selected;
+            self.selected_objects = base.selected_objects;
+        }
+    }
+
+    /// 直前の操作を取り消します (Undo)。成功時 true。
+    pub fn undo(&mut self) -> bool {
+        self.history.pending_continuous_base = None;
+        if let Some(prev) = self.history.undo_stack.pop() {
+            let desc = prev.description.clone();
+            let current = self.capture_snapshot(desc.clone());
+            self.history.redo_stack.push(current);
+            if self.history.redo_stack.len() > self.history.max_depth {
+                self.history.redo_stack.remove(0);
+            }
+            self.scene = prev.scene;
+            self.scenes = prev.scenes;
+            self.selected = prev.selected;
+            self.selected_objects = prev.selected_objects;
+            self.dirty = true;
+            self.status = format!("「{desc}」を取り消しました (Undo)");
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 取り消した操作をやり直します (Redo)。成功時 true。
+    pub fn redo(&mut self) -> bool {
+        self.history.pending_continuous_base = None;
+        if let Some(next) = self.history.redo_stack.pop() {
+            let desc = next.description.clone();
+            let current = self.capture_snapshot(desc.clone());
+            self.history.undo_stack.push(current);
+            if self.history.undo_stack.len() > self.history.max_depth {
+                self.history.undo_stack.remove(0);
+            }
+            self.scene = next.scene;
+            self.scenes = next.scenes;
+            self.selected = next.selected;
+            self.selected_objects = next.selected_objects;
+            self.dirty = true;
+            self.status = format!("「{desc}」をやり直しました (Redo)");
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.history.undo_stack.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.history.redo_stack.is_empty()
+    }
+
+    pub fn undo_description(&self) -> Option<&str> {
+        self.history.undo_stack.last().map(|s| s.description.as_str())
+    }
+
+    pub fn redo_description(&self) -> Option<&str> {
+        self.history.redo_stack.last().map(|s| s.description.as_str())
+    }
+
+    /// 単一オブジェクトを選択状態にします。
+    pub fn select_single(&mut self, id: ObjectId) {
+        self.selected = Some(id);
+        self.selected_objects.clear();
+        self.selected_objects.insert(id);
+    }
+
+    /// オブジェクトの選択状態を反転（トグル）します（Shift+クリック用）。
+    pub fn toggle_select(&mut self, id: ObjectId) {
+        if self.selected_objects.contains(&id) {
+            self.selected_objects.remove(&id);
+            if self.selected == Some(id) {
+                self.selected = self.selected_objects.iter().next().copied();
+            }
+        } else {
+            self.selected_objects.insert(id);
+            self.selected = Some(id);
+        }
+    }
+
+    /// タイムライン上の全オブジェクトを選択します (Ctrl+A)。
+    pub fn select_all(&mut self) {
+        self.selected_objects.clear();
+        for layer in &self.scene.layers {
+            for obj in &layer.objects {
+                self.selected_objects.insert(obj.id);
+            }
+        }
+        self.selected = self.selected_objects.iter().next().copied();
+        self.status = format!("{} 個のオブジェクトを選択しました", self.selected_objects.len());
+    }
+
+    /// オブジェクト選択をすべて解除します (Esc)。
+    pub fn clear_selection(&mut self) {
+        self.selected = None;
+        self.selected_objects.clear();
+    }
+
+    /// 選択中のすべてのオブジェクトを一括削除します（Undo 履歴に記録）。
+    pub fn delete_selected_objects(&mut self) -> usize {
+        let targets: Vec<ObjectId> = if !self.selected_objects.is_empty() {
+            self.selected_objects.iter().copied().collect()
+        } else if let Some(id) = self.selected {
+            vec![id]
+        } else {
+            Vec::new()
+        };
+
+        if targets.is_empty() {
+            return 0;
+        }
+
+        self.push_undo(format!("{} 個のオブジェクトを削除", targets.len()));
+        let mut count = 0;
+        for id in &targets {
+            if self.scene.remove_object(*id).is_some() {
+                count += 1;
+            }
+        }
+        self.clear_selection();
+        self.dirty = true;
+        self.status = format!("{} 個のオブジェクトを削除しました", count);
+        count
+    }
+
+    /// 選択中のオブジェクト群をクリップボードにコピーします (Ctrl+C)。
+    pub fn copy_selected(&mut self) -> usize {
+        let target_ids: Vec<ObjectId> = if !self.selected_objects.is_empty() {
+            self.selected_objects.iter().copied().collect()
+        } else if let Some(id) = self.selected {
+            vec![id]
+        } else {
+            Vec::new()
+        };
+
+        if target_ids.is_empty() {
+            return 0;
+        }
+
+        let mut items = Vec::new();
+        let mut min_layer = usize::MAX;
+        let mut min_frame = Frame::MAX;
+
+        for id in &target_ids {
+            if let Some((layer_idx, obj)) = self.scene.find(*id) {
+                if layer_idx < min_layer {
+                    min_layer = layer_idx;
+                }
+                if obj.frame_start < min_frame {
+                    min_frame = obj.frame_start;
+                }
+                items.push((layer_idx, obj.clone()));
+            }
+        }
+
+        if items.is_empty() {
+            return 0;
+        }
+
+        // 常にレイヤー昇順・開始フレーム昇順で決定論的に整列
+        items.sort_by_key(|&(l, ref o)| (l, o.frame_start));
+
+        self.clipboard = items
+            .into_iter()
+            .map(|(layer_idx, obj)| ClipboardItem {
+                rel_layer: layer_idx.saturating_sub(min_layer),
+                rel_frame_start: obj.frame_start.saturating_sub(min_frame),
+                duration: obj.frame_end.saturating_sub(obj.frame_start),
+                object: obj,
+            })
+            .collect();
+
+        let count = self.clipboard.len();
+        self.status = format!("{} 個のオブジェクトをクリップボードにコピーしました", count);
+        count
+    }
+
+    /// クリップボード内のオブジェクト群をタイムラインへ貼り付けます (Ctrl+V)。
+    /// 貼り付け先レイヤー・フレームが未指定の場合は、現在の選択レイヤー（または最上段）と再生ヘッド位置へ貼り付けます。
+    pub fn paste_clipboard(&mut self, target_layer: Option<usize>, target_frame: Option<Frame>) -> Vec<ObjectId> {
+        if self.clipboard.is_empty() {
+            self.status = "クリップボードが空です".into();
+            return Vec::new();
+        }
+
+        let base_layer = target_layer.unwrap_or_else(|| {
+            self.selected
+                .and_then(|id| self.scene.find(id).map(|(l, _)| l))
+                .unwrap_or(0)
+        });
+        let base_frame = target_frame.unwrap_or(self.frame);
+
+        self.push_undo(format!("{} 個のオブジェクトを貼り付け", self.clipboard.len()));
+
+        let mut pasted_ids = Vec::new();
+        for item in &self.clipboard {
+            let mut new_obj = item.object.clone();
+            new_obj.id = ObjectId::new();
+            new_obj.frame_start = base_frame + item.rel_frame_start;
+            new_obj.frame_end = new_obj.frame_start + item.duration;
+
+            let layer_idx = (base_layer + item.rel_layer).min(au2_core::MAX_LAYERS - 1);
+            pasted_ids.push(new_obj.id);
+            self.scene.insert_object(layer_idx, new_obj);
+        }
+
+        self.selected_objects = pasted_ids.iter().copied().collect();
+        self.selected = pasted_ids.first().copied();
+        self.dirty = true;
+        self.sync_sources_from_scene();
+        self.sync_audio_playback();
+        self.status = format!("{} 個のオブジェクトを貼り付けました", pasted_ids.len());
+        pasted_ids
+    }
+
+    /// 選択中のオブジェクトを直後のフレームへ即座に複製します (Ctrl+D)。
+    pub fn duplicate_selected(&mut self) -> usize {
+        let count = self.copy_selected();
+        if count == 0 {
+            return 0;
+        }
+
+        let target_ids: Vec<ObjectId> = if !self.selected_objects.is_empty() {
+            self.selected_objects.iter().copied().collect()
+        } else if let Some(id) = self.selected {
+            vec![id]
+        } else {
+            Vec::new()
+        };
+
+        let mut max_end = self.frame;
+        let mut min_layer = 0;
+        for id in &target_ids {
+            if let Some((l, obj)) = self.scene.find(*id) {
+                if obj.frame_end > max_end {
+                    max_end = obj.frame_end;
+                }
+                min_layer = l;
+            }
+        }
+
+        let pasted = self.paste_clipboard(Some(min_layer), Some(max_end + 1));
+        let num = pasted.len();
+        if num > 0 {
+            self.status = format!("{} 個のオブジェクトを複製しました", num);
+        }
+        num
+    }
+
+    /// 再生ヘッド（現在のフレーム位置）にある選択オブジェクトを即座に分割します (Ctrl+K)。
+    /// 何も選択されていない場合は、再生ヘッド位置を通過しているオブジェクトを分割します。
+    pub fn split_at_playhead(&mut self) -> usize {
+        let cur_frame = self.frame;
+
+        let candidates: Vec<(usize, ObjectId)> = if !self.selected_objects.is_empty() {
+            self.selected_objects
+                .iter()
+                .filter_map(|&id| {
+                    let (layer_idx, obj) = self.scene.find(id)?;
+                    if cur_frame > obj.frame_start && cur_frame <= obj.frame_end {
+                        Some((layer_idx, id))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        } else if let Some(id) = self.selected {
+            if let Some((layer_idx, obj)) = self.scene.find(id) {
+                if cur_frame > obj.frame_start && cur_frame <= obj.frame_end {
+                    vec![(layer_idx, id)]
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            }
+        } else {
+            let mut list = Vec::new();
+            for (li, layer) in self.scene.layers.iter().enumerate() {
+                if !layer.visible {
+                    continue;
+                }
+                for obj in &layer.objects {
+                    if cur_frame > obj.frame_start && cur_frame <= obj.frame_end {
+                        list.push((li, obj.id));
+                    }
+                }
+            }
+            list
+        };
+
+        if candidates.is_empty() {
+            self.status = "再生ヘッド位置で分割できるオブジェクトがありません".into();
+            return 0;
+        }
+
+        self.push_undo(format!("{} 個のオブジェクトを分割", candidates.len()));
+
+        let mut right_ids = Vec::new();
+        for (layer_idx, obj_id) in candidates {
+            let split_result = self
+                .scene
+                .find_mut(obj_id)
+                .and_then(|(_, obj)| obj.split_at(cur_frame));
+            if let Some(right_obj) = split_result {
+                let right_id = right_obj.id;
+                right_ids.push(right_id);
+                self.scene.insert_object(layer_idx, right_obj);
+            }
+        }
+
+        let count = right_ids.len();
+        if !right_ids.is_empty() {
+            self.selected_objects = right_ids.iter().copied().collect();
+            self.selected = right_ids.first().copied();
+            self.dirty = true;
+            self.status = format!("フレーム {} で {} 個のオブジェクトを分割しました", cur_frame + 1, count);
+        }
+        count
+    }
+
     /// 動画・音声メディアを扱うのに FFmpeg が必要なのに見つかっていない場合 `true`。
     pub fn needs_ffmpeg(&self) -> bool {
         if self.media.has_ffmpeg() {
@@ -618,6 +1058,9 @@ impl EditorState {
             playing: false,
             play_origin: None,
             selected: None,
+            selected_objects: HashSet::new(),
+            clipboard: Vec::new(),
+            history: HistoryManager::default(),
             status: format!("新規プロジェクトを作成しました: {}", target_path.display()),
             warnings: Vec::new(),
             timeline: TimelineView::default(),
@@ -1289,6 +1732,12 @@ impl EditorState {
         max_amp.clamp(0.0, 1.0)
     }
 
+    /// メディアファイルのオーディオ波形ピークデータ（タイムライン描画用）を取得します。
+    pub fn get_audio_waveform(&mut self, path_str: &str) -> Option<std::sync::Arc<au2_media::AudioWaveformPeaks>> {
+        let path = self.resolve_cached_path(path_str)?;
+        self.media.get_audio_waveform(&path)
+    }
+
     /// PSD / PSB オブジェクトのレイヤー表示設定・目パチ・口パクを反映した GPU テクスチャを取得します。
     pub fn get_psd_object_texture(
         &mut self,
@@ -1382,6 +1831,8 @@ impl EditorState {
             self.status = "分解可能な表示レイヤーが見つかりませんでした".into();
             return false;
         }
+
+        self.push_undo("PSD レイヤー分解");
 
         // 元オブジェクトを削除して、そのレイヤー位置から背面→前面順に各パーツオブジェクトを配置
         let _ = self.scene.remove_object(obj_id);
@@ -1528,11 +1979,12 @@ impl EditorState {
     /// タイムラインにオブジェクトを追加し、選択状態にします。
     pub fn add_object_at(&mut self, preferred_layer: usize, obj: TimelineObject) {
         let name = obj.display_name();
+        self.push_undo(format!("オブジェクト「{name}」を追加"));
         if obj.frame_end + 1 > self.scene.settings.length {
             self.scene.settings.length = obj.frame_end + 1;
         }
         let (placed_layer, id) = self.scene.insert_object_at_free_layer(preferred_layer, obj);
-        self.selected = Some(id);
+        self.select_single(id);
         self.dirty = true;
         self.status = format!("レイヤー {} に「{name}」を追加しました", placed_layer + 1);
     }
@@ -1655,6 +2107,8 @@ impl EditorState {
                 self.warnings = doc.warnings;
                 self.file_path = path.map(Path::to_path_buf);
                 self.selected = None;
+                self.selected_objects.clear();
+                self.history = HistoryManager::default();
                 self.playing = false;
                 self.frame = doc.cursor_frame.min(self.last_frame());
                 self.timeline.scroll_x = 0.0;
@@ -1694,6 +2148,8 @@ impl EditorState {
                 self.warnings = doc.warnings;
                 self.file_path = path.map(Path::to_path_buf);
                 self.selected = None;
+                self.selected_objects.clear();
+                self.history = HistoryManager::default();
                 self.playing = false;
                 self.frame = 0;
                 self.timeline.scroll_x = 0.0;
@@ -1742,6 +2198,8 @@ impl EditorState {
                 self.warnings = doc.warnings;
                 self.file_path = path.map(Path::to_path_buf);
                 self.selected = None;
+                self.selected_objects.clear();
+                self.history = HistoryManager::default();
                 self.playing = false;
                 self.frame = 0;
                 self.timeline.scroll_x = 0.0;
@@ -2276,4 +2734,178 @@ fn set_or_remove_text_param(eff: &mut au2_core::Effect, key: &str, value: String
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use au2_core::TimelineObject;
+
+    #[test]
+    fn test_undo_redo_object_add_and_delete() {
+        let mut st = EditorState::default();
+        assert_eq!(st.scene.object_count(), 0);
+        assert!(!st.can_undo());
+
+        // オブジェクトを追加
+        let obj = TimelineObject::new(0, 30);
+        st.add_object_at(0, obj);
+        assert_eq!(st.scene.object_count(), 1);
+        assert!(st.can_undo());
+        assert_eq!(st.undo_description().unwrap(), "オブジェクト「(空のオブジェクト)」を追加");
+
+        // Undo
+        assert!(st.undo());
+        assert_eq!(st.scene.object_count(), 0);
+        assert!(st.can_redo());
+        assert_eq!(st.redo_description().unwrap(), "オブジェクト「(空のオブジェクト)」を追加");
+
+        // Redo
+        assert!(st.redo());
+        assert_eq!(st.scene.object_count(), 1);
+        assert!(st.selected.is_some());
+
+        // 削除
+        let count = st.delete_selected_objects();
+        assert_eq!(count, 1);
+        assert_eq!(st.scene.object_count(), 0);
+
+        // 削除の Undo
+        assert!(st.undo());
+        assert_eq!(st.scene.object_count(), 1);
+    }
+
+    #[test]
+    fn test_multi_select_and_batch_delete_with_undo() {
+        let mut st = EditorState::default();
+        let obj1 = TimelineObject::new(0, 20);
+        let obj2 = TimelineObject::new(30, 50);
+        let id1 = obj1.id;
+        let id2 = obj2.id;
+        st.scene.insert_object(0, obj1);
+        st.scene.insert_object(1, obj2);
+        assert_eq!(st.scene.object_count(), 2);
+
+        // 複数選択
+        st.select_single(id1);
+        assert_eq!(st.selected_objects.len(), 1);
+        st.toggle_select(id2);
+        assert_eq!(st.selected_objects.len(), 2);
+
+        // 一括削除
+        let deleted = st.delete_selected_objects();
+        assert_eq!(deleted, 2);
+        assert_eq!(st.scene.object_count(), 0);
+        assert!(st.selected_objects.is_empty());
+
+        // Undo で 2 件とも復元
+        assert!(st.undo());
+        assert_eq!(st.scene.object_count(), 2);
+        assert!(st.scene.find(id1).is_some());
+        assert!(st.scene.find(id2).is_some());
+    }
+
+    #[test]
+    fn test_continuous_edit_commit() {
+        let mut st = EditorState::default();
+        let obj = TimelineObject::new(10, 40);
+        let id = obj.id;
+        st.scene.insert_object(0, obj);
+
+        // ドラッグ開始
+        st.begin_continuous_edit("クリップ移動");
+        assert!(!st.can_undo()); // コミット前はまだ Undo スタックに積まれない
+
+        // 移動実行
+        assert!(st.scene.move_object(id, 0, 50));
+        assert_eq!(st.scene.find(id).unwrap().1.frame_start, 50);
+
+        // ドラッグ終了（コミット）
+        st.commit_continuous_edit();
+        assert!(st.can_undo());
+        assert_eq!(st.undo_description().unwrap(), "クリップ移動");
+
+        // Undo で移動前の 10 フレームに戻る
+        assert!(st.undo());
+        assert_eq!(st.scene.find(id).unwrap().1.frame_start, 10);
+
+        // Redo で再度 50 フレームへ移動
+        assert!(st.redo());
+        assert_eq!(st.scene.find(id).unwrap().1.frame_start, 50);
+    }
+
+    #[test]
+    fn test_copy_and_paste_with_undo() {
+        let mut st = EditorState::default();
+        let obj1 = TimelineObject::new(10, 30);
+        let obj2 = TimelineObject::new(20, 50);
+        let id1 = obj1.id;
+        let id2 = obj2.id;
+        st.scene.insert_object(0, obj1);
+        st.scene.insert_object(1, obj2);
+
+        // 2つのオブジェクトを選択してコピー
+        st.select_single(id1);
+        st.toggle_select(id2);
+        assert_eq!(st.copy_selected(), 2);
+        assert_eq!(st.clipboard.len(), 2);
+
+        // フレーム 100 に貼り付け
+        let pasted = st.paste_clipboard(Some(2), Some(100));
+        assert_eq!(pasted.len(), 2);
+        assert_eq!(st.scene.object_count(), 4);
+
+        // 貼り付けられたオブジェクトの相対関係（レイヤー差・フレーム差）の検証
+        let p1 = st.scene.find(pasted[0]).unwrap();
+        let p2 = st.scene.find(pasted[1]).unwrap();
+        assert_eq!(p1.0, 2); // layer 2
+        assert_eq!(p1.1.frame_start, 100);
+        assert_eq!(p1.1.frame_end, 120);
+
+        assert_eq!(p2.0, 3); // layer 3 (相対差 +1)
+        assert_eq!(p2.1.frame_start, 110); // 100 + (20 - 10)
+        assert_eq!(p2.1.frame_end, 140);
+
+        // Undo で貼り付けが取り消される
+        assert!(st.undo());
+        assert_eq!(st.scene.object_count(), 2);
+        assert!(st.scene.find(pasted[0]).is_none());
+
+        // Redo で再度貼り付けられる
+        assert!(st.redo());
+        assert_eq!(st.scene.object_count(), 4);
+    }
+
+    #[test]
+    fn test_split_at_playhead_with_undo() {
+        let mut st = EditorState::default();
+        let obj = TimelineObject::new(0, 60);
+        let id = obj.id;
+        st.scene.insert_object(0, obj);
+        st.select_single(id);
+
+        // 再生ヘッドを 30 フレームに設定して分割
+        st.set_frame(30);
+        assert_eq!(st.split_at_playhead(), 1);
+        assert_eq!(st.scene.object_count(), 2);
+
+        // 左側 (0..=29) と右側 (30..=60) に分割されていることを確認
+        let left = st.scene.find(id).unwrap().1;
+        assert_eq!(left.frame_start, 0);
+        assert_eq!(left.frame_end, 29);
+
+        let right_id = st.selected.unwrap();
+        assert_ne!(right_id, id);
+        let right = st.scene.find(right_id).unwrap().1;
+        assert_eq!(right.frame_start, 30);
+        assert_eq!(right.frame_end, 60);
+
+        // Undo で結合状態に戻る
+        assert!(st.undo());
+        assert_eq!(st.scene.object_count(), 1);
+        let restored = st.scene.find(id).unwrap().1;
+        assert_eq!(restored.frame_start, 0);
+        assert_eq!(restored.frame_end, 60);
+    }
+}
+
 

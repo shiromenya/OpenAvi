@@ -1,4 +1,4 @@
-//! タイムライン（拡張編集ウィンドウ）。
+﻿//! タイムライン（拡張編集ウィンドウ）。
 //!
 //! 1 フレーム単位で操作できるよう、すべてのヒットテスト・スナップはフレーム整数に丸めて行います。
 //! 操作：
@@ -21,12 +21,59 @@ use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Pos2, Rect, Sense,
 use crate::state::{ContextTarget, EditorState, TimelineDrag};
 use crate::theme::{self, flip};
 
-const HEADER_W: f32 = 104.0;
+const HEADER_W: f32 = 114.0;
 const RULER_H: f32 = 22.0;
 const H_SCROLLBAR_H: f32 = 18.0;
-const ZOOM_BAR_W: f32 = 200.0;
+const ZOOM_BAR_W: f32 = 270.0;
 const MIN_PPF: f32 = 0.05;
 const MAX_PPF: f32 = 48.0;
+
+/// オブジェクト境界や再生ヘッドへのスナップ（吸着）フレーム候補を探索します。
+fn find_snap_frame(
+    st: &EditorState,
+    candidate_frame: Frame,
+    threshold_px: f32,
+    ignore_ids: &std::collections::HashSet<ObjectId>,
+) -> Option<Frame> {
+    if !st.timeline.snap_enabled {
+        return None;
+    }
+    let ppf = st.timeline.px_per_frame;
+    let threshold_frames = (threshold_px / ppf).max(1.0).ceil() as Frame;
+
+    let mut best_snap: Option<(Frame, Frame)> = None;
+
+    let mut check_target = |target: Frame| {
+        let diff = (candidate_frame as i64 - target as i64).abs() as Frame;
+        if diff <= threshold_frames {
+            if let Some((best_diff, _)) = best_snap {
+                if diff < best_diff {
+                    best_snap = Some((diff, target));
+                }
+            } else {
+                best_snap = Some((diff, target));
+            }
+        }
+    };
+
+    // 1. 0 フレーム
+    check_target(0);
+    // 2. 現在の再生ヘッド位置
+    check_target(st.frame);
+
+    // 3. 他オブジェクトの境界（始点および終点 + 1）
+    for layer in &st.scene.layers {
+        for obj in &layer.objects {
+            if ignore_ids.contains(&obj.id) {
+                continue;
+            }
+            check_target(obj.frame_start);
+            check_target(obj.frame_end + 1);
+        }
+    }
+
+    best_snap.map(|(_, target)| target)
+}
 
 fn ppf_to_slider_t(ppf: f32) -> f32 {
     let p = ppf.clamp(MIN_PPF, MAX_PPF);
@@ -56,6 +103,21 @@ const LAYER_H_PREVIEW: f32 = 46.0;
 /// プレビュー OFF 時（従来の AviUtl 風コンパクト表示）のレイヤー高さ
 const LAYER_H_COMPACT: f32 = 24.0;
 const CLIP_HEADER_H: f32 = 15.0;
+
+/// タイムライン末尾の作業用余白フレーム数（60fps換算で約1分間分）
+const TIMELINE_TAIL_MARGIN_FRAMES: f32 = 3600.0;
+/// タイムライン表示幅に応じた最小作業余白フレーム数（約20秒分）
+const TIMELINE_MIN_SCROLLABLE_FRAMES: f32 = 1200.0;
+/// 水平スクロールバーのつまみ（サム）の最小表示幅 (px)
+const SCROLLBAR_MIN_THUMB_W: f32 = 28.0;
+/// ドラッグ移動時に自動スクロールが開始されるレーン端からのマージン (px)
+const EDGE_AUTOSCROLL_MARGIN_PX: f32 = 24.0;
+/// ドラッグ移動時の自動スクロール基準速度 (px/frame相当)
+const EDGE_AUTOSCROLL_SPEED_PX: f32 = 16.0;
+/// 再生位置がタイムライン表示枠の右端から外れたと判定するマージン (px)
+const PLAYHEAD_FOLLOW_MARGIN_PX: f32 = 16.0;
+/// 再生追従スクロール時にヘッドの手前に確保する余白 (px)
+const PLAYHEAD_FOLLOW_LEAD_PX: f32 = 8.0;
 
 fn category_color(c: ObjectCategory) -> Color32 {
     match c {
@@ -89,7 +151,8 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     let corner = Rect::from_min_max(full.min, pos2(headers.right(), ruler.bottom()));
 
     // ズームバー内のUIコンポーネント配置
-    let btn_fit = Rect::from_min_size(pos2(zoom_bar.left() + 4.0, zoom_bar.top() + 2.0), vec2(44.0, H_SCROLLBAR_H - 4.0));
+    let btn_snap = Rect::from_min_size(pos2(zoom_bar.left() + 4.0, zoom_bar.top() + 2.0), vec2(50.0, H_SCROLLBAR_H - 4.0));
+    let btn_fit = Rect::from_min_size(pos2(btn_snap.right() + 4.0, zoom_bar.top() + 2.0), vec2(40.0, H_SCROLLBAR_H - 4.0));
     let btn_minus = Rect::from_min_size(pos2(btn_fit.right() + 4.0, zoom_bar.top() + 2.0), vec2(16.0, H_SCROLLBAR_H - 4.0));
     let btn_plus = Rect::from_min_size(pos2(zoom_bar.right() - 48.0, zoom_bar.top() + 2.0), vec2(16.0, H_SCROLLBAR_H - 4.0));
     let slider_track = Rect::from_min_max(
@@ -113,9 +176,9 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     // 水平スクロール可能範囲の動的計算（現在の長さ＋常に先へスクロール可能な余白）
     let content_frames = (st.scene.settings.length.max(st.scene.content_end()) as f32).max(1800.0);
     let visible_frames = (lanes.width() / ppf).max(1.0);
-    let total_scrollable_frames = (content_frames + 3600.0).max(st.timeline.scroll_x + visible_frames + 1200.0);
+    let total_scrollable_frames = (content_frames + TIMELINE_TAIL_MARGIN_FRAMES).max(st.timeline.scroll_x + visible_frames + TIMELINE_MIN_SCROLLABLE_FRAMES);
     let max_scroll_x = (total_scrollable_frames - visible_frames).max(1.0);
-    let thumb_w = ((visible_frames / total_scrollable_frames) * h_scrollbar.width()).clamp(28.0, h_scrollbar.width());
+    let thumb_w = ((visible_frames / total_scrollable_frames) * h_scrollbar.width()).clamp(SCROLLBAR_MIN_THUMB_W, h_scrollbar.width());
     let track_free = (h_scrollbar.width() - thumb_w).max(1.0);
     let scroll_ratio = (st.timeline.scroll_x / max_scroll_x).clamp(0.0, 1.0);
     let thumb_left = h_scrollbar.left() + scroll_ratio * track_free;
@@ -201,8 +264,8 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     if st.playing {
         let v = &mut st.timeline;
         let px = lanes.left() + (st.frame as f32 - v.scroll_x) * v.px_per_frame;
-        if px > lanes.right() - 16.0 || px < lanes.left() {
-            v.scroll_x = (st.frame as f32 - 8.0 / v.px_per_frame).max(0.0);
+        if px > lanes.right() - PLAYHEAD_FOLLOW_MARGIN_PX || px < lanes.left() {
+            v.scroll_x = (st.frame as f32 - PLAYHEAD_FOLLOW_LEAD_PX / v.px_per_frame).max(0.0);
         }
     }
 
@@ -278,7 +341,15 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     // ---- 左ドラッグ・クリック操作 ----
     if resp.drag_started_by(egui::PointerButton::Primary) {
         if let Some(p) = ui.input(|i| i.pointer.press_origin()) {
-            st.timeline.drag = if btn_fit.contains(p) {
+            st.timeline.drag = if btn_snap.contains(p) {
+                st.timeline.snap_enabled = !st.timeline.snap_enabled;
+                st.status = if st.timeline.snap_enabled {
+                    "🧲 スナップ（吸着）を有効にしました".into()
+                } else {
+                    "🧲 スナップ（吸着）を無効にしました".into()
+                };
+                None
+            } else if btn_fit.contains(p) {
                 fit_timeline_to_view(st, lanes.width());
                 None
             } else if btn_minus.contains(p) {
@@ -310,22 +381,70 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
             } else if ruler.contains(p) {
                 Some(TimelineDrag::Scrub)
             } else if let Some(hk) = hit_detail(st, p) {
+                let shift = ui.input(|i| i.modifiers.shift);
                 match hk {
                     HitKind::LeftEdge(id) => {
-                        st.selected = Some(id);
+                        if shift {
+                            st.toggle_select(id);
+                        } else if !st.selected_objects.contains(&id) {
+                            st.select_single(id);
+                        }
+                        st.begin_continuous_edit("クリップ左端トリム");
                         Some(TimelineDrag::ResizeLeft { id })
                     }
                     HitKind::RightEdge(id) => {
-                        st.selected = Some(id);
+                        if shift {
+                            st.toggle_select(id);
+                        } else if !st.selected_objects.contains(&id) {
+                            st.select_single(id);
+                        }
+                        st.begin_continuous_edit("クリップ右端トリム");
                         Some(TimelineDrag::ResizeRight { id })
                     }
                     HitKind::Body(id, start) => {
-                        st.selected = Some(id);
+                        if shift {
+                            st.toggle_select(id);
+                        } else if !st.selected_objects.contains(&id) {
+                            st.select_single(id);
+                        }
+                        let desc = if st.selected_objects.len() > 1 {
+                            "複数クリップの移動"
+                        } else {
+                            "クリップの移動"
+                        };
+                        st.begin_continuous_edit(desc);
                         Some(TimelineDrag::Move { id, grab_offset: xf(p.x) as i64 - start as i64 })
                     }
                 }
+            } else if headers.contains(p) {
+                // レイヤーヘッダー領域のクリック（可視トグル・ロックトグル・レイヤー選択）
+                let li = y_layer(p.y);
+                if li < MAX_LAYERS {
+                    let y = lanes.top() + li as f32 * layer_h - scroll_y;
+                    let r = Rect::from_min_max(pos2(headers.left(), y), pos2(headers.right(), y + layer_h));
+                    let vis_btn_rect = Rect::from_min_size(pos2(r.right() - 38.0, r.center().y - 8.0), vec2(17.0, 16.0));
+                    let lock_btn_rect = Rect::from_min_size(pos2(r.right() - 19.0, r.center().y - 8.0), vec2(17.0, 16.0));
+
+                    if vis_btn_rect.contains(p) {
+                        let cur_vis = st.scene.layers[li].visible;
+                        st.push_undo(if cur_vis { format!("Layer {} を非表示", li + 1) } else { format!("Layer {} を表示", li + 1) });
+                        st.scene.layers[li].visible = !cur_vis;
+                        st.dirty = true;
+                        st.status = if !cur_vis { format!("Layer {} を表示しました", li + 1) } else { format!("Layer {} を非表示にしました", li + 1) };
+                    } else if lock_btn_rect.contains(p) {
+                        let cur_lock = st.scene.layers[li].locked;
+                        st.push_undo(if cur_lock { format!("Layer {} のロックを解除", li + 1) } else { format!("Layer {} をロック", li + 1) });
+                        st.scene.layers[li].locked = !cur_lock;
+                        st.dirty = true;
+                        st.status = if !cur_lock { format!("Layer {} をロックしました", li + 1) } else { format!("Layer {} のロックを解除しました", li + 1) };
+                    } else {
+                        st.timeline.selected_layer = li;
+                        st.status = format!("Layer {} を選択しました", li + 1);
+                    }
+                }
+                None
             } else if lanes.contains(p) {
-                Some(TimelineDrag::Scrub)
+                Some(TimelineDrag::BoxSelect { start_pos: p, current_pos: p })
             } else {
                 None
             };
@@ -333,6 +452,32 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     }
     if let Some(drag_mode) = st.timeline.drag {
         match drag_mode {
+            TimelineDrag::BoxSelect { start_pos, current_pos: _ } => {
+                if let Some(p) = resp.interact_pointer_pos() {
+                    st.timeline.drag = Some(TimelineDrag::BoxSelect { start_pos, current_pos: p });
+                    let sel_rect = Rect::from_two_pos(start_pos, p);
+                    let mut hits = std::collections::HashSet::new();
+                    for li in 0..MAX_LAYERS {
+                        let y0 = lanes.top() + li as f32 * layer_h - scroll_y;
+                        let y1 = y0 + layer_h;
+                        if y1 < lanes.top() || y0 > lanes.bottom() {
+                            continue;
+                        }
+                        if let Some(layer) = st.scene.layers.get(li) {
+                            for obj in &layer.objects {
+                                let x0 = fx(obj.frame_start as f32);
+                                let x1 = fx(obj.frame_end as f32 + 1.0);
+                                let obj_rect = Rect::from_min_max(pos2(x0, y0 + 2.0), pos2(x1.max(x0 + 3.0), y1 - 2.0));
+                                if sel_rect.intersects(obj_rect) {
+                                    hits.insert(obj.id);
+                                }
+                            }
+                        }
+                    }
+                    st.selected_objects = hits;
+                    st.selected = st.selected_objects.iter().next().copied();
+                }
+            }
             TimelineDrag::ZoomSlider => {
                 if ui.input(|i| i.pointer.primary_down()) {
                     if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
@@ -394,25 +539,106 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
             TimelineDrag::Move { id, grab_offset } => {
                 if let Some(p) = resp.interact_pointer_pos() {
                     // 端に近づいた時の自動横スクロール
-                    if p.x > lanes.right() - 24.0 {
-                        st.timeline.scroll_x += 16.0 / ppf;
-                    } else if p.x < lanes.left() + 24.0 {
-                        st.timeline.scroll_x = (st.timeline.scroll_x - 16.0 / ppf).max(0.0);
+                    if p.x > lanes.right() - EDGE_AUTOSCROLL_MARGIN_PX {
+                        st.timeline.scroll_x += EDGE_AUTOSCROLL_SPEED_PX / ppf;
+                    } else if p.x < lanes.left() + EDGE_AUTOSCROLL_MARGIN_PX {
+                        st.timeline.scroll_x = (st.timeline.scroll_x - EDGE_AUTOSCROLL_SPEED_PX / ppf).max(0.0);
                     }
-                    let new_start = (xf(p.x) as i64 - grab_offset).max(0) as Frame;
+                    let mut new_start = (xf(p.x) as i64 - grab_offset).max(0) as Frame;
                     let new_layer = y_layer(p.y);
+
                     if let Some((cur_layer, obj)) = st.scene.find(id) {
-                        if (cur_layer, obj.frame_start) != (new_layer, new_start)
-                            && st.scene.move_object(id, new_layer, new_start)
-                        {
-                            st.dirty = true;
+                        let obj_len = obj.length();
+                        let cur_start = obj.frame_start;
+                        let is_multi = st.selected_objects.contains(&id) && st.selected_objects.len() > 1;
+                        let ignore_ids: std::collections::HashSet<ObjectId> = if is_multi {
+                            st.selected_objects.clone()
+                        } else {
+                            std::iter::once(id).collect()
+                        };
+
+                        // スナップ吸着判定（始点または終点）
+                        let snap_start = find_snap_frame(st, new_start, 9.0, &ignore_ids);
+                        let snap_end = find_snap_frame(st, new_start + obj_len, 9.0, &ignore_ids);
+                        if let Some(s) = snap_start {
+                            new_start = s;
+                            st.timeline.active_snap_line = Some(s);
+                        } else if let Some(e) = snap_end {
+                            new_start = e.saturating_sub(obj_len);
+                            st.timeline.active_snap_line = Some(e);
+                        } else {
+                            st.timeline.active_snap_line = None;
+                        }
+
+                        if is_multi {
+                            let delta_frame = new_start as i64 - cur_start as i64;
+                            let delta_layer = new_layer as isize - cur_layer as isize;
+                            if delta_frame != 0 || delta_layer != 0 {
+                                let mut valid = true;
+                                let mut items_to_move = Vec::new();
+                                for &sel_id in &st.selected_objects {
+                                    if let Some((l, o)) = st.scene.find(sel_id) {
+                                        let tgt_l = l as isize + delta_layer;
+                                        let tgt_s = o.frame_start as i64 + delta_frame;
+                                        let tgt_e = o.frame_end as i64 + delta_frame;
+                                        if tgt_l < 0 || tgt_l >= MAX_LAYERS as isize || tgt_s < 0 {
+                                            valid = false;
+                                            break;
+                                        }
+                                        items_to_move.push((sel_id, l, o.clone(), tgt_l as usize, tgt_s as Frame, tgt_e as Frame));
+                                    }
+                                }
+
+                                if valid {
+                                    for (_, _, _, tgt_l, tgt_s, tgt_e) in &items_to_move {
+                                        if let Some(target_layer) = st.scene.layers.get(*tgt_l) {
+                                            for other in &target_layer.objects {
+                                                if !st.selected_objects.contains(&other.id) {
+                                                    if !(*tgt_e < other.frame_start || *tgt_s > other.frame_end) {
+                                                        valid = false;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if !valid {
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                if valid {
+                                    for (sel_id, _, _, _, _, _) in &items_to_move {
+                                        let _ = st.scene.remove_object(*sel_id);
+                                    }
+                                    for (_, _, mut o, tgt_l, tgt_s, tgt_e) in items_to_move {
+                                        o.frame_start = tgt_s;
+                                        o.frame_end = tgt_e;
+                                        st.scene.insert_object(tgt_l, o);
+                                    }
+                                    st.dirty = true;
+                                }
+                            }
+                        } else {
+                            if (cur_layer, cur_start) != (new_layer, new_start)
+                                && st.scene.move_object(id, new_layer, new_start)
+                            {
+                                st.dirty = true;
+                            }
                         }
                     }
                 }
             }
             TimelineDrag::ResizeLeft { id } => {
                 if let Some(p) = resp.interact_pointer_pos() {
-                    let new_start = xf(p.x);
+                    let mut new_start = xf(p.x);
+                    let ignore_ids: std::collections::HashSet<ObjectId> = std::iter::once(id).collect();
+                    if let Some(snap_f) = find_snap_frame(st, new_start, 9.0, &ignore_ids) {
+                        new_start = snap_f;
+                        st.timeline.active_snap_line = Some(snap_f);
+                    } else {
+                        st.timeline.active_snap_line = None;
+                    }
                     if let Some((_, obj)) = st.scene.find_mut(id) {
                         if new_start <= obj.frame_end {
                             obj.frame_start = new_start;
@@ -423,7 +649,14 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
             }
             TimelineDrag::ResizeRight { id } => {
                 if let Some(p) = resp.interact_pointer_pos() {
-                    let new_end = xf(p.x);
+                    let mut new_end = xf(p.x);
+                    let ignore_ids: std::collections::HashSet<ObjectId> = std::iter::once(id).collect();
+                    if let Some(snap_f) = find_snap_frame(st, new_end + 1, 9.0, &ignore_ids) {
+                        new_end = snap_f.saturating_sub(1);
+                        st.timeline.active_snap_line = Some(snap_f);
+                    } else {
+                        st.timeline.active_snap_line = None;
+                    }
                     let mut updated_end = None;
                     if let Some((_, obj)) = st.scene.find_mut(id) {
                         if new_end >= obj.frame_start {
@@ -442,11 +675,21 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
         }
     }
     if resp.drag_stopped() {
+        st.commit_continuous_edit();
         st.timeline.drag = None;
+        st.timeline.active_snap_line = None;
     }
     if resp.clicked() {
         if let Some(p) = resp.interact_pointer_pos() {
-            if corner.contains(p) {
+            let shift = ui.input(|i| i.modifiers.shift);
+            if btn_snap.contains(p) {
+                st.timeline.snap_enabled = !st.timeline.snap_enabled;
+                st.status = if st.timeline.snap_enabled {
+                    "🧲 スナップ（吸着）を有効にしました".into()
+                } else {
+                    "🧲 スナップ（吸着）を無効にしました".into()
+                };
+            } else if corner.contains(p) {
                 st.timeline.show_clip_previews = !st.timeline.show_clip_previews;
             } else if h_scrollbar.contains(p) {
                 if p.x < thumb_left {
@@ -460,9 +703,13 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
             } else if ruler.contains(p) {
                 st.set_frame(xf(p.x));
             } else if let Some((id, _)) = hit(st, p) {
-                st.selected = Some(id);
+                if shift {
+                    st.toggle_select(id);
+                } else {
+                    st.select_single(id);
+                }
             } else if lanes.contains(p) {
-                st.selected = None;
+                st.clear_selection();
                 st.set_frame(xf(p.x));
             }
         }
@@ -521,11 +768,13 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
         );
     }
 
-    // オブジェクト用サムネイルの事前取得 (プレビュー ON 時のみ)
+    // オブジェクト用サムネイルおよびオーディオ波形の事前取得 (プレビュー ON 時のみ)
     let mut clip_textures: HashMap<String, egui::TextureId> = HashMap::new();
+    let mut clip_waveforms: HashMap<String, std::sync::Arc<au2_media::AudioWaveformPeaks>> = HashMap::new();
     if show_previews {
         let egui_ctx = ui.ctx().clone();
         let mut media_paths: Vec<String> = Vec::new();
+        let mut audio_paths: Vec<String> = Vec::new();
         for li in visible_rows.clone() {
             for obj in &st.scene.layers[li].objects {
                 let (x0, x1) = (fx(obj.frame_start as f32), fx(obj.frame_end as f32 + 1.0));
@@ -541,12 +790,25 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                             }
                         }
                     }
+                    if matches!(src.kind, EffectKind::AudioFile | EffectKind::VideoFile) {
+                        if let Some(p) = effect_file_path(src).filter(|s| !s.is_empty()) {
+                            let s = p.to_string();
+                            if !audio_paths.contains(&s) {
+                                audio_paths.push(s);
+                            }
+                        }
+                    }
                 }
             }
         }
         for path_str in media_paths {
             if let Some((tex_id, _)) = st.get_media_texture(&egui_ctx, &path_str, 0, 0.0) {
                 clip_textures.insert(path_str, tex_id);
+            }
+        }
+        for path_str in audio_paths {
+            if let Some(wf) = st.get_audio_waveform(&path_str) {
+                clip_waveforms.insert(path_str, wf);
             }
         }
     }
@@ -582,7 +844,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
             }
 
             let is_missing = missing_obj_ids.contains(&obj.id);
-            let selected = st.selected == Some(obj.id);
+            let selected = st.selected == Some(obj.id) || st.selected_objects.contains(&obj.id);
             let dimmed = !layer.visible || obj.source().is_some_and(|s| !s.enabled);
             let mut base_color = if is_missing {
                 Color32::from_rgb(180, 50, 50)
@@ -610,7 +872,8 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                 let body_clip = body_rect.shrink(1.0).intersect(lanes);
                 if body_clip.width() > 4.0 && body_clip.height() > 6.0 {
                     let body_painter = painter.with_clip_rect(body_clip);
-                    draw_clip_preview(&body_painter, body_rect, lanes, obj, &clip_textures, dimmed);
+                    let fps = st.scene.settings.frame_rate.as_f64().max(1.0);
+                    draw_clip_preview(&body_painter, body_rect, lanes, obj, &clip_textures, &clip_waveforms, fps, ppf, dimmed);
                 }
 
                 lane_painter.line_segment(
@@ -639,12 +902,19 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                     lane_painter.rect_stroke(r, 3.5, Stroke::new(1.0_f32, Color32::from_black_alpha(110)));
                 }
 
+                if obj.clipping {
+                    lane_painter.line_segment(
+                        [pos2(r.left() + 1.5, r.top()), pos2(r.left() + 1.5, r.bottom())],
+                        Stroke::new(3.0_f32, Color32::from_rgb(255, 75, 75)),
+                    );
+                }
+
                 // ヘッダーラベル + アイコン + fx バッジ（高さを正確に統一）
                 let text_clip = header_rect.shrink2(vec2(3.0, 0.0)).intersect(lanes);
                 if text_clip.width() > 8.0 {
                     let hp = painter.with_clip_rect(text_clip);
                     let icon = clip_kind_icon(obj);
-                    let left_x = header_rect.left().max(lanes.left()) + 5.0;
+                    let left_x = header_rect.left().max(lanes.left()) + if obj.clipping { 8.0 } else { 5.0 };
                     let cy = header_rect.center().y;
                     hp.text(
                         pos2(left_x, cy),
@@ -655,6 +925,8 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                     );
                     let disp_text = if is_missing {
                         format!("⚠ 未検出: {}", obj.display_name())
+                    } else if obj.clipping {
+                        format!("↳ {}", obj.display_name())
                     } else {
                         obj.display_name().to_string()
                     };
@@ -689,6 +961,12 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                 if selected {
                     lane_painter.rect_stroke(r, 3.0, Stroke::new(1.5_f32, Color32::WHITE));
                 }
+                if obj.clipping {
+                    lane_painter.line_segment(
+                        [pos2(r.left() + 1.5, r.top()), pos2(r.left() + 1.5, r.bottom())],
+                        Stroke::new(3.0_f32, Color32::from_rgb(255, 75, 75)),
+                    );
+                }
                 for &m in &obj.midpoints {
                     let mx = fx((obj.frame_start + m) as f32);
                     lane_painter.line_segment(
@@ -706,6 +984,8 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                 if text_clip.width() > 8.0 {
                     let disp_text = if is_missing {
                         format!("⚠ 未検出: {}", obj.display_name())
+                    } else if obj.clipping {
+                        format!("↳ {}", obj.display_name())
                     } else {
                         obj.display_name().to_string()
                     };
@@ -777,29 +1057,63 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
         };
         header_painter.rect_filled(r, 0.0, h_row_bg);
 
+        let is_selected_layer = st.timeline.selected_layer == li;
+        if is_selected_layer {
+            header_painter.rect_filled(r, 0.0, if is_dark { Color32::from_rgb(42, 48, 65) } else { Color32::from_rgb(220, 230, 248) });
+        }
+
         let layer = &st.scene.layers[li];
         let color = if layer.visible { theme::text() } else { theme::text_muted() };
         let base_name = layer.name.clone().unwrap_or_else(|| format!("Layer {}", li + 1));
 
         // レイヤーバッジ [L1]
         let badge_rect = Rect::from_min_size(pos2(r.left() + 5.0, r.center().y - 8.0), vec2(24.0, 16.0));
-        let badge_bg = if is_dark {
+        let badge_bg = if is_selected_layer {
+            Color32::from_rgb(59, 130, 246)
+        } else if is_dark {
             Color32::from_rgb(38, 42, 54)
         } else {
             Color32::from_rgb(218, 226, 242)
         };
         header_painter.rect_filled(badge_rect, 3.0, badge_bg);
-        header_painter.text(badge_rect.center(), Align2::CENTER_CENTER, format!("L{}", li + 1), FontId::monospace(10.0), theme::accent_text());
+        header_painter.text(badge_rect.center(), Align2::CENTER_CENTER, format!("L{}", li + 1), FontId::monospace(10.0), if is_selected_layer { Color32::WHITE } else { theme::accent_text() });
 
-        // レイヤー名
-        header_painter.text(pos2(badge_rect.right() + 6.0, r.center().y), Align2::LEFT_CENTER, base_name, FontId::proportional(11.5), color);
+        // レイヤー名（ボタンと重ならないようクリップ）
+        let name_clip = Rect::from_min_max(pos2(badge_rect.right() + 6.0, r.top()), pos2(r.right() - 40.0, r.bottom()));
+        header_painter.with_clip_rect(name_clip).text(pos2(badge_rect.right() + 6.0, r.center().y), Align2::LEFT_CENTER, base_name, FontId::proportional(11.5), color);
 
-        // 状態アイコン (右端)
-        if layer.locked {
-            header_painter.text(pos2(r.right() - 6.0, r.center().y), Align2::RIGHT_CENTER, "🔒", FontId::proportional(10.0), theme::fg(Color32::from_rgb(250, 204, 21)));
-        } else if !layer.visible {
-            header_painter.text(pos2(r.right() - 6.0, r.center().y), Align2::RIGHT_CENTER, "🚫", FontId::proportional(10.0), theme::text_muted());
+        // 状態操作ボタン (右端：👁️ 表示/非表示トグル ＆ 🔒 ロックトグル)
+        let vis_btn_rect = Rect::from_min_size(pos2(r.right() - 38.0, r.center().y - 8.0), vec2(17.0, 16.0));
+        let lock_btn_rect = Rect::from_min_size(pos2(r.right() - 19.0, r.center().y - 8.0), vec2(17.0, 16.0));
+        let vis_hovered = hover_pos.is_some_and(|p| vis_btn_rect.contains(p));
+        let lock_hovered = hover_pos.is_some_and(|p| lock_btn_rect.contains(p));
+
+        if vis_hovered {
+            header_painter.rect_filled(vis_btn_rect, 2.5, Color32::from_white_alpha(35));
         }
+        if lock_hovered {
+            header_painter.rect_filled(lock_btn_rect, 2.5, Color32::from_white_alpha(35));
+        }
+
+        // 👁️ 表示/非表示アイコン
+        let vis_icon = if layer.visible { "👁" } else { "🚫" };
+        let vis_color = if layer.visible {
+            if vis_hovered { Color32::WHITE } else { theme::text_muted() }
+        } else {
+            Color32::from_rgb(255, 90, 90)
+        };
+        header_painter.text(vis_btn_rect.center(), Align2::CENTER_CENTER, vis_icon, FontId::proportional(11.0), vis_color);
+
+        // 🔒 ロックアイコン
+        let lock_icon = if layer.locked { "🔒" } else { "🔓" };
+        let lock_color = if layer.locked {
+            Color32::from_rgb(250, 204, 21)
+        } else if lock_hovered {
+            Color32::WHITE
+        } else {
+            Color32::from_white_alpha(40)
+        };
+        header_painter.text(lock_btn_rect.center(), Align2::CENTER_CENTER, lock_icon, FontId::proportional(10.5), lock_color);
         header_painter.line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(1.0_f32, theme::border()));
     }
 
@@ -842,6 +1156,29 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
         text_color,
     );
 
+    // スナップ（吸着）ガイド線
+    if let Some(snap_f) = st.timeline.active_snap_line {
+        let sx = fx(snap_f as f32);
+        if sx >= lanes.left() && sx <= lanes.right() {
+            painter.line_segment(
+                [pos2(sx, ruler.top()), pos2(sx, lanes.bottom())],
+                Stroke::new(2.0_f32, Color32::from_rgb(0, 225, 255)),
+            );
+            painter.add(Shape::convex_polygon(
+                vec![pos2(sx - 4.0, ruler.top()), pos2(sx + 4.0, ruler.top()), pos2(sx, ruler.top() + 7.0)],
+                Color32::from_rgb(0, 225, 255),
+                Stroke::NONE,
+            ));
+        }
+    }
+
+    // タイムライン上の矩形選択範囲（ラバーバンド枠）
+    if let Some(TimelineDrag::BoxSelect { start_pos, current_pos }) = st.timeline.drag {
+        let sel_rect = Rect::from_two_pos(start_pos, current_pos);
+        painter.rect_filled(sel_rect, 2.0, Color32::from_rgba_unmultiplied(40, 140, 255, 45));
+        painter.rect_stroke(sel_rect, 2.0, Stroke::new(1.5_f32, Color32::from_rgb(80, 180, 255)));
+    }
+
     // 再生位置
     let px = fx(st.frame as f32);
     if px >= lanes.left() && px <= lanes.right() {
@@ -871,6 +1208,29 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     painter.rect_filled(zoom_bar, 0.0, flip(Color32::from_rgb(24, 26, 32)));
     painter.line_segment([zoom_bar.left_top(), zoom_bar.right_top()], Stroke::new(1.0_f32, theme::border()));
     painter.line_segment([zoom_bar.left_top(), zoom_bar.left_bottom()], Stroke::new(1.0_f32, theme::border()));
+
+    // [🧲] スナップ（吸着）切り替えボタン
+    let snap_hovered = hover_pos.is_some_and(|p| btn_snap.contains(p));
+    let snap_on = st.timeline.snap_enabled;
+    let snap_bg = if snap_on {
+        if snap_hovered { Color32::from_rgb(32, 108, 196) } else { Color32::from_rgb(24, 88, 164) }
+    } else {
+        if snap_hovered { flip(Color32::from_gray(56)) } else { flip(Color32::from_gray(38)) }
+    };
+    painter.rect_filled(btn_snap, 3.0, snap_bg);
+    painter.rect_stroke(
+        btn_snap,
+        3.0,
+        Stroke::new(1.0_f32, if snap_on { Color32::from_rgb(80, 180, 255) } else { theme::border() }),
+    );
+    let snap_label = if snap_on { "🧲 ON" } else { "🧲 OFF" };
+    painter.text(
+        btn_snap.center(),
+        Align2::CENTER_CENTER,
+        snap_label,
+        FontId::proportional(10.0),
+        if snap_on { Color32::WHITE } else { theme::text_muted() },
+    );
 
     // [⊡ 全体] ボタン (Fit)
     let fit_hovered = hover_pos.is_some_and(|p| btn_fit.contains(p));
@@ -957,6 +1317,15 @@ fn context_menu_ui(ui: &mut egui::Ui, st: &mut EditorState) {
     );
     ui.separator();
 
+    // クリップボードにアイテムがあれば貼り付けを表示
+    if !st.clipboard.is_empty() {
+        if ui.button(format!("📋 ここに貼り付け ({} 個のオブジェクト)", st.clipboard.len())).clicked() {
+            st.paste_clipboard(Some(target.layer), Some(start));
+            ui.close_menu();
+        }
+        ui.separator();
+    }
+
     // 1. オブジェクト上で右クリックされた場合の操作メニュー
     if let Some(obj_id) = target.object_id {
         let raw_file_info: Option<(String, bool)> = st.scene.find(obj_id).and_then(|(_, obj)| {
@@ -1019,7 +1388,38 @@ fn context_menu_ui(ui: &mut egui::Ui, st: &mut EditorState) {
             ui.separator();
         }
 
+        if ui.button("📋 コピー (Ctrl+C)").clicked() {
+            if !st.selected_objects.contains(&obj_id) {
+                st.select_single(obj_id);
+            }
+            st.copy_selected();
+            ui.close_menu();
+        }
+        if ui.button("📄 複製 (Ctrl+D)").clicked() {
+            if !st.selected_objects.contains(&obj_id) {
+                st.select_single(obj_id);
+            }
+            st.duplicate_selected();
+            ui.close_menu();
+        }
+
+        ui.separator();
+
+        if let Some((_, obj)) = st.scene.find_mut(obj_id) {
+            let mut clip = obj.clipping;
+            if ui.checkbox(&mut clip, "📎 上のオブジェクトでクリッピング").changed() {
+                obj.clipping = clip;
+                st.dirty = true;
+                st.status = if clip {
+                    "上のオブジェクトでクリッピングを有効にしました".into()
+                } else {
+                    "上のオブジェクトでクリッピングを無効にしました".into()
+                };
+            }
+        }
+
         if ui.button("◆ 中間点を追加").clicked() {
+            st.push_undo("中間点を追加");
             if let Some((_, obj)) = st.scene.find_mut(obj_id) {
                 if obj.add_midpoint(start) {
                     st.dirty = true;
@@ -1030,7 +1430,8 @@ fn context_menu_ui(ui: &mut egui::Ui, st: &mut EditorState) {
             }
             ui.close_menu();
         }
-        if ui.button("✂ ここで分割").clicked() {
+        if ui.button("✂ クリック位置で分割").clicked() {
+            st.push_undo("オブジェクト分割");
             let split_result = st
                 .scene
                 .find_mut(obj_id)
@@ -1038,7 +1439,7 @@ fn context_menu_ui(ui: &mut egui::Ui, st: &mut EditorState) {
             if let Some((layer_idx, right_obj)) = split_result {
                 let right_id = right_obj.id;
                 st.scene.insert_object(layer_idx, right_obj);
-                st.selected = Some(right_id);
+                st.select_single(right_id);
                 st.dirty = true;
                 st.status = format!("フレーム {} でオブジェクトを分割しました", start + 1);
             } else {
@@ -1046,13 +1447,26 @@ fn context_menu_ui(ui: &mut egui::Ui, st: &mut EditorState) {
             }
             ui.close_menu();
         }
+        if ui.button("✂ 再生ヘッド位置で分割 (Ctrl+K)").clicked() {
+            if !st.selected_objects.contains(&obj_id) {
+                st.select_single(obj_id);
+            }
+            st.split_at_playhead();
+            ui.close_menu();
+        }
         if ui.button("🗑 削除 (Delete)").clicked() {
-            if st.scene.remove_object(obj_id).is_some() {
-                if st.selected == Some(obj_id) {
-                    st.selected = None;
+            if st.selected_objects.contains(&obj_id) && st.selected_objects.len() > 1 {
+                st.delete_selected_objects();
+            } else {
+                st.push_undo("オブジェクト削除");
+                if st.scene.remove_object(obj_id).is_some() {
+                    if st.selected == Some(obj_id) {
+                        st.selected = None;
+                    }
+                    st.selected_objects.remove(&obj_id);
+                    st.dirty = true;
+                    st.status = "オブジェクトを削除しました".into();
                 }
-                st.dirty = true;
-                st.status = "オブジェクトを削除しました".into();
             }
             ui.close_menu();
         }
@@ -1281,23 +1695,32 @@ fn context_menu_ui(ui: &mut egui::Ui, st: &mut EditorState) {
     ui.separator();
 
     // 4. レイヤー操作メニュー
-    if let Some(layer) = st.scene.layers.get_mut(target.layer) {
-        let vis_label = if layer.visible {
+    let layer_state = st.scene.layers.get(target.layer).map(|l| (l.visible, l.locked));
+    if let Some((cur_vis, cur_lock)) = layer_state {
+        let vis_label = if cur_vis {
             "👁 レイヤーを非表示にする"
         } else {
             "👁 レイヤーを表示する"
         };
         if ui.button(vis_label).clicked() {
-            layer.visible = !layer.visible;
+            st.push_undo(if cur_vis { format!("Layer {} を非表示", target.layer + 1) } else { format!("Layer {} を表示", target.layer + 1) });
+            if let Some(l) = st.scene.layers.get_mut(target.layer) {
+                l.visible = !cur_vis;
+            }
+            st.dirty = true;
             ui.close_menu();
         }
-        let lock_label = if layer.locked {
+        let lock_label = if cur_lock {
             "🔓 レイヤーのロックを解除"
         } else {
             "🔒 レイヤーをロックする"
         };
         if ui.button(lock_label).clicked() {
-            layer.locked = !layer.locked;
+            st.push_undo(if cur_lock { format!("Layer {} のロックを解除", target.layer + 1) } else { format!("Layer {} をロック", target.layer + 1) });
+            if let Some(l) = st.scene.layers.get_mut(target.layer) {
+                l.locked = !cur_lock;
+            }
+            st.dirty = true;
             ui.close_menu();
         }
     }
@@ -1362,6 +1785,9 @@ fn draw_clip_preview(
     lanes: Rect,
     obj: &TimelineObject,
     clip_textures: &HashMap<String, egui::TextureId>,
+    clip_waveforms: &HashMap<String, std::sync::Arc<au2_media::AudioWaveformPeaks>>,
+    fps: f64,
+    ppf: f32,
     dimmed: bool,
 ) {
     let alpha_mul = if dimmed { 0.45 } else { 1.0 };
@@ -1420,33 +1846,87 @@ fn draw_clip_preview(
                     x += thumb_w;
                 }
             }
+
+            // 動画クリップに音声が含まれている場合、下部に波形オーバーレイを描画
+            if src.kind == EffectKind::VideoFile {
+                if let Some(wf) = clip_waveforms.get(file_str) {
+                    let audio_cy = body_rect.bottom() - 6.0;
+                    let audio_max_h = 5.0_f32;
+                    let mut x = body_rect.left().max(lanes.left());
+                    let dt = (2.0 / ppf.max(0.001) as f32 / fps as f32) as f64;
+                    let wave_col = Color32::from_rgba_unmultiplied(120, 235, 185, (170.0 * alpha_mul) as u8);
+                    while x < body_rect.right().min(lanes.right()) {
+                        let rel_frames = ((x - body_rect.left()) / ppf.max(0.001)).max(0.0) as f64;
+                        let rel_frame_int = rel_frames.floor() as Frame;
+                        let start_pos = ((src.eval("再生位置", rel_frame_int, 1.0) - 1.0) / fps).max(0.0);
+                        let speed = (src.eval("再生速度", rel_frame_int, 100.0) / 100.0).max(0.0);
+                        let audio_sec = start_pos + (rel_frames / fps) * speed;
+                        let peak_amp = wf.sample_range_amplitude(audio_sec, audio_sec + dt.max(0.005));
+                        let amp_h = (peak_amp * audio_max_h).clamp(0.5, audio_max_h);
+                        painter.line_segment(
+                            [pos2(x, audio_cy - amp_h), pos2(x, audio_cy + amp_h)],
+                            Stroke::new(1.2_f32, wave_col),
+                        );
+                        x += 2.0;
+                    }
+                }
+            }
         }
         EffectKind::AudioFile => {
-            // Premiere Pro 風のオーディオ波形バー描画
-            let vol = (src.eval("音量", 0, 100.0) / 100.0).clamp(0.1, 1.5) as f32;
+            // Premiere Pro / DaVinci Resolve 風の実オーディオ波形ピーク描画
+            let vol = (src.eval("音量", 0, 100.0) / 100.0).clamp(0.0, 2.0) as f32;
             let cy = body_rect.center().y;
-            let max_amp = (body_rect.height() * 0.44 * vol).min(body_rect.height() * 0.47);
+            let max_amp = (body_rect.height() * 0.44).min(body_rect.height() * 0.47);
+
+            // センターライン
             painter.line_segment(
                 [pos2(body_rect.left().max(lanes.left()), cy), pos2(body_rect.right().min(lanes.right()), cy)],
                 Stroke::new(1.0_f32, Color32::from_white_alpha(45)),
             );
-            let step = 3.0_f32;
+
+            let step = 2.0_f32; // 2px ごとに高密度ピークバーを描画
             let start_x = body_rect.left().max(lanes.left());
             let end_x = body_rect.right().min(lanes.right());
-            let seed = obj.id.0 as f32 * 0.73;
-            let wave_color = Color32::from_rgba_unmultiplied(150, 245, 195, (210.0 * alpha_mul) as u8);
-            let mut x = start_x + ((body_rect.left() - start_x).rem_euclid(step));
-            while x < end_x {
-                let rel = (x - body_rect.left()) * 0.14 + seed;
-                let amp = ((rel.sin() * 0.55 + (rel * 2.37).cos() * 0.35 + (rel * 0.41).sin() * 0.25)
-                    .abs()
-                    .clamp(0.12, 1.0))
-                    * max_amp;
-                painter.line_segment(
-                    [pos2(x, cy - amp), pos2(x, cy + amp)],
-                    Stroke::new(1.6_f32, wave_color),
-                );
-                x += step;
+            let wave_color = Color32::from_rgba_unmultiplied(150, 245, 195, (225.0 * alpha_mul) as u8);
+
+            let file_str = effect_file_path(src).unwrap_or("");
+            if let Some(wf) = clip_waveforms.get(file_str) {
+                // 実音声波形データ（ピークダウンサンプリング）から描画
+                let mut x = start_x;
+                let dt = (step / ppf.max(0.001) as f32 / fps as f32) as f64;
+                while x < end_x {
+                    let rel_frames = ((x - body_rect.left()) / ppf.max(0.001)).max(0.0) as f64;
+                    let rel_frame_int = rel_frames.floor() as Frame;
+                    let start_pos = src.eval("再生位置", rel_frame_int, 0.0).max(0.0);
+                    let speed = (src.eval("再生速度", rel_frame_int, 100.0) / 100.0).max(0.0);
+                    let audio_sec = start_pos + (rel_frames / fps) * speed;
+
+                    let peak_amp = wf.sample_range_amplitude(audio_sec, audio_sec + dt.max(0.005));
+                    let amp_h = (peak_amp * vol * max_amp).clamp(0.5, max_amp);
+
+                    painter.line_segment(
+                        [pos2(x, cy - amp_h), pos2(x, cy + amp_h)],
+                        Stroke::new(1.4_f32, wave_color),
+                    );
+                    x += step;
+                }
+            } else {
+                // 波形デコード中または波形未生成時の滑らかな擬似フォールバック
+                let seed = obj.id.0 as f32 * 0.73;
+                let mut x = start_x + ((body_rect.left() - start_x).rem_euclid(3.0));
+                while x < end_x {
+                    let rel = (x - body_rect.left()) * 0.14 + seed;
+                    let amp = ((rel.sin() * 0.55 + (rel * 2.37).cos() * 0.35 + (rel * 0.41).sin() * 0.25)
+                        .abs()
+                        .clamp(0.12, 1.0))
+                        * max_amp
+                        * vol.clamp(0.2, 1.0);
+                    painter.line_segment(
+                        [pos2(x, cy - amp), pos2(x, cy + amp)],
+                        Stroke::new(1.6_f32, wave_color.gamma_multiply(0.7)),
+                    );
+                    x += 3.0;
+                }
             }
         }
         EffectKind::Text => {

@@ -8,7 +8,9 @@ use eframe::egui::{
 };
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 
-use crate::export::{ExportConfig, ExportFormat, ExportQuality, ExportSession};
+use crate::export::{
+    available_video_encoders, ExportConfig, ExportFormat, ExportQuality, ExportSession, VideoEncoder,
+};
 use crate::panels;
 use crate::state::{
     default_projects_dir, EditorState, NewProjectConfig, ProjectFormat, ProjectPreset, SAMPLE_EXO,
@@ -75,6 +77,7 @@ impl Default for ExportModalState {
                 output_path: default_dir.join("output.mp4"),
                 format: ExportFormat::Mp4,
                 quality: ExportQuality::High,
+                encoder: VideoEncoder::Auto,
                 width: 1920,
                 height: 1080,
                 fps_num: 30,
@@ -112,6 +115,7 @@ impl ExportModalState {
         let mut cfg = ExportConfig::from_scene(&st.scene, default_path);
         cfg.format = self.config.format;
         cfg.quality = self.config.quality;
+        cfg.encoder = self.config.encoder;
         cfg.include_audio = self.config.include_audio;
         if !self.use_content_range {
             cfg.end_frame = st.last_frame();
@@ -384,6 +388,14 @@ const SC_OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key:
 const SC_IMPORT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::I);
 const SC_SAVE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
 const SC_EXPORT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::E);
+const SC_UNDO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
+const SC_REDO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Y);
+const SC_REDO_SHIFT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z);
+const SC_SELECT_ALL: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::A);
+const SC_COPY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::C);
+const SC_PASTE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::V);
+const SC_DUPLICATE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::D);
+const SC_SPLIT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::K);
 
 impl OpenAviApp {
     /// ヘッドレスのスナップショットテスト用に、ウィンドウ無しでアプリ状態を構築します。
@@ -451,6 +463,27 @@ impl OpenAviApp {
 
 /// 全ウィンドウ共通のキーボードショートカット（AviUtl の操作感に準拠）。
 fn handle_shortcuts(ctx: &egui::Context, st: &mut EditorState) {
+    if ctx.input_mut(|i| i.consume_shortcut(&SC_UNDO)) {
+        st.undo();
+    }
+    if ctx.input_mut(|i| i.consume_shortcut(&SC_REDO) || i.consume_shortcut(&SC_REDO_SHIFT)) {
+        st.redo();
+    }
+    if ctx.input_mut(|i| i.consume_shortcut(&SC_SELECT_ALL)) {
+        st.select_all();
+    }
+    if ctx.input_mut(|i| i.consume_shortcut(&SC_COPY)) {
+        st.copy_selected();
+    }
+    if ctx.input_mut(|i| i.consume_shortcut(&SC_PASTE)) {
+        st.paste_clipboard(None, None);
+    }
+    if ctx.input_mut(|i| i.consume_shortcut(&SC_DUPLICATE)) {
+        st.duplicate_selected();
+    }
+    if ctx.input_mut(|i| i.consume_shortcut(&SC_SPLIT)) {
+        st.split_at_playhead();
+    }
     if ctx.input_mut(|i| i.consume_shortcut(&SC_OPEN)) {
         st.smart_open_dialog();
     }
@@ -483,13 +516,19 @@ fn handle_shortcuts(ctx: &egui::Context, st: &mut EditorState) {
             let last = st.last_frame();
             st.set_frame(last);
         }
+        if i.key_pressed(Key::Escape) {
+            st.clear_selection();
+        }
         if i.key_pressed(Key::Delete) {
-            if let Some(id) = st.selected.take() {
-                if st.scene.remove_object(id).is_some() {
-                    st.dirty = true;
-                    st.status = "選択オブジェクトを削除しました".into();
-                }
-            }
+            st.delete_selected_objects();
+        }
+        if !i.modifiers.command && !i.modifiers.ctrl && !i.modifiers.alt && i.key_pressed(Key::S) {
+            st.timeline.snap_enabled = !st.timeline.snap_enabled;
+            st.status = if st.timeline.snap_enabled {
+                "🧲 スナップ（吸着）を有効にしました".into()
+            } else {
+                "🧲 スナップ（吸着）を無効にしました".into()
+            };
         }
     });
 }
@@ -770,6 +809,130 @@ impl OpenAviApp {
                         }
                     }
                 });
+                ui.menu_button("編集", |ui| {
+                    let undo_enabled = self.st.can_undo();
+                    let undo_text = if let Some(desc) = self.st.undo_description() {
+                        format!("↶ 元に戻す: {desc}")
+                    } else {
+                        "↶ 元に戻す".to_string()
+                    };
+                    if ui
+                        .add_enabled(
+                            undo_enabled,
+                            egui::Button::new(undo_text).shortcut_text(ctx.format_shortcut(&SC_UNDO)),
+                        )
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        self.st.undo();
+                    }
+
+                    let redo_enabled = self.st.can_redo();
+                    let redo_text = if let Some(desc) = self.st.redo_description() {
+                        format!("↷ やり直す: {desc}")
+                    } else {
+                        "↷ やり直す".to_string()
+                    };
+                    if ui
+                        .add_enabled(
+                            redo_enabled,
+                            egui::Button::new(redo_text).shortcut_text(ctx.format_shortcut(&SC_REDO)),
+                        )
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        self.st.redo();
+                    }
+
+                    ui.separator();
+
+                    if ui
+                        .add(
+                            egui::Button::new("すべて選択")
+                                .shortcut_text(ctx.format_shortcut(&SC_SELECT_ALL)),
+                        )
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        self.st.select_all();
+                    }
+
+                    let has_selection = self.st.selected.is_some() || !self.st.selected_objects.is_empty();
+                    if ui
+                        .add_enabled(has_selection, egui::Button::new("選択解除").shortcut_text("Esc"))
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        self.st.clear_selection();
+                    }
+
+                    if ui
+                        .add_enabled(
+                            has_selection,
+                            egui::Button::new("🗑 選択オブジェクトを削除").shortcut_text("Delete"),
+                        )
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        self.st.delete_selected_objects();
+                    }
+
+                    ui.separator();
+
+                    if ui
+                        .add_enabled(
+                            has_selection,
+                            egui::Button::new("📋 コピー").shortcut_text(ctx.format_shortcut(&SC_COPY)),
+                        )
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        self.st.copy_selected();
+                    }
+
+                    let can_paste = !self.st.clipboard.is_empty();
+                    if ui
+                        .add_enabled(
+                            can_paste,
+                            egui::Button::new("📋 貼り付け").shortcut_text(ctx.format_shortcut(&SC_PASTE)),
+                        )
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        self.st.paste_clipboard(None, None);
+                    }
+
+                    if ui
+                        .add_enabled(
+                            has_selection,
+                            egui::Button::new("📄 複製").shortcut_text(ctx.format_shortcut(&SC_DUPLICATE)),
+                        )
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        self.st.duplicate_selected();
+                    }
+
+                    if ui
+                        .add(
+                            egui::Button::new("✂ 再生ヘッド位置で分割").shortcut_text(ctx.format_shortcut(&SC_SPLIT)),
+                        )
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        self.st.split_at_playhead();
+                    }
+
+                    ui.separator();
+
+                    if ui.checkbox(&mut self.st.timeline.snap_enabled, "🧲 スナップ（吸着）を有効化").clicked() {
+                        self.st.status = if self.st.timeline.snap_enabled {
+                            "🧲 スナップ（吸着）を有効にしました".into()
+                        } else {
+                            "🧲 スナップ（吸着）を無効にしました".into()
+                        };
+                    }
+                });
                 ui.menu_button("表示", |ui| {
                     ui.checkbox(
                         &mut self.st.timeline.show_clip_previews,
@@ -804,6 +967,14 @@ impl OpenAviApp {
                         ui.close_menu();
                         self.st.install_plugin_dialog();
                         self.show_plugins = true;
+                    }
+                    ui.separator();
+                    if ui
+                        .button("🔬 .auf 仕様解析・移植スタジオ (開発者向け)...")
+                        .clicked()
+                    {
+                        self.st.open_auf_porter(None);
+                        ui.close_menu();
                     }
                 });
                 ui.menu_button("再生", |ui| {
@@ -2008,6 +2179,67 @@ impl OpenAviApp {
                                             }
                                         });
                                         ui.end_row();
+
+                                        if matches!(
+                                            self.export_modal.config.format,
+                                            ExportFormat::Mp4 | ExportFormat::Mov
+                                        ) {
+                                            ui.label("エンコーダ:");
+                                            ui.horizontal(|ui| {
+                                                let available = available_video_encoders(self.st.media.ffmpeg_path());
+                                                let resolved = self.export_modal.config.encoder.resolve(available);
+
+                                                egui::ComboBox::from_id_salt("export-video-encoder-combo")
+                                                    .selected_text(self.export_modal.config.encoder.label())
+                                                    .show_ui(ui, |ui| {
+                                                        ui.selectable_value(
+                                                            &mut self.export_modal.config.encoder,
+                                                            VideoEncoder::Auto,
+                                                            VideoEncoder::Auto.label(),
+                                                        );
+                                                        ui.separator();
+                                                        ui.selectable_value(
+                                                            &mut self.export_modal.config.encoder,
+                                                            VideoEncoder::Cpu,
+                                                            VideoEncoder::Cpu.label(),
+                                                        );
+                                                        for enc in VideoEncoder::ALL_HARDWARE {
+                                                            let is_avail = available.contains(enc);
+                                                            let label = if is_avail {
+                                                                format!("{} [利用可能]", enc.label())
+                                                            } else {
+                                                                format!("{} (非対応環境)", enc.label())
+                                                            };
+                                                            if is_avail {
+                                                                ui.selectable_value(
+                                                                    &mut self.export_modal.config.encoder,
+                                                                    *enc,
+                                                                    label,
+                                                                );
+                                                            } else {
+                                                                ui.add_enabled(false, egui::Button::new(label));
+                                                            }
+                                                        }
+                                                    });
+
+                                                if resolved.is_hardware_accelerated() {
+                                                    let tip = format!("⚡ GPU 高速エンコード有効 ({})", resolved.short_name());
+                                                    ui.label(
+                                                        RichText::new(tip)
+                                                            .color(crate::theme::ok_text())
+                                                            .strong()
+                                                            .size(11.5),
+                                                    );
+                                                } else {
+                                                    ui.label(
+                                                        RichText::new("🛡️ CPU 安全エンコード (互換性重視)")
+                                                            .color(crate::theme::text_muted())
+                                                            .size(11.5),
+                                                    );
+                                                }
+                                            });
+                                            ui.end_row();
+                                        }
                                     }
 
                                     ui.label("書き出し範囲:");

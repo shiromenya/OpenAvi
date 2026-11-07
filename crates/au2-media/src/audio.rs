@@ -42,6 +42,123 @@ impl DecodedAudio {
     pub fn total_samples_per_channel(&self) -> usize {
         self.samples.len() / (self.channels as usize).max(1)
     }
+
+    /// タイムライン描画用の波形ピークデータを抽出します。
+    pub fn extract_waveform_peaks(&self, samples_per_sec: u32) -> AudioWaveformPeaks {
+        generate_waveform_peaks(&self.samples, self.channels, self.sample_rate, samples_per_sec)
+    }
+}
+
+/// タイムライン描画用の事前計算済みオーディオ波形ピークデータ。
+///
+/// 44.1kHz の高密度 PCM を、描画負荷の低い一定解像度（既定: 1 秒あたり 120 サンプル）に
+/// ダウンサンプリングした最小値・最大値（-1.0..=1.0）の配列として保持します。
+/// クロスプラットフォーム対応（Mac / Linux / Windows 共通）で、Win32 GDI 等には一切依存しません。
+#[derive(Debug, Clone, PartialEq)]
+pub struct AudioWaveformPeaks {
+    /// 1 秒あたりのピークサンプル数（例: 120）
+    pub samples_per_sec: u32,
+    /// 音声の総再生時間（秒）
+    pub duration_sec: f64,
+    /// 各時間ビンごとの (min_amplitude, max_amplitude)。値域は -1.0..=1.0
+    pub peaks: Vec<(f32, f32)>,
+}
+
+impl AudioWaveformPeaks {
+    /// 指定された時間範囲 [start_sec, end_sec] における最大ピーク振幅（0.0..=1.0）を取得します。
+    pub fn sample_range_amplitude(&self, start_sec: f64, end_sec: f64) -> f32 {
+        if self.peaks.is_empty() || end_sec <= 0.0 || start_sec >= self.duration_sec {
+            return 0.0;
+        }
+        let rate = self.samples_per_sec as f64;
+        let idx_start = (start_sec.max(0.0) * rate).floor() as usize;
+        let idx_end = ((end_sec.max(start_sec) * rate).ceil() as usize).min(self.peaks.len());
+        if idx_start >= self.peaks.len() || idx_start >= idx_end {
+            let idx = idx_start.min(self.peaks.len().saturating_sub(1));
+            let (min, max) = self.peaks[idx];
+            return min.abs().max(max.abs());
+        }
+
+        let mut max_abs = 0.0f32;
+        for i in idx_start..idx_end {
+            let (min, max) = self.peaks[i];
+            let abs_val = min.abs().max(max.abs());
+            if abs_val > max_abs {
+                max_abs = abs_val;
+            }
+        }
+        max_abs
+    }
+
+    /// 指定された時刻（秒）におけるピーク値 (min, max) を高速サンプリングします。
+    pub fn sample_at_time(&self, sec: f64) -> (f32, f32) {
+        if self.peaks.is_empty() || sec < 0.0 || sec > self.duration_sec {
+            return (0.0, 0.0);
+        }
+        let idx = (sec * self.samples_per_sec as f64).round() as usize;
+        let clamped = idx.min(self.peaks.len().saturating_sub(1));
+        self.peaks[clamped]
+    }
+}
+
+/// 16-bit インターリーブ PCM サンプルから波形ピークデータを生成します。
+pub fn generate_waveform_peaks(
+    samples: &[i16],
+    channels: u16,
+    sample_rate: u32,
+    samples_per_sec: u32,
+) -> AudioWaveformPeaks {
+    let ch = (channels as usize).max(1);
+    let total_frames = samples.len() / ch;
+    if total_frames == 0 || sample_rate == 0 {
+        return AudioWaveformPeaks {
+            samples_per_sec,
+            duration_sec: 0.0,
+            peaks: Vec::new(),
+        };
+    }
+    let duration_sec = total_frames as f64 / sample_rate as f64;
+    let num_bins = (duration_sec * samples_per_sec as f64).ceil().max(1.0) as usize;
+    let frames_per_bin = (sample_rate as f64 / samples_per_sec as f64).max(1.0);
+
+    let mut peaks = Vec::with_capacity(num_bins);
+
+    for bin_idx in 0..num_bins {
+        let frame_start = (bin_idx as f64 * frames_per_bin).floor() as usize;
+        let frame_end = (((bin_idx + 1) as f64 * frames_per_bin).ceil() as usize).min(total_frames);
+
+        if frame_start >= total_frames || frame_start >= frame_end {
+            peaks.push((0.0, 0.0));
+            continue;
+        }
+
+        let mut min_val = 0.0f32;
+        let mut max_val = 0.0f32;
+
+        for f in frame_start..frame_end {
+            let base = f * ch;
+            let mut sample_sum = 0.0f32;
+            for c in 0..ch {
+                let s = samples[base + c] as f32 / 32768.0;
+                sample_sum += s;
+            }
+            let avg = sample_sum / ch as f32;
+            if avg < min_val {
+                min_val = avg;
+            }
+            if avg > max_val {
+                max_val = avg;
+            }
+        }
+
+        peaks.push((min_val.clamp(-1.0, 1.0), max_val.clamp(-1.0, 1.0)));
+    }
+
+    AudioWaveformPeaks {
+        samples_per_sec,
+        duration_sec,
+        peaks,
+    }
 }
 
 /// WAV (RIFF WAVE) ファイルを標準ライブラリのみで直接パースし、
@@ -1094,5 +1211,31 @@ mod tests {
         assert_eq!(s0_r, -750);
         assert_eq!(s1_l, 2500);
         assert_eq!(s1_r, -1500);
+    }
+
+    #[test]
+    fn test_generate_audio_waveform_peaks() {
+        // 44.1kHz ステレオで 1 秒間の音声サンプルを作成（最大振幅 16384 = 約 0.5）
+        let sample_rate = 44100;
+        let mut samples = Vec::with_capacity(sample_rate * 2);
+        for i in 0..sample_rate {
+            let val = if (i / 100) % 2 == 0 { 16384i16 } else { -16384i16 };
+            samples.push(val); // L
+            samples.push(val); // R
+        }
+
+        let peaks = generate_waveform_peaks(&samples, 2, sample_rate as u32, 100);
+        assert_eq!(peaks.samples_per_sec, 100);
+        assert!((peaks.duration_sec - 1.0).abs() < 1e-4);
+        assert_eq!(peaks.peaks.len(), 100);
+
+        // 各ビンのピーク振幅が約 0.5 であること
+        let (min, max) = peaks.peaks[10];
+        assert!((min - (-0.5)).abs() < 0.05);
+        assert!((max - 0.5).abs() < 0.05);
+
+        // 時間範囲サンプリング
+        let amp = peaks.sample_range_amplitude(0.1, 0.2);
+        assert!((amp - 0.5).abs() < 0.05);
     }
 }

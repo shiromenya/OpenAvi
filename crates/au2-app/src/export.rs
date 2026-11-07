@@ -110,12 +110,300 @@ impl ExportQuality {
     }
 }
 
+/// 動画エンコード方式（ハードウェアアクセラレーション / CPU）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VideoEncoder {
+    /// 自動判別（検出された最適なハードウェアエンコーダ、なければ CPU）
+    #[default]
+    Auto,
+    /// CPU ソフトウェアエンコーダ (libx264 - 標準・最高画質/互換)
+    Cpu,
+    /// NVIDIA NVENC (h264_nvenc - GeForce / RTX 高速)
+    Nvenc,
+    /// Intel QSV (h264_qsv - Quick Sync Video 高速)
+    Qsv,
+    /// AMD AMF (h264_amf - Radeon 高速)
+    Amf,
+    /// Apple VideoToolbox (h264_videotoolbox - Mac 高速)
+    VideoToolbox,
+    /// Linux VA-API (h264_vaapi - Linux オープン規格 高速)
+    Vaapi,
+    /// Windows Media Foundation (h264_mf - OS標準 高速)
+    MediaFoundation,
+}
+
+impl VideoEncoder {
+    pub const ALL_HARDWARE: &'static [VideoEncoder] = &[
+        VideoEncoder::Nvenc,
+        VideoEncoder::Qsv,
+        VideoEncoder::Amf,
+        VideoEncoder::VideoToolbox,
+        VideoEncoder::Vaapi,
+        VideoEncoder::MediaFoundation,
+    ];
+
+    pub fn is_hardware_accelerated(self) -> bool {
+        matches!(
+            self,
+            Self::Nvenc
+                | Self::Qsv
+                | Self::Amf
+                | Self::VideoToolbox
+                | Self::Vaapi
+                | Self::MediaFoundation
+        )
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "自動判別 (最適なエンコーダを自動選択)",
+            Self::Cpu => "CPU ソフトウェア (libx264 - 標準・最高互換)",
+            Self::Nvenc => "NVIDIA NVENC (GeForce / RTX 高速)",
+            Self::Qsv => "Intel QSV (Quick Sync Video 高速)",
+            Self::Amf => "AMD AMF (Radeon 高速)",
+            Self::VideoToolbox => "Apple VideoToolbox (Mac 高速)",
+            Self::Vaapi => "Linux VA-API (オープン規格 高速)",
+            Self::MediaFoundation => "Windows Media Foundation (OS標準 高速)",
+        }
+    }
+
+    pub fn short_name(self) -> &'static str {
+        match self {
+            Self::Auto => "自動判別",
+            Self::Cpu => "CPU (libx264)",
+            Self::Nvenc => "NVIDIA NVENC",
+            Self::Qsv => "Intel QSV",
+            Self::Amf => "AMD AMF",
+            Self::VideoToolbox => "Apple VideoToolbox",
+            Self::Vaapi => "Linux VA-API",
+            Self::MediaFoundation => "Windows Media Foundation",
+        }
+    }
+
+    pub fn ffmpeg_codec_name(self) -> &'static str {
+        match self {
+            Self::Auto | Self::Cpu => "libx264",
+            Self::Nvenc => "h264_nvenc",
+            Self::Qsv => "h264_qsv",
+            Self::Amf => "h264_amf",
+            Self::VideoToolbox => "h264_videotoolbox",
+            Self::Vaapi => "h264_vaapi",
+            Self::MediaFoundation => "h264_mf",
+        }
+    }
+
+    /// 指定された利用可能一覧から、実際に使用するエンコーダを安全に決定します。
+    pub fn resolve(self, available: &[VideoEncoder]) -> VideoEncoder {
+        match self {
+            Self::Auto => available
+                .iter()
+                .copied()
+                .find(|e| e.is_hardware_accelerated())
+                .unwrap_or(VideoEncoder::Cpu),
+            specific => {
+                if specific == VideoEncoder::Cpu || available.contains(&specific) {
+                    specific
+                } else {
+                    VideoEncoder::Cpu
+                }
+            }
+        }
+    }
+}
+
+/// システムで利用可能なビデオエンコーダ一覧を安全にプローブ・取得します。
+pub fn available_video_encoders(ffmpeg_path: Option<&std::path::Path>) -> &'static [VideoEncoder] {
+    static ENCODERS: std::sync::OnceLock<Vec<VideoEncoder>> = std::sync::OnceLock::new();
+    ENCODERS.get_or_init(|| {
+        let mut list = vec![VideoEncoder::Auto, VideoEncoder::Cpu];
+        let Some(ffmpeg) = ffmpeg_path else {
+            return list;
+        };
+
+        // プラットフォームに応じた候補リストを作成
+        let mut candidates = Vec::new();
+        #[cfg(target_os = "macos")]
+        candidates.push(VideoEncoder::VideoToolbox);
+        candidates.push(VideoEncoder::Nvenc);
+        candidates.push(VideoEncoder::Qsv);
+        candidates.push(VideoEncoder::Amf);
+        #[cfg(target_os = "windows")]
+        candidates.push(VideoEncoder::MediaFoundation);
+        #[cfg(target_os = "linux")]
+        candidates.push(VideoEncoder::Vaapi);
+
+        for enc in candidates {
+            if test_encoder_support(ffmpeg, enc.ffmpeg_codec_name()) {
+                list.push(enc);
+            }
+        }
+        list
+    })
+}
+
+fn test_encoder_support(ffmpeg: &std::path::Path, codec_name: &str) -> bool {
+    let mut cmd = Command::new(ffmpeg);
+    au2_platform::hide_console_window(&mut cmd);
+    cmd.args([
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=s=64x64:d=0.04",
+        "-c:v",
+        codec_name,
+        "-f",
+        "null",
+        "-",
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
+
+    match cmd.status() {
+        Ok(status) => status.success(),
+        Err(_) => false,
+    }
+}
+
+pub fn apply_video_encoder_args(cmd: &mut Command, encoder: VideoEncoder, quality: ExportQuality) {
+    match encoder {
+        VideoEncoder::Nvenc => {
+            let cq = match quality {
+                ExportQuality::High => "19",
+                ExportQuality::Standard => "23",
+                ExportQuality::Compact => "28",
+            };
+            cmd.args([
+                "-c:v",
+                "h264_nvenc",
+                "-preset",
+                "p4",
+                "-cq",
+                cq,
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+            ]);
+        }
+        VideoEncoder::Qsv => {
+            let gq = match quality {
+                ExportQuality::High => "20",
+                ExportQuality::Standard => "24",
+                ExportQuality::Compact => "29",
+            };
+            cmd.args([
+                "-c:v",
+                "h264_qsv",
+                "-global_quality",
+                gq,
+                "-preset",
+                "veryfast",
+                "-pix_fmt",
+                "nv12",
+                "-movflags",
+                "+faststart",
+            ]);
+        }
+        VideoEncoder::Amf => {
+            let qp = match quality {
+                ExportQuality::High => "19",
+                ExportQuality::Standard => "23",
+                ExportQuality::Compact => "28",
+            };
+            cmd.args([
+                "-c:v",
+                "h264_amf",
+                "-quality",
+                "speed",
+                "-qp_i",
+                qp,
+                "-qp_p",
+                qp,
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+            ]);
+        }
+        VideoEncoder::VideoToolbox => {
+            let q = match quality {
+                ExportQuality::High => "65",
+                ExportQuality::Standard => "50",
+                ExportQuality::Compact => "35",
+            };
+            cmd.args([
+                "-c:v",
+                "h264_videotoolbox",
+                "-q:v",
+                q,
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+            ]);
+        }
+        VideoEncoder::Vaapi => {
+            let q = match quality {
+                ExportQuality::High => "20",
+                ExportQuality::Standard => "24",
+                ExportQuality::Compact => "29",
+            };
+            cmd.args([
+                "-vaapi_device",
+                "/dev/dri/renderD128",
+                "-vf",
+                "format=nv12,hwupload",
+                "-c:v",
+                "h264_vaapi",
+                "-qp",
+                q,
+                "-movflags",
+                "+faststart",
+            ]);
+        }
+        VideoEncoder::MediaFoundation => {
+            let b = match quality {
+                ExportQuality::High => "12M",
+                ExportQuality::Standard => "6M",
+                ExportQuality::Compact => "3M",
+            };
+            cmd.args([
+                "-c:v",
+                "h264_mf",
+                "-b:v",
+                b,
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+            ]);
+        }
+        VideoEncoder::Cpu | VideoEncoder::Auto => {
+            cmd.args([
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                quality.crf_str(),
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+            ]);
+        }
+    }
+}
+
 /// 動画書き出し設定。
 #[derive(Debug, Clone)]
 pub struct ExportConfig {
     pub output_path: PathBuf,
     pub format: ExportFormat,
     pub quality: ExportQuality,
+    pub encoder: VideoEncoder,
     pub width: u32,
     pub height: u32,
     pub fps_num: u32,
@@ -133,6 +421,7 @@ impl ExportConfig {
             output_path: default_path,
             format: ExportFormat::Mp4,
             quality: ExportQuality::High,
+            encoder: VideoEncoder::Auto,
             width: ((s.width.max(16) + 1) / 2) * 2,
             height: ((s.height.max(16) + 1) / 2) * 2,
             fps_num: s.frame_rate.num.max(1),
@@ -976,20 +1265,12 @@ impl ExportSession {
             cmd.arg("-i").arg(audio_path);
         }
 
+        let available = available_video_encoders(Some(&ffmpeg));
+        let resolved_encoder = config.encoder.resolve(available);
+
         match config.format {
             ExportFormat::Mp4 | ExportFormat::Mov => {
-                cmd.args([
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "veryfast",
-                    "-crf",
-                    config.quality.crf_str(),
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-movflags",
-                    "+faststart",
-                ]);
+                apply_video_encoder_args(&mut cmd, resolved_encoder, config.quality);
                 if temp_audio_path.is_some() {
                     cmd.args(["-c:a", "aac", "-b:a", "192k", "-shortest"]);
                 }
@@ -1037,9 +1318,44 @@ impl ExportSession {
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| format!("FFmpeg プロセスの起動に失敗しました: {e}"))?;
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) if resolved_encoder.is_hardware_accelerated() => {
+                // GPU エンコード起動失敗時、安全に CPU エンコーダ (libx264) へフォールバックして再試行
+                let mut fallback_cmd = Command::new(&ffmpeg);
+                au2_platform::hide_console_window(&mut fallback_cmd);
+                fallback_cmd.args([
+                    "-y",
+                    "-f",
+                    "rawvideo",
+                    "-pix_fmt",
+                    "rgba",
+                    "-s",
+                    &size_arg,
+                    "-r",
+                    &fps_arg,
+                    "-i",
+                    "-",
+                ]);
+                if let Some(audio_path) = &temp_audio_path {
+                    fallback_cmd.arg("-i").arg(audio_path);
+                }
+                apply_video_encoder_args(&mut fallback_cmd, VideoEncoder::Cpu, config.quality);
+                if temp_audio_path.is_some() {
+                    fallback_cmd.args(["-c:a", "aac", "-b:a", "192k", "-shortest"]);
+                }
+                fallback_cmd
+                    .args(["-loglevel", "error"])
+                    .arg(&config.output_path)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::piped());
+                fallback_cmd
+                    .spawn()
+                    .map_err(|fe| format!("FFmpeg プロセスの起動に失敗しました (GPU: {e}, CPU: {fe})"))?
+            }
+            Err(e) => return Err(format!("FFmpeg プロセスの起動に失敗しました: {e}")),
+        };
         let stdin = child.stdin.take();
         let (tx, writer) = match stdin {
             Some(s) => {

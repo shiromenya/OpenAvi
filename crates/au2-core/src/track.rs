@@ -152,6 +152,29 @@ impl Track {
         self.keyframes.last().map(|k| k.value).unwrap_or(0.0)
     }
 
+    /// トラックの補間方法（移動方法）を設定または解除します。
+    /// 固定値から移動方法を設定した場合、末尾フレームに同じ初期値のキーフレームを自動配置します。
+    pub fn set_interpolation(&mut self, interp: Option<Interpolation>, total_len: Frame) {
+        match interp {
+            None => {
+                let current_val = self.start_value();
+                self.keyframes = vec![Keyframe { frame: 0, value: current_val }];
+                self.interpolation = None;
+            }
+            Some(i) => {
+                if self.keyframes.len() < 2 {
+                    let start_val = self.start_value();
+                    let end_frame = total_len.max(1);
+                    self.keyframes = vec![
+                        Keyframe { frame: 0, value: start_val },
+                        Keyframe { frame: end_frame, value: start_val },
+                    ];
+                }
+                self.interpolation = Some(i);
+            }
+        }
+    }
+
     /// 指定した相対フレームでの値を評価します。
     pub fn evaluate(&self, frame: Frame) -> f64 {
         let Some(interp) = self.interpolation.as_ref().filter(|_| self.keyframes.len() >= 2) else {
@@ -564,5 +587,25 @@ mod tests {
     fn easing() {
         assert_eq!(Easing::EaseIn.apply(0.5), 0.25);
         assert_eq!(Easing::EaseOut.apply(0.5), 0.75);
+    }
+
+    #[test]
+    fn test_set_interpolation() {
+        let mut t = Track::constant(50.0, 1);
+        assert!(!t.is_animated());
+
+        // 直線移動を設定
+        t.set_interpolation(Some(Interpolation::linear()), 60);
+        assert!(t.is_animated());
+        assert_eq!(t.keyframes.len(), 2);
+        assert_eq!(t.keyframes[0].value, 50.0);
+        assert_eq!(t.keyframes[1].frame, 60);
+        assert_eq!(t.keyframes[1].value, 50.0);
+
+        // 移動なしに解除
+        t.set_interpolation(None, 60);
+        assert!(!t.is_animated());
+        assert_eq!(t.keyframes.len(), 1);
+        assert_eq!(t.keyframes[0].value, 50.0);
     }
 }
