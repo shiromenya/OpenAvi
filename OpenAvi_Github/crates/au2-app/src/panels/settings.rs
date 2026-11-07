@@ -489,6 +489,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     ui.add_space(4.0);
 
     let mut changed = false;
+    let mut pending_psd_action: Option<PsdPendingAction> = None;
     if let Some(eff) = pending_effect {
         // 標準描画 / 拡張描画 / 標準再生 の直前に挿入する
         let insert_pos = obj
@@ -579,7 +580,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                     if eff.kind == EffectKind::ImageFile {
                         if let Some(ref psd_doc) = current_psd_doc {
                             ui.add_space(6.0);
-                            changed |= psd_inspector_ui(ui, id, eff, psd_doc);
+                            changed |= psd_inspector_ui(ui, id, eff, psd_doc, &mut pending_psd_action);
                         }
                     }
                 });
@@ -589,6 +590,20 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     if let Some((old_p, is_audio)) = pending_relink {
         st.relink_media_dialog(Some(id), &old_p, is_audio);
         changed = true;
+    }
+
+    if let Some(action) = pending_psd_action {
+        match action {
+            PsdPendingAction::DecomposeFolders { tight_crop } => {
+                changed |= st.decompose_psd_object(id, true, tight_crop);
+            }
+            PsdPendingAction::DecomposeLayers { tight_crop } => {
+                changed |= st.decompose_psd_object(id, false, tight_crop);
+            }
+            PsdPendingAction::ExportPng { by_folders, tight_crop } => {
+                st.export_psd_layers_png_dialog(id, by_folders, tight_crop);
+            }
+        }
     }
 
     if file_changed_flag {
@@ -757,22 +772,32 @@ fn set_eff_text_param(eff: &mut Effect, key: &str, value: String) {
     }
 }
 
+#[derive(Clone, Copy)]
+enum PsdPendingAction {
+    DecomposeFolders { tight_crop: bool },
+    DecomposeLayers { tight_crop: bool },
+    ExportPng { by_folders: bool, tight_crop: bool },
+}
+
 /// PSD 立ち絵・レイヤー切替・目パチ・口パク設定 UI（PSDToolKit 互換）
 fn psd_inspector_ui(
     ui: &mut egui::Ui,
     id: au2_core::ObjectId,
     eff: &mut Effect,
     doc: &au2_media::PsdDocument,
+    pending_action: &mut Option<PsdPendingAction>,
 ) -> bool {
     let mut changed = false;
 
     let layers_spec = get_eff_text_param(eff, "psd_layers").to_string();
     let blink_spec = get_eff_text_param(eff, "psd_blink").to_string();
     let lipsync_spec = get_eff_text_param(eff, "psd_lipsync").to_string();
+    let psd_label = get_eff_text_param(eff, "psd_label").to_string();
 
     let mut vis_vec = doc.compute_visibility_from_overrides(&layers_spec);
     let mut blink_cfg = au2_media::PsdBlinkConfig::parse(&blink_spec);
     let mut lipsync_cfg = au2_media::PsdLipSyncConfig::parse(&lipsync_spec);
+    let is_isolated = au2_media::PsdDocument::is_isolated_spec(&layers_spec);
 
     let visible_layer_count = doc
         .layers
@@ -800,17 +825,90 @@ fn psd_inspector_ui(
                     .weak()
                     .size(11.0),
                 );
+                if !psd_label.is_empty() {
+                    ui.label(
+                        RichText::new(format!("✂ 抽出パーツ: {}", psd_label))
+                            .size(11.0)
+                            .color(theme::ok_text()),
+                    );
+                }
                 if !layers_spec.is_empty() {
                     if ui
-                        .small_button("↺ レイヤー初期状態に戻す")
-                        .on_hover_text("すべてのレイヤー表示状態を PSD ファイル保存時の初期状態にリセットします")
+                        .small_button("↺ 全体初期状態に戻す")
+                        .on_hover_text("パーツ抽出やレイヤー切替を解除し、PSD ファイル保存時の全体初期状態にリセットします")
                         .clicked()
                     {
                         vis_vec = doc.default_visibility();
                         set_eff_text_param(eff, "psd_layers", String::new());
+                        set_eff_text_param(eff, "psd_label", String::new());
                         changed = true;
                     }
                 }
+            });
+
+            // 0. レイヤー・パーツ分解ツールバー
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("✂ メディア分解:").strong().size(12.0));
+                if ui
+                    .button("📁 パーツ(フォルダ)単位でタイムラインへ分解")
+                    .on_hover_text(
+                        "眉・目・口・髪・体などのフォルダ単位で別々のレイヤー行へ分解配置します。\n\
+                         各パーツの中心座標が自動計算されるため個別回転・揺れエフェクトに最適で、分解後も目パチ・口パク・表情切替がそのまま使えます。",
+                    )
+                    .clicked()
+                {
+                    *pending_action = Some(PsdPendingAction::DecomposeFolders { tight_crop: true });
+                }
+                if ui
+                    .button("📑 表示レイヤーを1枚ずつタイムラインへ分解")
+                    .on_hover_text(
+                        "現在表示中の全ピクセルレイヤーを1枚ずつ別々のレイヤー行へ分解配置します。\n\
+                         各レイヤーの描画範囲で自動トリミング＆座標配置され、ブレンドモード（乗算・スクリーン等）も自動引き継ぎされます。",
+                    )
+                    .clicked()
+                {
+                    *pending_action = Some(PsdPendingAction::DecomposeLayers { tight_crop: true });
+                }
+                ui.menu_button("💾 透過PNG書き出し / 詳細...", |ui| {
+                    if ui
+                        .button("💾 パーツ(フォルダ)単位で透過PNG一括書き出し...")
+                        .clicked()
+                    {
+                        *pending_action = Some(PsdPendingAction::ExportPng {
+                            by_folders: true,
+                            tight_crop: false,
+                        });
+                        ui.close_menu();
+                    }
+                    if ui
+                        .button("💾 表示レイヤーを1枚ずつ透過PNG一括書き出し...")
+                        .clicked()
+                    {
+                        *pending_action = Some(PsdPendingAction::ExportPng {
+                            by_folders: false,
+                            tight_crop: false,
+                        });
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui
+                        .button("📁 パーツ単位でタイムラインへ分解 (元キャンバス余白を維持)")
+                        .clicked()
+                    {
+                        *pending_action =
+                            Some(PsdPendingAction::DecomposeFolders { tight_crop: false });
+                        ui.close_menu();
+                    }
+                    if ui
+                        .button("📑 表示レイヤーを1枚ずつ分解 (元キャンバス余白を維持)")
+                        .clicked()
+                    {
+                        *pending_action =
+                            Some(PsdPendingAction::DecomposeLayers { tight_crop: false });
+                        ui.close_menu();
+                    }
+                });
             });
 
             // 1. お気に入り (.pfv) プリセット
@@ -827,7 +925,8 @@ fn psd_inspector_ui(
                             for path in &fav.active_paths {
                                 doc.set_layer_path_visible(&mut vis_vec, path, true);
                             }
-                            let serialized = doc.encode_visibility_overrides(&vis_vec);
+                            let serialized =
+                                doc.encode_visibility_overrides_preserving(&vis_vec, &layers_spec);
                             set_eff_text_param(eff, "psd_layers", serialized);
                             changed = true;
                         }
@@ -1167,7 +1266,8 @@ fn psd_inspector_ui(
                                                 target_vis,
                                                 true,
                                             );
-                                            let serialized = doc.encode_visibility_overrides(&vis_vec);
+                                            let serialized = doc
+                                                .encode_visibility_overrides_preserving(&vis_vec, &layers_spec);
                                             set_eff_text_param(eff, "psd_layers", serialized);
                                             changed = true;
                                         }
@@ -1212,7 +1312,7 @@ fn psd_inspector_ui(
                                     "🖼"
                                 };
                                 let label_text = format!("{} {}", icon, layer.name);
-                                if layer.is_mandatory {
+                                if layer.is_mandatory && !is_isolated {
                                     let mut locked = true;
                                     ui.add_enabled(
                                         false,
@@ -1221,7 +1321,8 @@ fn psd_inspector_ui(
                                     .on_hover_text("* 付き必須レイヤー（常時表示）");
                                 } else if ui.checkbox(&mut vis, label_text).changed() {
                                     doc.set_layer_id_visible(&mut vis_vec, layer.id, vis, false);
-                                    let serialized = doc.encode_visibility_overrides(&vis_vec);
+                                    let serialized =
+                                        doc.encode_visibility_overrides_preserving(&vis_vec, &layers_spec);
                                     set_eff_text_param(eff, "psd_layers", serialized);
                                     changed = true;
                                 }

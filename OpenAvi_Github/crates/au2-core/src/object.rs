@@ -433,12 +433,19 @@ impl TimelineObject {
                 let first_line = body.lines().next().unwrap_or_default();
                 if first_line.is_empty() { src.name.clone() } else { first_line.to_string() }
             }
-            EffectKind::VideoFile | EffectKind::ImageFile | EffectKind::AudioFile => src
-                .text("file")
-                .and_then(|f| f.rsplit(['\\', '/']).next())
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| src.name.clone()),
+            EffectKind::VideoFile | EffectKind::ImageFile | EffectKind::AudioFile => {
+                let fname = src
+                    .text("file")
+                    .and_then(|f| f.rsplit(['\\', '/']).next())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| src.name.clone());
+                if let Some(label) = src.text("psd_label").filter(|s| !s.trim().is_empty()) {
+                    format!("{} [{}]", label.trim(), fname)
+                } else {
+                    fname
+                }
+            }
             EffectKind::CustomObject => src
                 .text("name")
                 .filter(|s| !s.is_empty())

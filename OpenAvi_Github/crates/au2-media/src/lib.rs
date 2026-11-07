@@ -22,8 +22,8 @@ pub use audio::{decode_audio_pcm, AudioEngine, AudioTrackItem, DecodedAudio};
 use image::AnimationDecoder;
 pub use psd::{
     build_synthetic_character_psd, collect_part_groups, parse_pfv_bytes, parse_pfv_str, probe_psd_dimensions,
-    PsdBlendMode, PsdBlinkConfig, PsdDocument, PsdFavoritePreset, PsdLayer, PsdLayerKind, PsdLipSyncConfig,
-    PsdLipSyncMode,
+    PsdBlendMode, PsdBlinkConfig, PsdDecomposedPart, PsdDocument, PsdFavoritePreset, PsdLayer, PsdLayerKind,
+    PsdLipSyncConfig, PsdLipSyncMode,
 };
 
 /// RGBA8 ピクセルバッファ。
@@ -425,7 +425,8 @@ impl MediaCache {
     ) -> Option<(u64, Arc<RgbaFrame>)> {
         let doc = self.get_psd_document(path)?;
         let vis = doc.evaluate_animated_visibility(overrides, blink, lipsync, rel_frame, fps, audio_amplitude);
-        Some(doc.composite_with_visibility(&vis))
+        let crop = doc.parse_crop_rect(overrides);
+        Some(doc.composite_with_visibility_and_crop(&vis, crop))
     }
 
     /// 互換性のための参照取得 API。

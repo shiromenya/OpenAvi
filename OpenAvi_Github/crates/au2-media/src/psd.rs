@@ -86,6 +86,42 @@ impl PsdBlendMode {
             Self::Subtract => "減算",
         }
     }
+
+    /// AviUtl の標準描画・拡張描画の合成モード番号（`"0"`〜`"9"`）に変換します。
+    pub fn to_aviutl_blend_code(self) -> &'static str {
+        match self {
+            Self::PassThrough | Self::Normal => "0",
+            Self::LinearDodge | Self::ColorDodge => "1",
+            Self::Subtract | Self::ColorBurn | Self::LinearBurn => "2",
+            Self::Multiply => "3",
+            Self::Screen => "4",
+            Self::Overlay | Self::HardLight | Self::SoftLight => "5",
+            Self::Lighten => "6",
+            Self::Darken => "7",
+            Self::Difference | Self::Exclusion => "9",
+        }
+    }
+}
+
+/// PSD をレイヤーまたはフォルダ（パーツグループ）単位で分解した際の 1 パーツ情報。
+#[derive(Debug, Clone)]
+pub struct PsdDecomposedPart {
+    /// タイムライン上に表示するパーツ名（例: `"*体"`, `"目"`, `"前髪"`）
+    pub label: String,
+    /// このパーツのみを表示する `psd_layers` パラメータ文字列（`*=0;@crop=l,t,r,b;...`）
+    pub psd_layers_param: String,
+    /// 切り抜き矩形 `[left, top, right, bottom]`（PSD キャンバス座標系）
+    pub crop_rect: [u32; 4],
+    /// PSD キャンバス中心からのパーツ中心オフセット `(offset_x, offset_y)`
+    pub center_offset: (f64, f64),
+    /// 標準描画に引き継ぐブレンドモード
+    pub blend_mode: PsdBlendMode,
+    /// 上のオブジェクト（下位レイヤーのベース）でクリッピングするか
+    pub clipping: bool,
+    /// 目パチ設定を引き継ぐ対象パーツか
+    pub inherit_blink: bool,
+    /// 口パク設定を引き継ぐ対象パーツか
+    pub inherit_lipsync: bool,
 }
 
 /// レイヤーまたはフォルダの種別。
@@ -819,31 +855,87 @@ impl PsdDocument {
             .collect()
     }
 
-    /// `psd_layers` オーバーライド文字列（`path=1;path=0`）を適用した可視配列を計算します。
+    /// `psd_layers` オーバーライド文字列（`path=1;path=0`、`*=0`、`@crop=l,t,r,b`）を適用した可視配列を計算します。
     pub fn compute_visibility_from_overrides(&self, overrides_str: &str) -> Vec<bool> {
         let mut vis = self.default_visibility();
         if overrides_str.trim().is_empty() {
             return vis;
         }
+        let mut isolated_mode = false;
         for token in overrides_str.split(';') {
             let token = token.trim();
-            if token.is_empty() {
+            if token.is_empty() || token.starts_with("@crop=") {
+                continue;
+            }
+            if token == "*=0" {
+                vis.fill(false);
+                isolated_mode = true;
                 continue;
             }
             if let Some((path, val_str)) = token.split_once('=') {
                 let on = val_str.trim() == "1" || val_str.trim().eq_ignore_ascii_case("true");
-                self.set_layer_path_visible(&mut vis, path.trim(), on);
+                if isolated_mode {
+                    self.set_layer_path_visible_exact(&mut vis, path.trim(), on);
+                } else {
+                    self.set_layer_path_visible(&mut vis, path.trim(), on);
+                }
             } else {
                 // パスのみ記述されている場合は ON（かつラジオ排他適用）
                 self.set_layer_path_visible(&mut vis, token, true);
             }
         }
-        for l in &self.layers {
-            if l.is_mandatory {
-                vis[l.id] = true;
+        if !isolated_mode {
+            for l in &self.layers {
+                if l.is_mandatory {
+                    vis[l.id] = true;
+                }
             }
         }
         vis
+    }
+
+    /// `overrides_str` 内に `@crop=left,top,right,bottom` が含まれていれば切り抜き矩形を返します。
+    pub fn parse_crop_rect(&self, overrides_str: &str) -> Option<[u32; 4]> {
+        for token in overrides_str.split(';') {
+            let token = token.trim();
+            if let Some(coords_str) = token.strip_prefix("@crop=") {
+                let mut nums = coords_str.split(',').filter_map(|s| s.trim().parse::<u32>().ok());
+                let l = nums.next()?.min(self.width);
+                let t = nums.next()?.min(self.height);
+                let r = nums.next()?.min(self.width);
+                let b = nums.next()?.min(self.height);
+                if r > l && b > t {
+                    return Some([l, t, r, b]);
+                }
+            }
+        }
+        None
+    }
+
+    /// `overrides_str` が分解済みの単独パーツ指定（`*=0` を含む）かどうかを返します。
+    pub fn is_isolated_spec(overrides_str: &str) -> bool {
+        overrides_str.split(';').any(|t| t.trim() == "*=0")
+    }
+
+    fn set_layer_path_visible_exact(&self, vis: &mut [bool], path: &str, on: bool) {
+        let normalized = path.trim().trim_start_matches("v1.");
+        let found_id = self.path_to_id.get(normalized).copied().or_else(|| {
+            let clean_target = strip_prefixes_in_path(normalized);
+            self.layers
+                .iter()
+                .find(|l| l.kind != PsdLayerKind::FolderEnd && strip_prefixes_in_path(&l.path) == clean_target)
+                .map(|l| l.id)
+        });
+        if let Some(id) = found_id {
+            vis[id] = on;
+            if on {
+                let mut cur_parent = self.layers.get(id).and_then(|l| l.parent_id);
+                while let Some(pid) = cur_parent {
+                    vis[pid] = true;
+                    cur_parent = self.layers.get(pid).and_then(|p| p.parent_id);
+                }
+            }
+        }
     }
 
     /// 特定のレイヤー（ID指定）の表示状態を切り替え、PSDToolKit の `!` ラジオ排他規則（またはフォルダ内単一選択）を適用します。
@@ -914,19 +1006,49 @@ impl PsdDocument {
 
     /// 現在の可視配列 `vis` を、初期状態からの差分文字列（`psd_layers` パラメータ用）にシリアライズします。
     pub fn encode_visibility_overrides(&self, vis: &[bool]) -> String {
-        let default_vis = self.default_visibility();
-        let mut diffs = Vec::new();
-        for l in &self.layers {
-            if l.kind == PsdLayerKind::FolderEnd || l.path.is_empty() {
-                continue;
+        self.encode_visibility_overrides_preserving(vis, "")
+    }
+
+    /// 既存の `prev_overrides` に含まれる分解フラグ（`*=0`）や切り抜き範囲（`@crop=...`）を維持しながら可視配列をシリアライズします。
+    pub fn encode_visibility_overrides_preserving(&self, vis: &[bool], prev_overrides: &str) -> String {
+        let any_mandatory_off = self
+            .layers
+            .iter()
+            .any(|l| l.is_mandatory && !vis.get(l.id).copied().unwrap_or(false));
+        let isolated = Self::is_isolated_spec(prev_overrides) || any_mandatory_off;
+        let crop = self.parse_crop_rect(prev_overrides);
+
+        let mut tokens = Vec::new();
+        if isolated {
+            tokens.push("*=0".to_string());
+        }
+        if let Some([l, t, r, b]) = crop {
+            tokens.push(format!("@crop={l},{t},{r},{b}"));
+        }
+
+        if isolated {
+            for l in &self.layers {
+                if l.kind == PsdLayerKind::FolderEnd || l.path.is_empty() {
+                    continue;
+                }
+                if vis.get(l.id).copied().unwrap_or(false) {
+                    tokens.push(format!("{}=1", l.path));
+                }
             }
-            let cur = vis.get(l.id).copied().unwrap_or(l.default_visible);
-            let def = default_vis.get(l.id).copied().unwrap_or(l.default_visible);
-            if cur != def {
-                diffs.push(format!("{}={}", l.path, if cur { 1 } else { 0 }));
+        } else {
+            let default_vis = self.default_visibility();
+            for l in &self.layers {
+                if l.kind == PsdLayerKind::FolderEnd || l.path.is_empty() {
+                    continue;
+                }
+                let cur = vis.get(l.id).copied().unwrap_or(l.default_visible);
+                let def = default_vis.get(l.id).copied().unwrap_or(l.default_visible);
+                if cur != def {
+                    tokens.push(format!("{}={}", l.path, if cur { 1 } else { 0 }));
+                }
             }
         }
-        diffs.join(";")
+        tokens.join(";")
     }
 
     /// ベース可視状態に「目パチ」「口パク」のフレーム評価を適用した最終可視配列を返します。
@@ -1023,6 +1145,15 @@ impl PsdDocument {
 
     /// 指定した可視状態配列 `vis` に基づいて全レイヤーを合成し、キャッシュされた [`Arc<RgbaFrame>`] と状態ハッシュ `u64` を返します。
     pub fn composite_with_visibility(&self, vis: &[bool]) -> (u64, Arc<RgbaFrame>) {
+        self.composite_with_visibility_and_crop(vis, None)
+    }
+
+    /// 指定した可視状態配列 `vis` とオプションの切り抜き矩形 `crop` (`[left, top, right, bottom]`) に基づいてレイヤーを合成します。
+    pub fn composite_with_visibility_and_crop(
+        &self,
+        vis: &[bool],
+        crop: Option<[u32; 4]>,
+    ) -> (u64, Arc<RgbaFrame>) {
         // レイヤーが 0 個の PSD の場合は統合画像を返す
         if self.layers.is_empty() {
             if let Some(ref merged) = self.merged_image {
@@ -1048,12 +1179,12 @@ impl PsdDocument {
             if l.kind != PsdLayerKind::Pixel {
                 continue;
             }
-            let mut is_vis = vis.get(l.id).copied().unwrap_or(l.default_visible) || l.is_mandatory;
+            let mut is_vis = vis.get(l.id).copied().unwrap_or(l.default_visible);
             let mut cur_parent = l.parent_id;
             while is_vis && cur_parent.is_some() {
                 let pid = cur_parent.unwrap();
                 if let Some(p_layer) = self.layers.get(pid) {
-                    let p_vis = vis.get(pid).copied().unwrap_or(p_layer.default_visible) || p_layer.is_mandatory;
+                    let p_vis = vis.get(pid).copied().unwrap_or(p_layer.default_visible);
                     if !p_vis {
                         is_vis = false;
                         break;
@@ -1068,6 +1199,7 @@ impl PsdDocument {
 
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         effective_vis.hash(&mut hasher);
+        crop.hash(&mut hasher);
         let state_hash = hasher.finish();
 
         if let Ok(cache) = self.composited_cache.lock() {
@@ -1076,10 +1208,21 @@ impl PsdDocument {
             }
         }
 
-        // ボトムアップ合成（クリッピングマスクおよび親フォルダ不透明度に対応）
-        let cw = self.width as usize;
-        let ch = self.height as usize;
+        let (cl, ct, cr, cb) = match crop {
+            Some([l, t, r, b]) if r > l && b > t && r <= self.width && b <= self.height => {
+                (l as i32, t as i32, r as i32, b as i32)
+            }
+            _ => (0, 0, self.width as i32, self.height as i32),
+        };
+        let cw = (cr - cl).max(1) as usize;
+        let ch = (cb - ct).max(1) as usize;
         let mut canvas = vec![0u8; cw * ch * 4];
+
+        // 分解された単一のクリッピングレイヤーのみが表示されている場合は、タイムライン側のクリッピングに委ねるため内部マスクを無効化
+        let any_unclipped_vis = self
+            .layers
+            .iter()
+            .any(|l| l.kind == PsdLayerKind::Pixel && effective_vis[l.id] && !l.clipping);
 
         // クリッピングマスクのベースとなる直近の非クリッピングレイヤーのアルファマップ（必要時のみ保持）
         let mut clip_base_alpha: Option<(i32, i32, i32, i32, Vec<u8>)> = None;
@@ -1132,11 +1275,14 @@ impl PsdDocument {
 
             blend_layer_onto_canvas(
                 &mut canvas,
+                cl,
+                ct,
+                cr,
+                cb,
                 cw,
-                ch,
                 layer,
                 eff_opacity as u8,
-                if layer.clipping {
+                if layer.clipping && any_unclipped_vis {
                     clip_base_alpha.as_ref()
                 } else {
                     None
@@ -1145,15 +1291,15 @@ impl PsdDocument {
         }
 
         let frame = Arc::new(RgbaFrame {
-            width: self.width,
-            height: self.height,
-            original_width: self.width,
-            original_height: self.height,
+            width: cw as u32,
+            height: ch as u32,
+            original_width: cw as u32,
+            original_height: ch as u32,
             pixels: canvas,
         });
 
         if let Ok(mut cache) = self.composited_cache.lock() {
-            if cache.len() >= 32 {
+            if cache.len() >= 64 {
                 cache.clear();
             }
             cache.insert(state_hash, Arc::clone(&frame));
@@ -1161,13 +1307,351 @@ impl PsdDocument {
 
         (state_hash, frame)
     }
+
+    fn effective_visibility_for(&self, vis: &[bool]) -> Vec<bool> {
+        let mut effective_vis = vec![false; self.layers.len()];
+        for l in &self.layers {
+            if l.kind != PsdLayerKind::Pixel {
+                continue;
+            }
+            let mut is_vis = vis.get(l.id).copied().unwrap_or(l.default_visible);
+            let mut cur_parent = l.parent_id;
+            while is_vis && cur_parent.is_some() {
+                let pid = cur_parent.unwrap();
+                if let Some(p_layer) = self.layers.get(pid) {
+                    let p_vis = vis.get(pid).copied().unwrap_or(p_layer.default_visible);
+                    if !p_vis {
+                        is_vis = false;
+                        break;
+                    }
+                    cur_parent = p_layer.parent_id;
+                } else {
+                    break;
+                }
+            }
+            effective_vis[l.id] = is_vis;
+        }
+        effective_vis
+    }
+
+    fn clamp_bbox(&self, left: i32, top: i32, right: i32, bottom: i32, tight_crop: bool) -> ([u32; 4], (f64, f64)) {
+        if !tight_crop {
+            return ([0, 0, self.width, self.height], (0.0, 0.0));
+        }
+        let cl = left.clamp(0, self.width as i32) as u32;
+        let ct = top.clamp(0, self.height as i32) as u32;
+        let cr = right.clamp(0, self.width as i32) as u32;
+        let cb = bottom.clamp(0, self.height as i32) as u32;
+        if cr <= cl || cb <= ct {
+            return ([0, 0, self.width, self.height], (0.0, 0.0));
+        }
+        let ox = (cl + cr) as f64 * 0.5 - self.width as f64 * 0.5;
+        let oy = (ct + cb) as f64 * 0.5 - self.height as f64 * 0.5;
+        ([cl, ct, cr, cb], (ox, oy))
+    }
+
+    /// 現在表示中の各ピクセルレイヤーを 1 枚ずつ個別のタイムラインオブジェクト用パーツへ分解します（背面→前面順）。
+    pub fn decompose_by_layers(&self, current_overrides: &str, tight_crop: bool) -> Vec<PsdDecomposedPart> {
+        let vis = self.compute_visibility_from_overrides(current_overrides);
+        let eff_vis = self.effective_visibility_for(&vis);
+        let (blink_open, blink_close) = self.resolve_blink_paths(&PsdBlinkConfig::default());
+        let (lip_close, lip_open) = self.resolve_lipsync_paths(&PsdLipSyncConfig::default());
+
+        let mut parts = Vec::new();
+        for layer in &self.layers {
+            if layer.kind != PsdLayerKind::Pixel || !eff_vis[layer.id] || layer.pixels.is_empty() {
+                continue;
+            }
+            if layer.width() == 0 || layer.height() == 0 {
+                continue;
+            }
+
+            let (crop_rect, center_offset) =
+                self.clamp_bbox(layer.left, layer.top, layer.right, layer.bottom, tight_crop);
+
+            let mut tokens = vec!["*=0".to_string()];
+            if tight_crop {
+                tokens.push(format!(
+                    "@crop={},{},{},{}",
+                    crop_rect[0], crop_rect[1], crop_rect[2], crop_rect[3]
+                ));
+            }
+            // 親フォルダから順に =1 を付与
+            let mut ancestors = Vec::new();
+            let mut cur_p = layer.parent_id;
+            while let Some(pid) = cur_p {
+                if let Some(pl) = self.layers.get(pid) {
+                    if !pl.path.is_empty() {
+                        ancestors.push(pl.path.clone());
+                    }
+                    cur_p = pl.parent_id;
+                } else {
+                    break;
+                }
+            }
+            for a_path in ancestors.into_iter().rev() {
+                tokens.push(format!("{a_path}=1"));
+            }
+            tokens.push(format!("{}=1", layer.path));
+
+            let inherit_blink = !blink_open.is_empty()
+                && (layer.path == blink_open || layer.path == blink_close);
+            let inherit_lipsync =
+                !lip_open.is_empty() && (layer.path == lip_close || layer.path == lip_open);
+
+            parts.push(PsdDecomposedPart {
+                label: layer.path.clone(),
+                psd_layers_param: tokens.join(";"),
+                crop_rect,
+                center_offset,
+                blend_mode: layer.blend_mode,
+                clipping: layer.clipping,
+                inherit_blink,
+                inherit_lipsync,
+            });
+        }
+        parts
+    }
+
+    /// フォルダ（パーツグループ：眉・目・口・髪・体など）単位でタイムラインオブジェクト用パーツへ分解します（背面→前面順）。
+    /// 各フォルダ内の表情差分（`!閉じ` や `!あ` など）も同じパーツ内に保持されるため、分解後も目パチ・口パク・表情切替がそのまま機能します。
+    pub fn decompose_by_folders(&self, current_overrides: &str, tight_crop: bool) -> Vec<PsdDecomposedPart> {
+        let vis = self.compute_visibility_from_overrides(current_overrides);
+        let eff_vis = self.effective_visibility_for(&vis);
+        let (blink_open, blink_close) = self.resolve_blink_paths(&PsdBlinkConfig::default());
+        let (lip_close, lip_open) = self.resolve_lipsync_paths(&PsdLipSyncConfig::default());
+
+        // サブフォルダを直接持つ「コンテナフォルダ」を判定（例: ルートの「立ち絵」や「顔」フォルダ）
+        let mut folder_has_subfolders = vec![false; self.layers.len()];
+        for l in &self.layers {
+            if matches!(l.kind, PsdLayerKind::FolderStart { .. }) {
+                if let Some(pid) = l.parent_id {
+                    if pid < folder_has_subfolders.len() {
+                        folder_has_subfolders[pid] = true;
+                    }
+                }
+            }
+        }
+
+        // ボトムアップ順に走査し、各ピクセルレイヤーを「末端パーツフォルダ」または「単独ベースレイヤー(+クリッピング)」にグループ化
+        #[derive(Clone)]
+        enum GroupKey {
+            Folder(usize),
+            SingleBase(usize),
+        }
+
+        let mut groups: Vec<(GroupKey, Vec<usize>)> = Vec::new();
+        let mut folder_to_group_idx: HashMap<usize, usize> = HashMap::new();
+        let mut last_single_group_idx: Option<usize> = None;
+
+        for layer in &self.layers {
+            if layer.kind != PsdLayerKind::Pixel || layer.pixels.is_empty() {
+                continue;
+            }
+            if layer.width() == 0 || layer.height() == 0 {
+                continue;
+            }
+
+            // 親フォルダがあり、その親フォルダがコンテナ（サブフォルダ持ち）ではない場合は親フォルダ単位でまとめる
+            if let Some(pid) = layer.parent_id {
+                let parent_vis = vis.get(pid).copied().unwrap_or(true);
+                if parent_vis && !folder_has_subfolders[pid] {
+                    let g_idx = *folder_to_group_idx.entry(pid).or_insert_with(|| {
+                        let idx = groups.len();
+                        groups.push((GroupKey::Folder(pid), Vec::new()));
+                        idx
+                    });
+                    groups[g_idx].1.push(layer.id);
+                    last_single_group_idx = None;
+                    continue;
+                }
+            }
+
+            // ルート直下またはコンテナフォルダ直下のピクセルレイヤー
+            if layer.clipping {
+                if let Some(g_idx) = last_single_group_idx {
+                    if eff_vis[layer.id] {
+                        groups[g_idx].1.push(layer.id);
+                    }
+                    continue;
+                }
+            }
+            if eff_vis[layer.id] {
+                let idx = groups.len();
+                groups.push((GroupKey::SingleBase(layer.id), vec![layer.id]));
+                last_single_group_idx = Some(idx);
+            } else {
+                last_single_group_idx = None;
+            }
+        }
+
+        let mut parts = Vec::new();
+        for (key, member_ids) in groups {
+            // グループ内に現在表示されているピクセルレイヤーが1つも無ければスキップ
+            let has_any_visible = member_ids.iter().any(|&id| eff_vis[id]);
+            if !has_any_visible {
+                continue;
+            }
+
+            // バウンディングボックスはグループ内の全候補レイヤー（目パチ・口パクの非表示差分も含む）の統合矩形を計算
+            let mut min_l = i32::MAX;
+            let mut min_t = i32::MAX;
+            let mut max_r = i32::MIN;
+            let mut max_b = i32::MIN;
+            for &id in &member_ids {
+                let l = &self.layers[id];
+                min_l = min_l.min(l.left);
+                min_t = min_t.min(l.top);
+                max_r = max_r.max(l.right);
+                max_b = max_b.max(l.bottom);
+            }
+            if min_l >= max_r || min_t >= max_b {
+                continue;
+            }
+
+            let (crop_rect, center_offset) = self.clamp_bbox(min_l, min_t, max_r, max_b, tight_crop);
+
+            let mut tokens = vec!["*=0".to_string()];
+            if tight_crop {
+                tokens.push(format!(
+                    "@crop={},{},{},{}",
+                    crop_rect[0], crop_rect[1], crop_rect[2], crop_rect[3]
+                ));
+            }
+
+            let (label, blend_mode) = match key {
+                GroupKey::Folder(fid) => {
+                    let fl = &self.layers[fid];
+                    let mut ancestors = Vec::new();
+                    let mut cur_p = Some(fid);
+                    while let Some(pid) = cur_p {
+                        if let Some(pl) = self.layers.get(pid) {
+                            if !pl.path.is_empty() {
+                                ancestors.push(pl.path.clone());
+                            }
+                            cur_p = pl.parent_id;
+                        } else {
+                            break;
+                        }
+                    }
+                    for a_path in ancestors.into_iter().rev() {
+                        tokens.push(format!("{a_path}=1"));
+                    }
+                    for &mid in &member_ids {
+                        if eff_vis[mid] {
+                            tokens.push(format!("{}=1", self.layers[mid].path));
+                        }
+                    }
+                    let bm = if fl.blend_mode == PsdBlendMode::PassThrough {
+                        PsdBlendMode::Normal
+                    } else {
+                        fl.blend_mode
+                    };
+                    (fl.path.clone(), bm)
+                }
+                GroupKey::SingleBase(lid) => {
+                    let bl = &self.layers[lid];
+                    let mut ancestors = Vec::new();
+                    let mut cur_p = bl.parent_id;
+                    while let Some(pid) = cur_p {
+                        if let Some(pl) = self.layers.get(pid) {
+                            if !pl.path.is_empty() {
+                                ancestors.push(pl.path.clone());
+                            }
+                            cur_p = pl.parent_id;
+                        } else {
+                            break;
+                        }
+                    }
+                    for a_path in ancestors.into_iter().rev() {
+                        tokens.push(format!("{a_path}=1"));
+                    }
+                    for &mid in &member_ids {
+                        if eff_vis[mid] {
+                            tokens.push(format!("{}=1", self.layers[mid].path));
+                        }
+                    }
+                    (bl.path.clone(), bl.blend_mode)
+                }
+            };
+
+            let inherit_blink = !blink_open.is_empty()
+                && member_ids
+                    .iter()
+                    .any(|&id| self.layers[id].path == blink_open || self.layers[id].path == blink_close);
+            let inherit_lipsync = !lip_open.is_empty()
+                && member_ids
+                    .iter()
+                    .any(|&id| self.layers[id].path == lip_close || self.layers[id].path == lip_open);
+
+            parts.push(PsdDecomposedPart {
+                label,
+                psd_layers_param: tokens.join(";"),
+                crop_rect,
+                center_offset,
+                blend_mode,
+                clipping: false,
+                inherit_blink,
+                inherit_lipsync,
+            });
+        }
+
+        parts
+    }
+
+    /// 各分解パーツ（レイヤー単位またはフォルダ単位）を透過 PNG ファイルとして指定フォルダに一括書き出しします。
+    pub fn export_parts_as_png(
+        &self,
+        current_overrides: &str,
+        out_dir: &Path,
+        by_folders: bool,
+        tight_crop: bool,
+    ) -> Result<usize, String> {
+        std::fs::create_dir_all(out_dir)
+            .map_err(|e| format!("出力先フォルダを作成できません ({}): {e}", out_dir.display()))?;
+        let parts = if by_folders {
+            self.decompose_by_folders(current_overrides, tight_crop)
+        } else {
+            self.decompose_by_layers(current_overrides, tight_crop)
+        };
+        let mut count = 0;
+        for (idx, part) in parts.iter().enumerate() {
+            let vis = self.compute_visibility_from_overrides(&part.psd_layers_param);
+            let crop = self.parse_crop_rect(&part.psd_layers_param);
+            let (_, rgba) = self.composite_with_visibility_and_crop(&vis, crop);
+            let safe_name: String = part
+                .label
+                .chars()
+                .map(|c| match c {
+                    '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+                    _ => c,
+                })
+                .collect();
+            let file_name = format!("{:02}_{}.png", idx + 1, safe_name);
+            let out_path = out_dir.join(file_name);
+            image::save_buffer(
+                &out_path,
+                &rgba.pixels,
+                rgba.width,
+                rgba.height,
+                image::ColorType::Rgba8,
+            )
+            .map_err(|e| format!("PNG の保存に失敗しました ({}): {e}", out_path.display()))?;
+            count += 1;
+        }
+        Ok(count)
+    }
 }
 
-/// 1枚のレイヤーをキャンバスにブレンド合成します。
+/// 1枚のレイヤーをキャンバス（切り抜き矩形 `cl..cr, ct..cb`）にブレンド合成します。
+#[allow(clippy::too_many_arguments)]
 fn blend_layer_onto_canvas(
     canvas: &mut [u8],
+    cl: i32,
+    ct: i32,
+    cr: i32,
+    cb: i32,
     cw: usize,
-    ch: usize,
     layer: &PsdLayer,
     eff_opacity: u8,
     clip_base: Option<&(i32, i32, i32, i32, Vec<u8>)>,
@@ -1178,10 +1662,10 @@ fn blend_layer_onto_canvas(
         return;
     }
 
-    let y_start = layer.top.max(0);
-    let y_end = layer.bottom.min(ch as i32);
-    let x_start = layer.left.max(0);
-    let x_end = layer.right.min(cw as i32);
+    let y_start = layer.top.max(ct);
+    let y_end = layer.bottom.min(cb);
+    let x_start = layer.left.max(cl);
+    let x_end = layer.right.min(cr);
     if y_start >= y_end || x_start >= x_end {
         return;
     }
@@ -1192,7 +1676,7 @@ fn blend_layer_onto_canvas(
     for cy in y_start..y_end {
         let ly = (cy - layer.top) as usize;
         let row_src_base = ly * lw_usize * 4;
-        let row_dst_base = (cy as usize) * cw * 4;
+        let row_dst_base = ((cy - ct) as usize) * cw * 4;
 
         for cx in x_start..x_end {
             let lx = (cx - layer.left) as usize;
@@ -1224,7 +1708,7 @@ fn blend_layer_onto_canvas(
             let sg = layer.pixels[src_idx + 1];
             let sb = layer.pixels[src_idx + 2];
 
-            let dst_idx = row_dst_base + (cx as usize) * 4;
+            let dst_idx = row_dst_base + ((cx - cl) as usize) * 4;
             let da = canvas[dst_idx + 3];
 
             if da == 0 {
@@ -2053,5 +2537,58 @@ mod tests {
         assert_eq!(presets.len(), 2);
         assert_eq!(presets[0].name, "笑顔セット");
         assert_eq!(presets[0].active_paths, vec!["眉/!通常", "目/!閉じ", "口/!あ"]);
+    }
+
+    #[test]
+    fn test_psd_decomposition_by_folders_and_layers() {
+        let psd_bytes = build_synthetic_character_psd(32, 32);
+        let doc = PsdDocument::from_bytes(&psd_bytes).expect("PSD should parse");
+
+        // 1. フォルダ単位分解: `*体`, `口`, `目` の3パーツ（背面→前面順）に分解されること
+        let folder_parts = doc.decompose_by_folders("", true);
+        assert_eq!(folder_parts.len(), 3);
+        assert_eq!(folder_parts[0].label, "*体");
+        assert_eq!(folder_parts[1].label, "口");
+        assert!(folder_parts[1].inherit_lipsync);
+        assert!(!folder_parts[1].inherit_blink);
+        assert_eq!(folder_parts[2].label, "目");
+        assert!(folder_parts[2].inherit_blink);
+        assert!(!folder_parts[2].inherit_lipsync);
+
+        // 分解された『目』パーツは `*体` を含まず、目自身のバウンディングボックス (16×8) に切り抜かれること
+        let eye_part = &folder_parts[2];
+        let eye_vis = doc.compute_visibility_from_overrides(&eye_part.psd_layers_param);
+        let eye_crop = doc.parse_crop_rect(&eye_part.psd_layers_param);
+        let (_, eye_frame) = doc.composite_with_visibility_and_crop(&eye_vis, eye_crop);
+        assert_eq!(eye_frame.width, 16);
+        assert_eq!(eye_frame.height, 8);
+        assert_eq!(&eye_frame.pixels[0..4], &[255, 215, 60, 255]);
+
+        // 分解後の『口』パーツに対して音声連動口パクを評価すると、『!あ』[240, 70, 90] に切り替わること
+        let lipsync = PsdLipSyncConfig {
+            mode: PsdLipSyncMode::AudioSync,
+            param: 1.0,
+            close_path: String::new(),
+            open_path: String::new(),
+        };
+        let mouth_part = &folder_parts[1];
+        let mouth_vis = doc.evaluate_animated_visibility(
+            &mouth_part.psd_layers_param,
+            &PsdBlinkConfig::default(),
+            &lipsync,
+            0,
+            30.0,
+            0.5,
+        );
+        let mouth_crop = doc.parse_crop_rect(&mouth_part.psd_layers_param);
+        let (_, mouth_frame) = doc.composite_with_visibility_and_crop(&mouth_vis, mouth_crop);
+        assert_eq!(&mouth_frame.pixels[0..4], &[240, 70, 90, 255]);
+
+        // 2. レイヤー単位分解: 現在表示中の3枚のピクセルレイヤー (`*体`, `口/!閉じ`, `目/!通常`) に分解されること
+        let layer_parts = doc.decompose_by_layers("", true);
+        assert_eq!(layer_parts.len(), 3);
+        assert_eq!(layer_parts[0].label, "*体");
+        assert_eq!(layer_parts[1].label, "口/!閉じ");
+        assert_eq!(layer_parts[2].label, "目/!通常");
     }
 }

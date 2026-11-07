@@ -1314,6 +1314,186 @@ impl EditorState {
         Some((id, display_size))
     }
 
+    /// PSD オブジェクトをレイヤー単位またはパーツフォルダ単位で別々のタイムラインオブジェクトに分解・展開します。
+    pub fn decompose_psd_object(&mut self, obj_id: ObjectId, by_folders: bool, tight_crop: bool) -> bool {
+        let Some((base_layer_idx, orig_obj_ref)) = self.scene.find(obj_id) else {
+            return false;
+        };
+        let orig_obj = orig_obj_ref.clone();
+        let Some(src) = orig_obj.source() else {
+            return false;
+        };
+        if src.kind != EffectKind::ImageFile {
+            return false;
+        }
+        let Some(file_str) = src.text("file").map(str::to_string) else {
+            return false;
+        };
+        let layers_spec = src.text("psd_layers").unwrap_or("").to_string();
+        let blink_spec = src.text("psd_blink").unwrap_or("").to_string();
+        let lipsync_spec = src.text("psd_lipsync").unwrap_or("").to_string();
+
+        let Some(path) = self.resolve_cached_path(&file_str) else {
+            self.status = "PSD ファイルが見つからないため分解できません".into();
+            return false;
+        };
+        let Some(doc) = self.media.get_psd_document(&path) else {
+            self.status = "PSD データの解析に失敗したため分解できません".into();
+            return false;
+        };
+
+        let parts = if by_folders {
+            doc.decompose_by_folders(&layers_spec, tight_crop)
+        } else {
+            doc.decompose_by_layers(&layers_spec, tight_crop)
+        };
+        if parts.is_empty() {
+            self.status = "分解可能な表示レイヤーが見つかりませんでした".into();
+            return false;
+        }
+
+        // 元オブジェクトを削除して、そのレイヤー位置から背面→前面順に各パーツオブジェクトを配置
+        let _ = self.scene.remove_object(obj_id);
+
+        let mut cur_target_layer = base_layer_idx;
+        let mut first_placed_id = None;
+        let mut first_layer = base_layer_idx;
+        let mut last_layer = base_layer_idx;
+        let part_count = parts.len();
+
+        for part in parts {
+            let mut new_obj = orig_obj.clone();
+            new_obj.id = ObjectId::new();
+            if part.clipping {
+                new_obj.clipping = true;
+            }
+
+            if let Some(src_eff) = new_obj.source_mut() {
+                set_or_remove_text_param(src_eff, "psd_layers", part.psd_layers_param);
+                set_or_remove_text_param(src_eff, "psd_label", part.label.clone());
+                if part.inherit_blink && !blink_spec.is_empty() {
+                    set_or_remove_text_param(src_eff, "psd_blink", blink_spec.clone());
+                } else {
+                    set_or_remove_text_param(src_eff, "psd_blink", String::new());
+                }
+                if part.inherit_lipsync && !lipsync_spec.is_empty() {
+                    set_or_remove_text_param(src_eff, "psd_lipsync", lipsync_spec.clone());
+                } else {
+                    set_or_remove_text_param(src_eff, "psd_lipsync", String::new());
+                }
+            }
+
+            // 描画エフェクトの座標 (X, Y) に切り抜き中心オフセット（拡大率・回転を考慮）を加算し、ブレンドモードを引き継ぐ
+            if let Some(draw_eff) = new_obj
+                .effects
+                .iter_mut()
+                .find(|e| matches!(e.kind, EffectKind::StandardDraw | EffectKind::ExtendedDraw))
+            {
+                let zoom = draw_eff.eval("拡大率", 0, 100.0);
+                let rot_deg = draw_eff
+                    .track("回転")
+                    .or_else(|| draw_eff.track("Z軸回転"))
+                    .map(|t| t.evaluate(0))
+                    .unwrap_or(0.0);
+                let scale = zoom / 100.0;
+                let rad = rot_deg.to_radians();
+                let dx = part.center_offset.0 * scale;
+                let dy = part.center_offset.1 * scale;
+                let rot_dx = dx * rad.cos() - dy * rad.sin();
+                let rot_dy = dx * rad.sin() + dy * rad.cos();
+
+                if rot_dx.abs() > 1e-4 {
+                    if let Some(tx) = draw_eff.track_mut("X") {
+                        for kf in &mut tx.keyframes {
+                            kf.value = ((kf.value + rot_dx) * 10.0).round() / 10.0;
+                        }
+                    }
+                }
+                if rot_dy.abs() > 1e-4 {
+                    if let Some(ty) = draw_eff.track_mut("Y") {
+                        for kf in &mut ty.keyframes {
+                            kf.value = ((kf.value + rot_dy) * 10.0).round() / 10.0;
+                        }
+                    }
+                }
+                if part.blend_mode != au2_media::PsdBlendMode::Normal
+                    && part.blend_mode != au2_media::PsdBlendMode::PassThrough
+                {
+                    set_or_remove_text_param(
+                        draw_eff,
+                        "blend",
+                        part.blend_mode.to_aviutl_blend_code().to_string(),
+                    );
+                }
+            }
+
+            let (placed_layer, new_id) = self.scene.insert_object_at_free_layer(cur_target_layer, new_obj);
+            if first_placed_id.is_none() {
+                first_placed_id = Some(new_id);
+                first_layer = placed_layer;
+            }
+            last_layer = placed_layer;
+            cur_target_layer = placed_layer + 1;
+        }
+
+        self.selected = first_placed_id;
+        self.dirty = true;
+        let mode_label = if by_folders { "パーツ(フォルダ)単位" } else { "レイヤー単位" };
+        self.status = format!(
+            "PSD を{mode_label}で {part_count} 個のオブジェクトに分解し、Layer {}〜{} に配置しました",
+            first_layer + 1,
+            last_layer + 1
+        );
+        true
+    }
+
+    /// PSD の各パーツ・レイヤーを透過 PNG ファイルとして指定フォルダに一括書き出しするダイアログ。
+    pub fn export_psd_layers_png_dialog(&mut self, obj_id: ObjectId, by_folders: bool, tight_crop: bool) {
+        let Some((_, orig_obj)) = self.scene.find(obj_id) else {
+            return;
+        };
+        let Some(src) = orig_obj.source() else {
+            return;
+        };
+        let Some(file_str) = src.text("file").map(str::to_string) else {
+            return;
+        };
+        let layers_spec = src.text("psd_layers").unwrap_or("").to_string();
+        let Some(path) = self.resolve_cached_path(&file_str) else {
+            self.status = "PSD ファイルが見つかりません".into();
+            return;
+        };
+        let Some(doc) = self.media.get_psd_document(&path) else {
+            self.status = "PSD ファイルの解析に失敗しました".into();
+            return;
+        };
+
+        let Some(out_dir) = rfd::FileDialog::new()
+            .set_title("PSD レイヤー透過 PNG の書き出し先フォルダを選択")
+            .pick_folder()
+        else {
+            return;
+        };
+
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("psd_layers");
+        let target_dir = out_dir.join(format!("{stem}_layers"));
+        match doc.export_parts_as_png(&layers_spec, &target_dir, by_folders, tight_crop) {
+            Ok(count) => {
+                self.status = format!(
+                    "PSD の {count} パーツを透過 PNG として「{}」に書き出しました",
+                    target_dir.display()
+                );
+            }
+            Err(e) => {
+                self.status = format!("PNG 書き出しエラー: {e}");
+            }
+        }
+    }
+
+
     /// タイムラインにオブジェクトを追加し、選択状態にします。
     pub fn add_object_at(&mut self, preferred_layer: usize, obj: TimelineObject) {
         let name = obj.display_name();
@@ -2003,3 +2183,17 @@ impl EditorState {
         self.dirty = true;
     }
 }
+
+fn set_or_remove_text_param(eff: &mut au2_core::Effect, key: &str, value: String) {
+    if value.is_empty() {
+        eff.params.retain(|p| p.key != key);
+    } else if let Some(p) = eff.params.iter_mut().find(|p| p.key == key) {
+        p.value = au2_core::ParamValue::Text(value);
+    } else {
+        eff.params.push(au2_core::Param {
+            key: key.to_string(),
+            value: au2_core::ParamValue::Text(value),
+        });
+    }
+}
+
