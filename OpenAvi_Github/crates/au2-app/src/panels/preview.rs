@@ -2077,6 +2077,9 @@ fn draw_object_sub(
                 let d = fcall.params.get("拡散").map(|v| v.as_num() as f32).unwrap_or(30.0);
                 fx.glow_strength = (fx.glow_strength + s / 85.0).min(8.0);
                 fx.glow_radius = (fx.glow_radius + d).max(8.0);
+                if let Some(c) = fcall.params.get("color").map(|v| u32_to_color32(v.as_num() as u32)) {
+                    fx.glow_color = Some(c);
+                }
             }
             "縁取り" => {
                 fx.border_width = fcall.params.get("サイズ").map(|v| v.as_num() as f32).unwrap_or(4.0);
@@ -2086,8 +2089,63 @@ fn draw_object_sub(
                     .map(|v| u32_to_color32(v.as_num() as u32))
                     .or(Some(Color32::WHITE));
             }
-            "色ズレ" => {
+            "色ズレ" | "色収差" => {
                 fx.chroma_shift = fcall.params.get("ズレ幅").map(|v| v.as_num() as f32).unwrap_or(8.0);
+                if let Some(ang) = fcall.params.get("角度") {
+                    fx.chroma_angle = (ang.as_num() as f32).to_radians();
+                }
+            }
+            "ぼかし" | "レンズブラー" | "放射ブラー" | "方向ブラー" => {
+                let rng = fcall.params.get("範囲").map(|v| v.as_num() as f32).unwrap_or(10.0);
+                if rng > 0.5 {
+                    fx.glow_strength = (fx.glow_strength + (rng / 60.0).min(1.5)).min(8.0);
+                    fx.glow_radius = (fx.glow_radius + rng * 0.8).max(6.0);
+                }
+            }
+            "色調補正" | "拡張色調補正" => {
+                let br = (fcall.params.get("明るさ").map(|v| v.as_num() as f32).unwrap_or(100.0) - 100.0) / 100.0;
+                let hue = fcall.params.get("色相").map(|v| v.as_num() as f32).unwrap_or(0.0);
+                let sat = (fcall.params.get("彩度").map(|v| v.as_num() as f32).unwrap_or(100.0) / 100.0).max(0.0);
+                fx.hsv_shift.0 += br;
+                fx.hsv_shift.1 += hue;
+                fx.hsv_shift.2 = if fx.hsv_shift.2 == 0.0 { sat } else { fx.hsv_shift.2 * sat };
+            }
+            "シャドー" | "ドロップシャドウ" => {
+                let dx = fcall.params.get("X").map(|v| v.as_num() as f32).unwrap_or(6.0);
+                let dy = fcall.params.get("Y").map(|v| v.as_num() as f32).unwrap_or(6.0);
+                let density = (fcall.params.get("濃さ").map(|v| v.as_num() as f32).unwrap_or(60.0) / 100.0).clamp(0.0, 1.0);
+                fx.shadow_offset = Some(vec2(dx, dy));
+                fx.shadow_alpha = density;
+            }
+            "単色化" => {
+                let strength = (fcall.params.get("強さ").map(|v| v.as_num() as f32).unwrap_or(100.0) / 100.0).clamp(0.0, 1.0);
+                let col = fcall
+                    .params
+                    .get("color")
+                    .map(|v| u32_to_color32(v.as_num() as u32))
+                    .unwrap_or(Color32::from_rgb(255, 200, 120));
+                fx.tint_color = Some((col, strength));
+            }
+            "ミラー" => {
+                let tr = fcall.params.get("透明度").map(|v| v.as_num() as f32).unwrap_or(30.0);
+                fx.mirror_alpha = (1.0 - tr / 100.0).clamp(0.0, 1.0);
+            }
+            "ラスター" => {
+                let rw = fcall.params.get("横幅").map(|v| v.as_num() as f32).unwrap_or(50.0);
+                let rh = fcall.params.get("高さ").map(|v| v.as_num() as f32).unwrap_or(50.0);
+                let rp = fcall.params.get("周期").map(|v| v.as_num() as f32).unwrap_or(1.0);
+                fx.raster = Some((rw, rh, rp));
+            }
+            "ノイズ" => {
+                let ns = (fcall.params.get("強さ").map(|v| v.as_num() as f32).unwrap_or(40.0) / 100.0).clamp(0.0, 1.0);
+                fx.noise_strength = fx.noise_strength.max(ns);
+            }
+            "極座標変換" => {
+                let cw = fcall.params.get("中心幅").map(|v| v.as_num() as f32).unwrap_or(0.0);
+                let zm = (fcall.params.get("拡大率").map(|v| v.as_num() as f32).unwrap_or(100.0) / 100.0).max(0.05);
+                let rot = fcall.params.get("回転").map(|v| v.as_num() as f32).unwrap_or(0.0);
+                let swirl = fcall.params.get("渦巻").map(|v| v.as_num() as f32).unwrap_or(2.0);
+                fx.polar_transform = Some((cw, zm, rot, swirl));
             }
             "クリッピング" => {
                 fx.clip_insets[0] += fcall.params.get("上").map(|v| v.as_num() as f32).unwrap_or(0.0).max(0.0);

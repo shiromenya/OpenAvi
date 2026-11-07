@@ -129,6 +129,35 @@ pub struct EditorState {
     pub dirty: bool,
     /// 自動保存設定
     pub autosave: AutoSaveSettings,
+    /// `.auf` / `.auf2` 自動解析＆クロスプラットフォーム移植・変換スタジオの状態
+    pub auf_porter: AufPorterModalState,
+}
+
+/// `.auf` / `.auf2` 移植スタジオの生成コード表示タブ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AufPorterTab {
+    AnmLua,
+    WgslShader,
+    RustCode,
+    JsonSpec,
+}
+
+/// `.auf` / `.auf2` 自動解析＆クロスプラットフォーム移植・変換モーダルダイアログの状態。
+#[derive(Debug, Clone)]
+pub struct AufPorterModalState {
+    pub is_open: bool,
+    pub selected_plugin_idx: usize,
+    pub active_tab: AufPorterTab,
+}
+
+impl Default for AufPorterModalState {
+    fn default() -> Self {
+        Self {
+            is_open: false,
+            selected_plugin_idx: 0,
+            active_tab: AufPorterTab::AnmLua,
+        }
+    }
 }
 
 /// プロジェクトの自動保存（オートセーブ）設定。
@@ -362,6 +391,7 @@ impl Default for EditorState {
             ffmpeg_dl: FfmpegDownload::Idle,
             dirty: false,
             autosave: AutoSaveSettings::default(),
+            auf_porter: AufPorterModalState::default(),
         }
     }
 }
@@ -610,6 +640,7 @@ impl EditorState {
                 last_saved_time_str: Some(current_time_string()),
                 auto_save_count: 0,
             },
+            auf_porter: AufPorterModalState::default(),
         };
 
         if let Err(e) = self.write_to_path(&target_path) {
@@ -2008,6 +2039,55 @@ impl EditorState {
                     installed.len(),
                     installed.join(", ")
                 );
+            }
+        }
+    }
+
+    /// `.auf` / `.auf2` 自動解析＆クロスプラットフォーム移植・変換スタジオを開きます。
+    pub fn open_auf_porter(&mut self, plugin_idx: Option<usize>) {
+        if let Some(idx) = plugin_idx {
+            self.auf_porter.selected_plugin_idx = idx;
+        } else if let Some((idx, _)) = self
+            .plugins
+            .plugins
+            .iter()
+            .enumerate()
+            .find(|(_, p)| matches!(p.kind, au2_plugin::PluginKind::FilterDll))
+        {
+            self.auf_porter.selected_plugin_idx = idx;
+        }
+        self.auf_porter.is_open = true;
+    }
+
+    /// 指定した `.auf` / `.auf2` プラグインをクロスプラットフォーム `.anm` スクリプトに変換して `plugins/` に登録します。
+    pub fn convert_auf_to_anm(&mut self, plugin_idx: usize) {
+        match self.plugins.convert_plugin_to_anm(plugin_idx) {
+            Ok(out_path) => {
+                let fname = out_path
+                    .file_name()
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.status = format!(
+                    "✨ クロスプラットフォーム `.anm` スクリプト `{fname}` を自動生成して登録しました (Windows / Mac / Linux 全OS対応)"
+                );
+            }
+            Err(e) => {
+                self.status = format!("⚠ .anm への変換に失敗しました: {e}");
+            }
+        }
+    }
+
+    /// 登録済みの全 `.auf` / `.auf2` プラグインを一括で `.anm` スクリプトに変換します。
+    pub fn convert_all_auf_to_anm(&mut self) {
+        match self.plugins.convert_all_auf_to_anm() {
+            Ok(paths) => {
+                self.status = format!(
+                    "✨ 全 {} 件の .auf / .auf2 プラグインをクロスプラットフォーム .anm スクリプトへ一括変換しました",
+                    paths.len()
+                );
+            }
+            Err(e) => {
+                self.status = format!("⚠ 一括変換に失敗しました: {e}");
             }
         }
     }
