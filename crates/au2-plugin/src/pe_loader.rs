@@ -13,6 +13,8 @@ use crate::{BinaryArch, PluginKind, ScriptCheckDef, ScriptDialogParam, ScriptEnt
 pub struct NativePluginInfo {
     pub arch: BinaryArch,
     pub exports: Vec<String>,
+    pub imports: Vec<String>,
+    pub filter_flags: u32,
     pub description: String,
     pub entries: Vec<ScriptEntry>,
 }
@@ -32,6 +34,8 @@ struct PeView<'a> {
     image_base: u64,
     export_rva: u32,
     export_size: u32,
+    import_rva: u32,
+    import_size: u32,
     sections: Vec<PeSection>,
 }
 
@@ -59,7 +63,7 @@ impl<'a> PeView<'a> {
         };
 
         let opt_magic = u16::from_le_bytes([bytes[opt_off], bytes[opt_off + 1]]);
-        let (image_base, export_rva, export_size) = match opt_magic {
+        let (image_base, export_rva, export_size, import_rva, import_size) = match opt_magic {
             // PE32 (32-bit)
             0x010b if opt_hdr_size >= 96 => {
                 let ib = u32::from_le_bytes([
@@ -86,7 +90,25 @@ impl<'a> PeView<'a> {
                 } else {
                     (0, 0)
                 };
-                (ib, er, es)
+                let (ir, isz) = if opt_hdr_size >= 112 {
+                    (
+                        u32::from_le_bytes([
+                            bytes[opt_off + 104],
+                            bytes[opt_off + 105],
+                            bytes[opt_off + 106],
+                            bytes[opt_off + 107],
+                        ]),
+                        u32::from_le_bytes([
+                            bytes[opt_off + 108],
+                            bytes[opt_off + 109],
+                            bytes[opt_off + 110],
+                            bytes[opt_off + 111],
+                        ]),
+                    )
+                } else {
+                    (0, 0)
+                };
+                (ib, er, es, ir, isz)
             }
             // PE32+ (64-bit)
             0x020b if opt_hdr_size >= 112 => {
@@ -118,9 +140,27 @@ impl<'a> PeView<'a> {
                 } else {
                     (0, 0)
                 };
-                (ib, er, es)
+                let (ir, isz) = if opt_hdr_size >= 128 {
+                    (
+                        u32::from_le_bytes([
+                            bytes[opt_off + 120],
+                            bytes[opt_off + 121],
+                            bytes[opt_off + 122],
+                            bytes[opt_off + 123],
+                        ]),
+                        u32::from_le_bytes([
+                            bytes[opt_off + 124],
+                            bytes[opt_off + 125],
+                            bytes[opt_off + 126],
+                            bytes[opt_off + 127],
+                        ]),
+                    )
+                } else {
+                    (0, 0)
+                };
+                (ib, er, es, ir, isz)
             }
-            _ => (0x10000000, 0, 0),
+            _ => (0x10000000, 0, 0, 0, 0),
         };
 
         let sec_table_off = opt_off + opt_hdr_size;
@@ -148,6 +188,8 @@ impl<'a> PeView<'a> {
             image_base,
             export_rva,
             export_size,
+            import_rva,
+            import_size,
             sections,
         })
     }
@@ -314,6 +356,36 @@ impl<'a> PeView<'a> {
             list.push((name, func_rva));
         }
         list
+    }
+
+    /// PE インポートディレクトリ (`IMAGE_IMPORT_DESCRIPTOR`) を解析し、インポートしている DLL 名一覧を返します。
+    fn parse_imports(&self) -> Vec<String> {
+        let mut dlls = Vec::new();
+        if self.import_rva == 0 || self.import_size == 0 {
+            return dlls;
+        }
+        let Some(imp_off) = self.rva_to_offset(self.import_rva) else {
+            return dlls;
+        };
+        for i in 0..64 {
+            let desc_off = imp_off + i * 20;
+            if desc_off + 20 > self.bytes.len() {
+                break;
+            }
+            let name_rva = self.read_u32(desc_off + 12).unwrap_or(0);
+            let first_thunk = self.read_u32(desc_off + 16).unwrap_or(0);
+            if name_rva == 0 && first_thunk == 0 {
+                break;
+            }
+            if let Some(name_off) = self.rva_to_offset(name_rva) {
+                if let Some(dll_name) = self.read_cstring(name_off, 128) {
+                    if !dlls.contains(&dll_name) {
+                        dlls.push(dll_name);
+                    }
+                }
+            }
+        }
+        dlls
     }
 
     /// 32-bit `FILTER_DLL` 構造体を指定ファイルオフセットから読み取ります。
@@ -743,6 +815,8 @@ pub fn inspect_native_pe_plugin(stem: &str, kind: PluginKind, bytes: &[u8]) -> N
         return NativePluginInfo {
             arch: BinaryArch::Unknown,
             exports: Vec::new(),
+            imports: Vec::new(),
+            filter_flags: 0,
             description: String::new(),
             entries: Vec::new(),
         };
@@ -750,6 +824,8 @@ pub fn inspect_native_pe_plugin(stem: &str, kind: PluginKind, bytes: &[u8]) -> N
 
     let raw_exports = pe.parse_exports();
     let exports: Vec<String> = raw_exports.iter().map(|(n, _)| n.clone()).collect();
+    let imports = pe.parse_imports();
+    let mut filter_flags = 0u32;
     let mut entries = Vec::new();
     let mut description = String::new();
 
@@ -759,6 +835,7 @@ pub fn inspect_native_pe_plugin(stem: &str, kind: PluginKind, bytes: &[u8]) -> N
             (BinaryArch::X86_32, "GetFilterTable" | "_GetFilterTable@0") => {
                 if let Some(va) = pe.disassemble_ret_va_32(*rva) {
                     if let Some(off) = pe.va_to_offset(va) {
+                        filter_flags = pe.read_u32(off).unwrap_or(0);
                         if let Some((entry, info)) = pe.try_read_filter_dll_32(off) {
                             if let Some(inf) = info {
                                 description = inf;
@@ -960,6 +1037,17 @@ pub fn inspect_native_pe_plugin(stem: &str, kind: PluginKind, bytes: &[u8]) -> N
         });
     }
 
+    // 4. 抽出された全フィルタエントリに対し、Mac / Linux / Windows 全環境で動作する互換 Lua ブリッジコードを自動合成・AST事前コンパイル
+    if matches!(kind, PluginKind::FilterDll) {
+        for entry in &mut entries {
+            if entry.script_body.trim().is_empty() {
+                let body = crate::auf_converter::synthesize_entry_lua_body(entry);
+                entry.compiled_ast = crate::lua_vm::compile_lua_script(&body);
+                entry.script_body = body;
+            }
+        }
+    }
+
     if description.is_empty() {
         description = match pe.arch {
             BinaryArch::X86_32 => format!("初代 AviUtl 32-bit プラグイン ({})", kind.label()),
@@ -971,6 +1059,8 @@ pub fn inspect_native_pe_plugin(stem: &str, kind: PluginKind, bytes: &[u8]) -> N
     NativePluginInfo {
         arch: pe.arch,
         exports,
+        imports,
+        filter_flags,
         description,
         entries,
     }

@@ -96,7 +96,13 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                     for (idx, src) in st.sources.iter().enumerate() {
                         let icon = match src.kind {
                             MediaKind::Video => "🎞",
-                            MediaKind::Image => "🖼",
+                            MediaKind::Image => {
+                                if au2_media::is_psd_path(&src.path) {
+                                    "🎨"
+                                } else {
+                                    "🖼"
+                                }
+                            }
                             MediaKind::Audio => "🔊",
                         };
                         let selected = st.selected_source == Some(idx);
@@ -144,8 +150,9 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                 let start = st.frame;
                 let end = start + 149;
 
-                let items: [(egui::WidgetText, &str); 13] = [
+                let items: [(egui::WidgetText, &str); 14] = [
                     ("📝 テキスト".into(), ""),
+                    ("🎨 PSD立ち絵...".into(), "PSDファイル(.psd/.psb)を選択して立ち絵オブジェクトとして配置します"),
                     ("🔴 図形 (円)".into(), ""),
                     ("🟩 図形 (四角形)".into(), ""),
                     ("⭐ 図形 (星型)".into(), ""),
@@ -160,22 +167,32 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                     ("🎥 カメラ制御".into(), ""),
                 ];
                 if let Some(i) = button_grid(ui, &items, 130.0) {
-                    let obj = match i {
-                        0 => TimelineObject::new_text(start, end, "サンプルテキスト"),
-                        1 => TimelineObject::new_shape(start, end, 1, "e94560"),
-                        2 => TimelineObject::new_shape(start, end, 2, "0f9b8e"),
-                        3 => TimelineObject::new_shape(start, end, 6, "ffd166"),
-                        4 => TimelineObject::new_framebuffer(start, end),
-                        5 => TimelineObject::new_audio_waveform(start, end),
-                        6 => TimelineObject::new_particle_output(start, end),
-                        7 => TimelineObject::new_scene_object(start, end, 1),
-                        8 => TimelineObject::new_color_correction(start, end),
-                        9 => TimelineObject::new_scene_change(start, end, "発光", 0),
-                        10 => TimelineObject::new_time_control(start, end),
-                        11 => TimelineObject::new_group_control(start, end),
-                        _ => TimelineObject::new_camera_control(start, end),
-                    };
-                    st.add_object_at(layer, obj);
+                    if i == 1 {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Photoshop PSD / PSB ファイル (*.psd, *.psb)", &["psd", "psb"])
+                            .add_filter("すべてのファイル", &["*"])
+                            .pick_file()
+                        {
+                            st.add_media_file(&path, layer, start);
+                        }
+                    } else {
+                        let obj = match i {
+                            0 => TimelineObject::new_text(start, end, "サンプルテキスト"),
+                            2 => TimelineObject::new_shape(start, end, 1, "e94560"),
+                            3 => TimelineObject::new_shape(start, end, 2, "0f9b8e"),
+                            4 => TimelineObject::new_shape(start, end, 6, "ffd166"),
+                            5 => TimelineObject::new_framebuffer(start, end),
+                            6 => TimelineObject::new_audio_waveform(start, end),
+                            7 => TimelineObject::new_particle_output(start, end),
+                            8 => TimelineObject::new_scene_object(start, end, 1),
+                            9 => TimelineObject::new_color_correction(start, end),
+                            10 => TimelineObject::new_scene_change(start, end, "発光", 0),
+                            11 => TimelineObject::new_time_control(start, end),
+                            12 => TimelineObject::new_group_control(start, end),
+                            _ => TimelineObject::new_camera_control(start, end),
+                        };
+                        st.add_object_at(layer, obj);
+                    }
                 }
             });
 
@@ -211,8 +228,29 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
         )
         .default_open(true)
         .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let studio_btn = egui::Button::new(
+                    RichText::new("🔄 .auf 仕様解析 & クロスプラットフォーム移植スタジオ")
+                        .strong()
+                        .size(11.5),
+                )
+                .min_size(vec2(ui.available_width(), super::SMALL_BUTTON_H));
+                if ui
+                    .add(studio_btn)
+                    .on_hover_text(
+                        ".auf / .auf2 ネイティブフィルタの PE バイナリ構造・トラックバー定義を自動解析し、\nWindows / Mac / Linux 全対応の .anm (Lua) / WGSL シェーダー / Rust コードへ自動変換します",
+                    )
+                    .clicked()
+                {
+                    st.open_auf_porter(None);
+                }
+            });
+            ui.add_space(3.0);
+
             let mut apply_effect = None;
             let mut place_object = None;
+            let mut inspect_auf_idx = None;
+            let mut convert_auf_idx = None;
             for &idx in &visible_plugin_indices {
                 let p = &st.plugins.plugins[idx];
                 let badge_color = match p.status {
@@ -249,6 +287,23 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                             );
                             ui.colored_label(badge_color, format!("[{}]", p.arch.label()))
                                 .on_hover_text(p.arch.description());
+                            if matches!(p.kind, PluginKind::FilterDll | PluginKind::Mod2Dll | PluginKind::Aux2Dll) {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.add_space(4.0);
+                                    if tiny_button(ui, "✨.anm変換")
+                                        .on_hover_text("この .auf プラグインを Mac / Linux / Windows 全対応の .anm (Lua) スクリプトに自動変換して登録します")
+                                        .clicked()
+                                    {
+                                        convert_auf_idx = Some(idx);
+                                    }
+                                    if tiny_button(ui, "🔍解析・移植")
+                                        .on_hover_text("PE構造・トラックバー仕様の解析と .anm / WGSL / Rust コード変換スタジオを開きます")
+                                        .clicked()
+                                    {
+                                        inspect_auf_idx = Some(idx);
+                                    }
+                                });
+                            }
                         });
                         for entry in &p.entries {
                             let clean_name = au2_plugin::clean_script_name(&entry.display_name);
@@ -277,6 +332,12 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                         }
                     });
                 ui.add_space(1.0);
+            }
+            if let Some(idx) = inspect_auf_idx {
+                st.open_auf_porter(Some(idx));
+            }
+            if let Some(idx) = convert_auf_idx {
+                st.convert_auf_to_anm(idx);
             }
             if let Some((kind, entry)) = apply_effect {
                 if let Some(sel_id) = st.selected {

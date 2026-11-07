@@ -1,13 +1,13 @@
+<p align="center">
+  <img src="assets/openavi_logo.svg" alt="OpenAvi Logo" width="480">
+</p>
+
 # OpenAvi
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-2021_Edition-orange.svg)](https://www.rust-lang.org/)
 
 **OpenAvi** は、既存の「AviUtl」および「AviUtl2（拡張編集）」が持つ軽快な操作感と豊富なユーザーメイド・エコシステムを引き継ぎつつ、現代のハードウェア環境に最適化した **64bit ネイティブ・オープンソース動画編集ソフトウェア** です。
-
-<p align="center">
-  <img src="assets/openavi_logo.svg" alt="OpenAvi Logo" width="480">
-</p>
 
 ---
 

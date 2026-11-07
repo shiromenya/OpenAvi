@@ -324,8 +324,18 @@ impl SceneSoftwareRenderer {
         let canvas_top = ((h as f32 - canvas_h) * 0.5).floor();
         let canvas = Rect::from_min_size(pos2(canvas_left, canvas_top), vec2(canvas_w, canvas_h));
 
-        // 1. 現在フレーム（およびサブシーン内）の画像・動画オブジェクトのピクセルを同期取得
-        let mut media_requests: Vec<(ObjectId, String, u32, f64)> = Vec::new();
+        // 1. 現在フレーム（およびサブシーン内）の画像・PSD・動画オブジェクトのピクセルを同期取得
+        struct ExportMediaReq {
+            obj_id: ObjectId,
+            file_str: String,
+            media_frame: u32,
+            media_sec: f64,
+            rel: u32,
+            psd_layers: String,
+            psd_blink: String,
+            psd_lipsync: String,
+        }
+        let mut media_requests: Vec<ExportMediaReq> = Vec::new();
         for (li, obj) in st.scene.objects_at(frame) {
             if !st.scene.layers[li].visible {
                 continue;
@@ -338,7 +348,16 @@ impl SceneSoftwareRenderer {
                         let speed = (src.eval("再生速度", rel, 100.0) / 100.0).max(0.0);
                         let media_frame = (start_pos + rel as f64 * speed).floor() as u32;
                         let media_sec = media_frame as f64 / fps.max(1.0);
-                        media_requests.push((obj.id, file_str.to_string(), media_frame, media_sec));
+                        media_requests.push(ExportMediaReq {
+                            obj_id: obj.id,
+                            file_str: file_str.to_string(),
+                            media_frame,
+                            media_sec,
+                            rel,
+                            psd_layers: src.text("psd_layers").unwrap_or_default().to_string(),
+                            psd_blink: src.text("psd_blink").unwrap_or_default().to_string(),
+                            psd_lipsync: src.text("psd_lipsync").unwrap_or_default().to_string(),
+                        });
                     }
                 }
             }
@@ -357,7 +376,16 @@ impl SceneSoftwareRenderer {
                             let speed = (src.eval("再生速度", rel, 100.0) / 100.0).max(0.0);
                             let media_frame = (start_pos + rel as f64 * speed).floor() as u32;
                             let media_sec = media_frame as f64 / fps.max(1.0);
-                            media_requests.push((obj.id, file_str.to_string(), media_frame, media_sec));
+                            media_requests.push(ExportMediaReq {
+                                obj_id: obj.id,
+                                file_str: file_str.to_string(),
+                                media_frame,
+                                media_sec,
+                                rel,
+                                psd_layers: src.text("psd_layers").unwrap_or_default().to_string(),
+                                psd_blink: src.text("psd_blink").unwrap_or_default().to_string(),
+                                psd_lipsync: src.text("psd_lipsync").unwrap_or_default().to_string(),
+                            });
                         }
                     }
                 }
@@ -367,12 +395,26 @@ impl SceneSoftwareRenderer {
         let mut resolved_textures: HashMap<ObjectId, (TextureId, [usize; 2])> = HashMap::new();
         let mut media_frames: HashMap<TextureId, Arc<RgbaFrame>> = HashMap::new();
 
-        for (idx, (obj_id, file_str, media_frame, media_sec)) in media_requests.into_iter().enumerate() {
-            if let Some(path) = st.resolve_cached_path(&file_str) {
-                if let Some(rgba) = st.media.get_frame_sync(&path, media_frame, media_sec) {
+        for (idx, req) in media_requests.into_iter().enumerate() {
+            if let Some(path) = st.resolve_cached_path(&req.file_str) {
+                let rgba_opt = if au2_media::is_psd_path(&path) {
+                    let blink = au2_media::PsdBlinkConfig::parse(&req.psd_blink);
+                    let lipsync = au2_media::PsdLipSyncConfig::parse(&req.psd_lipsync);
+                    let audio_amp = if lipsync.mode == au2_media::PsdLipSyncMode::AudioSync {
+                        st.sample_audio_amplitude_at(frame)
+                    } else {
+                        0.0
+                    };
+                    st.media
+                        .get_psd_composited_frame(&path, &req.psd_layers, &blink, &lipsync, req.rel, fps, audio_amp)
+                        .map(|(_, f)| f)
+                } else {
+                    st.media.get_frame_sync(&path, req.media_frame, req.media_sec)
+                };
+                if let Some(rgba) = rgba_opt {
                     let tex_id = TextureId::User(0x10000 + idx as u64);
                     let display_size = [rgba.original_width as usize, rgba.original_height as usize];
-                    resolved_textures.insert(obj_id, (tex_id, display_size));
+                    resolved_textures.insert(req.obj_id, (tex_id, display_size));
                     media_frames.insert(tex_id, rgba);
                 }
             }

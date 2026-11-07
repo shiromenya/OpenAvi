@@ -118,6 +118,8 @@ pub struct EditorState {
     static_textures: HashMap<PathBuf, (TextureHandle, [usize; 2])>,
     /// 動画再生フレーム用の In-Place 更新 GPU テクスチャキャッシュ (Path -> (Handle, 現在フレーム番号, 解像度))
     stream_textures: HashMap<PathBuf, (TextureHandle, u32, [usize; 2])>,
+    /// PSD / PSB レイヤー合成状態ごとの GPU テクスチャキャッシュ ((Path, StateHash) -> (Handle, 解像度))
+    psd_textures: HashMap<(PathBuf, u64), (TextureHandle, [usize; 2])>,
     /// ファイルパス解決のキャッシュ（毎フレームの OS ディスク IO / exists 呼び出しを削減）
     pub resolved_paths: HashMap<String, Option<PathBuf>>,
     /// ユーザーが「フォルダから一括再リンク」で指定した追加の素材検索フォルダ。
@@ -127,6 +129,35 @@ pub struct EditorState {
     pub dirty: bool,
     /// 自動保存設定
     pub autosave: AutoSaveSettings,
+    /// `.auf` / `.auf2` 自動解析＆クロスプラットフォーム移植・変換スタジオの状態
+    pub auf_porter: AufPorterModalState,
+}
+
+/// `.auf` / `.auf2` 移植スタジオの生成コード表示タブ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AufPorterTab {
+    AnmLua,
+    WgslShader,
+    RustCode,
+    JsonSpec,
+}
+
+/// `.auf` / `.auf2` 自動解析＆クロスプラットフォーム移植・変換モーダルダイアログの状態。
+#[derive(Debug, Clone)]
+pub struct AufPorterModalState {
+    pub is_open: bool,
+    pub selected_plugin_idx: usize,
+    pub active_tab: AufPorterTab,
+}
+
+impl Default for AufPorterModalState {
+    fn default() -> Self {
+        Self {
+            is_open: false,
+            selected_plugin_idx: 0,
+            active_tab: AufPorterTab::AnmLua,
+        }
+    }
 }
 
 /// プロジェクトの自動保存（オートセーブ）設定。
@@ -354,11 +385,13 @@ impl Default for EditorState {
             selected_source: None,
             static_textures: HashMap::new(),
             stream_textures: HashMap::new(),
+            psd_textures: HashMap::new(),
             resolved_paths: HashMap::new(),
             extra_search_dirs: Vec::new(),
             ffmpeg_dl: FfmpegDownload::Idle,
             dirty: false,
             autosave: AutoSaveSettings::default(),
+            auf_porter: AufPorterModalState::default(),
         }
     }
 }
@@ -595,6 +628,7 @@ impl EditorState {
             selected_source: None,
             static_textures: HashMap::new(),
             stream_textures: HashMap::new(),
+            psd_textures: HashMap::new(),
             resolved_paths: HashMap::new(),
             extra_search_dirs: Vec::new(),
             ffmpeg_dl: FfmpegDownload::Idle,
@@ -606,6 +640,7 @@ impl EditorState {
                 last_saved_time_str: Some(current_time_string()),
                 auto_save_count: 0,
             },
+            auf_porter: AufPorterModalState::default(),
         };
 
         if let Err(e) = self.write_to_path(&target_path) {
@@ -853,7 +888,7 @@ impl EditorState {
                 if let Some(stem) = &orig_stem {
                     let target_stem_key = normalize_match_key(stem);
                     const COMPAT_EXTS: &[&str] = &[
-                        "wav", "mp3", "m4a", "aac", "flac", "ogg", "wma", "mp4", "avi", "mov", "mkv", "webm",
+                        "wav", "mp3", "m4a", "aac", "flac", "ogg", "wma", "mp4", "avi", "mov", "mkv", "webm", "psd", "psb",
                     ];
                     'stem_match: for dir in &search_dirs {
                         for ext in COMPAT_EXTS {
@@ -1185,6 +1220,311 @@ impl EditorState {
         Some((id, display_size))
     }
 
+    /// 指定フレーム位置におけるタイムライン上の音声トラックの振幅（0.0..=1.0）を計算します（PSD 口パク連動用）。
+    pub fn sample_audio_amplitude_at(&mut self, abs_frame: Frame) -> f32 {
+        let fps = self.scene.settings.frame_rate.as_f64().max(1.0);
+        let mut active_audio_items: Vec<(String, f64, f32)> = Vec::new();
+        for layer in &self.scene.layers {
+            if !layer.visible {
+                continue;
+            }
+            for obj in &layer.objects {
+                if !obj.contains(abs_frame) {
+                    continue;
+                }
+                let Some(src) = obj.source().filter(|s| s.enabled) else {
+                    continue;
+                };
+                if !matches!(src.kind, EffectKind::AudioFile | EffectKind::VideoFile) {
+                    continue;
+                }
+                let Some(file_str) = src.text("file").filter(|s| !s.trim().is_empty()) else {
+                    continue;
+                };
+                let rel = abs_frame - obj.frame_start;
+                let start_pos = if src.kind == EffectKind::AudioFile {
+                    src.eval("再生位置", rel, 0.0).max(0.0)
+                } else {
+                    ((src.eval("再生位置", rel, 1.0) - 1.0) / fps).max(0.0)
+                };
+                let speed = (src.eval("再生速度", rel, 100.0) / 100.0).max(0.0);
+                let audio_sec = start_pos + (rel as f64 / fps) * speed;
+                let volume = (obj
+                    .effect(&EffectKind::StandardPlayback)
+                    .map(|e| e.eval("音量", rel, 100.0))
+                    .unwrap_or(100.0)
+                    / 100.0) as f32;
+                active_audio_items.push((file_str.to_string(), audio_sec, volume));
+            }
+        }
+
+        let mut max_amp = 0.0f32;
+        let window_stereo_frames = ((44100.0 / fps).round() as usize).clamp(256, 4410);
+        for (file_str, audio_sec, volume) in active_audio_items {
+            if volume <= 0.001 {
+                continue;
+            }
+            let Some(path) = self.resolve_cached_path(&file_str) else {
+                continue;
+            };
+            let Some(pcm) = self.media.get_audio_pcm(&path) else {
+                continue;
+            };
+            let start_sample_idx = ((audio_sec * 44100.0).round() as usize).saturating_mul(2);
+            let end_sample_idx = (start_sample_idx + window_stereo_frames * 2).min(pcm.len());
+            if start_sample_idx >= end_sample_idx {
+                continue;
+            }
+            let slice = &pcm[start_sample_idx..end_sample_idx];
+            let mut sum_sq = 0.0f64;
+            for &s in slice {
+                let norm = (s as f64) / 32768.0;
+                sum_sq += norm * norm;
+            }
+            let rms = (sum_sq / (slice.len() as f64)).sqrt() as f32 * volume;
+            if rms > max_amp {
+                max_amp = rms;
+            }
+        }
+        max_amp.clamp(0.0, 1.0)
+    }
+
+    /// PSD / PSB オブジェクトのレイヤー表示設定・目パチ・口パクを反映した GPU テクスチャを取得します。
+    pub fn get_psd_object_texture(
+        &mut self,
+        ctx: &egui::Context,
+        file_str: &str,
+        overrides: &str,
+        blink_str: &str,
+        lipsync_str: &str,
+        rel_frame: u32,
+        abs_frame: Frame,
+    ) -> Option<(egui::TextureId, [usize; 2])> {
+        let path = self.resolve_cached_path(file_str)?;
+        if !au2_media::is_psd_path(&path) {
+            return None;
+        }
+        let fps = self.scene.settings.frame_rate.as_f64().max(1.0);
+        let blink = au2_media::PsdBlinkConfig::parse(blink_str);
+        let lipsync = au2_media::PsdLipSyncConfig::parse(lipsync_str);
+        let audio_amp = if lipsync.mode == au2_media::PsdLipSyncMode::AudioSync {
+            self.sample_audio_amplitude_at(abs_frame)
+        } else {
+            0.0
+        };
+
+        let (state_hash, rgba) = self.media.get_psd_composited_frame(
+            &path,
+            overrides,
+            &blink,
+            &lipsync,
+            rel_frame,
+            fps,
+            audio_amp,
+        )?;
+
+        let cache_key = (path.clone(), state_hash);
+        if let Some((handle, size)) = self.psd_textures.get(&cache_key) {
+            return Some((handle.id(), *size));
+        }
+
+        if self.psd_textures.len() >= 64 {
+            self.psd_textures.clear();
+        }
+
+        let tex_size = [rgba.width as usize, rgba.height as usize];
+        let display_size = [rgba.original_width as usize, rgba.original_height as usize];
+        let color_img = ColorImage::from_rgba_unmultiplied(tex_size, &rgba.pixels);
+        let handle = ctx.load_texture(
+            format!("media_psd:{}:{:x}", path.display(), state_hash),
+            color_img,
+            TextureOptions::LINEAR,
+        );
+        let id = handle.id();
+        self.psd_textures.insert(cache_key, (handle, display_size));
+        Some((id, display_size))
+    }
+
+    /// PSD オブジェクトをレイヤー単位またはパーツフォルダ単位で別々のタイムラインオブジェクトに分解・展開します。
+    pub fn decompose_psd_object(&mut self, obj_id: ObjectId, by_folders: bool, tight_crop: bool) -> bool {
+        let Some((base_layer_idx, orig_obj_ref)) = self.scene.find(obj_id) else {
+            return false;
+        };
+        let orig_obj = orig_obj_ref.clone();
+        let Some(src) = orig_obj.source() else {
+            return false;
+        };
+        if src.kind != EffectKind::ImageFile {
+            return false;
+        }
+        let Some(file_str) = src.text("file").map(str::to_string) else {
+            return false;
+        };
+        let layers_spec = src.text("psd_layers").unwrap_or("").to_string();
+        let blink_spec = src.text("psd_blink").unwrap_or("").to_string();
+        let lipsync_spec = src.text("psd_lipsync").unwrap_or("").to_string();
+
+        let Some(path) = self.resolve_cached_path(&file_str) else {
+            self.status = "PSD ファイルが見つからないため分解できません".into();
+            return false;
+        };
+        let Some(doc) = self.media.get_psd_document(&path) else {
+            self.status = "PSD データの解析に失敗したため分解できません".into();
+            return false;
+        };
+
+        let parts = if by_folders {
+            doc.decompose_by_folders(&layers_spec, tight_crop)
+        } else {
+            doc.decompose_by_layers(&layers_spec, tight_crop)
+        };
+        if parts.is_empty() {
+            self.status = "分解可能な表示レイヤーが見つかりませんでした".into();
+            return false;
+        }
+
+        // 元オブジェクトを削除して、そのレイヤー位置から背面→前面順に各パーツオブジェクトを配置
+        let _ = self.scene.remove_object(obj_id);
+
+        let mut cur_target_layer = base_layer_idx;
+        let mut first_placed_id = None;
+        let mut first_layer = base_layer_idx;
+        let mut last_layer = base_layer_idx;
+        let part_count = parts.len();
+
+        for part in parts {
+            let mut new_obj = orig_obj.clone();
+            new_obj.id = ObjectId::new();
+            if part.clipping {
+                new_obj.clipping = true;
+            }
+
+            if let Some(src_eff) = new_obj.source_mut() {
+                set_or_remove_text_param(src_eff, "psd_layers", part.psd_layers_param);
+                set_or_remove_text_param(src_eff, "psd_label", part.label.clone());
+                if part.inherit_blink && !blink_spec.is_empty() {
+                    set_or_remove_text_param(src_eff, "psd_blink", blink_spec.clone());
+                } else {
+                    set_or_remove_text_param(src_eff, "psd_blink", String::new());
+                }
+                if part.inherit_lipsync && !lipsync_spec.is_empty() {
+                    set_or_remove_text_param(src_eff, "psd_lipsync", lipsync_spec.clone());
+                } else {
+                    set_or_remove_text_param(src_eff, "psd_lipsync", String::new());
+                }
+            }
+
+            // 描画エフェクトの座標 (X, Y) に切り抜き中心オフセット（拡大率・回転を考慮）を加算し、ブレンドモードを引き継ぐ
+            if let Some(draw_eff) = new_obj
+                .effects
+                .iter_mut()
+                .find(|e| matches!(e.kind, EffectKind::StandardDraw | EffectKind::ExtendedDraw))
+            {
+                let zoom = draw_eff.eval("拡大率", 0, 100.0);
+                let rot_deg = draw_eff
+                    .track("回転")
+                    .or_else(|| draw_eff.track("Z軸回転"))
+                    .map(|t| t.evaluate(0))
+                    .unwrap_or(0.0);
+                let scale = zoom / 100.0;
+                let rad = rot_deg.to_radians();
+                let dx = part.center_offset.0 * scale;
+                let dy = part.center_offset.1 * scale;
+                let rot_dx = dx * rad.cos() - dy * rad.sin();
+                let rot_dy = dx * rad.sin() + dy * rad.cos();
+
+                if rot_dx.abs() > 1e-4 {
+                    if let Some(tx) = draw_eff.track_mut("X") {
+                        for kf in &mut tx.keyframes {
+                            kf.value = ((kf.value + rot_dx) * 10.0).round() / 10.0;
+                        }
+                    }
+                }
+                if rot_dy.abs() > 1e-4 {
+                    if let Some(ty) = draw_eff.track_mut("Y") {
+                        for kf in &mut ty.keyframes {
+                            kf.value = ((kf.value + rot_dy) * 10.0).round() / 10.0;
+                        }
+                    }
+                }
+                if part.blend_mode != au2_media::PsdBlendMode::Normal
+                    && part.blend_mode != au2_media::PsdBlendMode::PassThrough
+                {
+                    set_or_remove_text_param(
+                        draw_eff,
+                        "blend",
+                        part.blend_mode.to_aviutl_blend_code().to_string(),
+                    );
+                }
+            }
+
+            let (placed_layer, new_id) = self.scene.insert_object_at_free_layer(cur_target_layer, new_obj);
+            if first_placed_id.is_none() {
+                first_placed_id = Some(new_id);
+                first_layer = placed_layer;
+            }
+            last_layer = placed_layer;
+            cur_target_layer = placed_layer + 1;
+        }
+
+        self.selected = first_placed_id;
+        self.dirty = true;
+        let mode_label = if by_folders { "パーツ(フォルダ)単位" } else { "レイヤー単位" };
+        self.status = format!(
+            "PSD を{mode_label}で {part_count} 個のオブジェクトに分解し、Layer {}〜{} に配置しました",
+            first_layer + 1,
+            last_layer + 1
+        );
+        true
+    }
+
+    /// PSD の各パーツ・レイヤーを透過 PNG ファイルとして指定フォルダに一括書き出しするダイアログ。
+    pub fn export_psd_layers_png_dialog(&mut self, obj_id: ObjectId, by_folders: bool, tight_crop: bool) {
+        let Some((_, orig_obj)) = self.scene.find(obj_id) else {
+            return;
+        };
+        let Some(src) = orig_obj.source() else {
+            return;
+        };
+        let Some(file_str) = src.text("file").map(str::to_string) else {
+            return;
+        };
+        let layers_spec = src.text("psd_layers").unwrap_or("").to_string();
+        let Some(path) = self.resolve_cached_path(&file_str) else {
+            self.status = "PSD ファイルが見つかりません".into();
+            return;
+        };
+        let Some(doc) = self.media.get_psd_document(&path) else {
+            self.status = "PSD ファイルの解析に失敗しました".into();
+            return;
+        };
+
+        let Some(out_dir) = rfd::FileDialog::new()
+            .set_title("PSD レイヤー透過 PNG の書き出し先フォルダを選択")
+            .pick_folder()
+        else {
+            return;
+        };
+
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("psd_layers");
+        let target_dir = out_dir.join(format!("{stem}_layers"));
+        match doc.export_parts_as_png(&layers_spec, &target_dir, by_folders, tight_crop) {
+            Ok(count) => {
+                self.status = format!(
+                    "PSD の {count} パーツを透過 PNG として「{}」に書き出しました",
+                    target_dir.display()
+                );
+            }
+            Err(e) => {
+                self.status = format!("PNG 書き出しエラー: {e}");
+            }
+        }
+    }
+
+
     /// タイムラインにオブジェクトを追加し、選択状態にします。
     pub fn add_object_at(&mut self, preferred_layer: usize, obj: TimelineObject) {
         let name = obj.display_name();
@@ -1255,16 +1595,17 @@ impl EditorState {
     /// メディアファイルを複数選択してタイムライン＆ソースパネルに追加するダイアログ。
     pub fn add_media_dialog(&mut self, preferred_layer: usize, start_frame: Frame) {
         if let Some(paths) = rfd::FileDialog::new()
-            .set_title("動画・画像・音声ファイルを追加")
+            .set_title("動画・画像・PSD・音声ファイルを追加")
             .add_filter(
-                "メディアファイル (動画・画像・音声)",
+                "メディアファイル (動画・画像・PSD・音声)",
                 &[
                     "mp4", "avi", "mov", "mkv", "webm", "wmv", "png", "jpg", "jpeg", "bmp", "webp",
-                    "gif", "wav", "mp3", "ogg", "flac",
+                    "gif", "psd", "psb", "wav", "mp3", "ogg", "flac",
                 ],
             )
+            .add_filter("PSD 立ち絵ファイル (*.psd, *.psb)", &["psd", "psb"])
             .add_filter("動画ファイル", &["mp4", "avi", "mov", "mkv", "webm", "wmv"])
-            .add_filter("画像ファイル", &["png", "jpg", "jpeg", "bmp", "webp", "gif"])
+            .add_filter("画像ファイル", &["png", "jpg", "jpeg", "bmp", "webp", "gif", "psd", "psb"])
             .add_filter("音声ファイル", &["wav", "mp3", "ogg", "flac"])
             .pick_files()
         {
@@ -1279,12 +1620,13 @@ impl EditorState {
         if let Some(paths) = rfd::FileDialog::new()
             .set_title("ソースパネルにメディア素材を追加")
             .add_filter(
-                "メディアファイル (動画・画像・音声)",
+                "メディアファイル (動画・画像・PSD・音声)",
                 &[
                     "mp4", "avi", "mov", "mkv", "webm", "wmv", "png", "jpg", "jpeg", "bmp", "webp",
-                    "gif", "wav", "mp3", "ogg", "flac",
+                    "gif", "psd", "psb", "wav", "mp3", "ogg", "flac",
                 ],
             )
+            .add_filter("PSD 立ち絵ファイル (*.psd, *.psb)", &["psd", "psb"])
             .add_filter("すべてのファイル", &["*"])
             .pick_files()
         {
@@ -1542,10 +1884,10 @@ impl EditorState {
         if let Some(paths) = rfd::FileDialog::new()
             .set_title("ファイルを開く / 素材・プラグインを取り込む (自動判別)")
             .add_filter(
-                "すべての対応ファイル (.aup2, .aup, .exo, .exa, .object, 動画, 画像, 音声, プラグイン)",
+                "すべての対応ファイル (.aup2, .aup, .exo, .exa, .object, 動画, 画像, PSD, 音声, プラグイン)",
                 &[
                     "aup2", "aup", "exo", "exa", "object", "txt", "mp4", "avi", "mov", "mkv", "webm", "wmv", "png",
-                    "jpg", "jpeg", "bmp", "webp", "gif", "wav", "mp3", "ogg", "flac", "anm", "obj",
+                    "jpg", "jpeg", "bmp", "webp", "gif", "psd", "psb", "wav", "mp3", "ogg", "flac", "anm", "obj",
                     "cam", "scn", "tra", "auf", "aui", "auo", "auc", "anm2", "obj2", "cam2", "scn2",
                     "tra2", "auf2", "aui2", "auo2", "auc2", "mod2", "aux2",
                 ],
@@ -1555,10 +1897,10 @@ impl EditorState {
                 &["aup2", "aup", "exo", "exa", "object"],
             )
             .add_filter(
-                "動画・画像・音声メディア",
+                "動画・画像・PSD・音声メディア",
                 &[
                     "mp4", "avi", "mov", "mkv", "webm", "wmv", "png", "jpg", "jpeg", "bmp", "webp",
-                    "gif", "wav", "mp3", "ogg", "flac",
+                    "gif", "psd", "psb", "wav", "mp3", "ogg", "flac",
                 ],
             )
             .add_filter(
@@ -1697,6 +2039,55 @@ impl EditorState {
                     installed.len(),
                     installed.join(", ")
                 );
+            }
+        }
+    }
+
+    /// `.auf` / `.auf2` 自動解析＆クロスプラットフォーム移植・変換スタジオを開きます。
+    pub fn open_auf_porter(&mut self, plugin_idx: Option<usize>) {
+        if let Some(idx) = plugin_idx {
+            self.auf_porter.selected_plugin_idx = idx;
+        } else if let Some((idx, _)) = self
+            .plugins
+            .plugins
+            .iter()
+            .enumerate()
+            .find(|(_, p)| matches!(p.kind, au2_plugin::PluginKind::FilterDll))
+        {
+            self.auf_porter.selected_plugin_idx = idx;
+        }
+        self.auf_porter.is_open = true;
+    }
+
+    /// 指定した `.auf` / `.auf2` プラグインをクロスプラットフォーム `.anm` スクリプトに変換して `plugins/` に登録します。
+    pub fn convert_auf_to_anm(&mut self, plugin_idx: usize) {
+        match self.plugins.convert_plugin_to_anm(plugin_idx) {
+            Ok(out_path) => {
+                let fname = out_path
+                    .file_name()
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.status = format!(
+                    "✨ クロスプラットフォーム `.anm` スクリプト `{fname}` を自動生成して登録しました (Windows / Mac / Linux 全OS対応)"
+                );
+            }
+            Err(e) => {
+                self.status = format!("⚠ .anm への変換に失敗しました: {e}");
+            }
+        }
+    }
+
+    /// 登録済みの全 `.auf` / `.auf2` プラグインを一括で `.anm` スクリプトに変換します。
+    pub fn convert_all_auf_to_anm(&mut self) {
+        match self.plugins.convert_all_auf_to_anm() {
+            Ok(paths) => {
+                self.status = format!(
+                    "✨ 全 {} 件の .auf / .auf2 プラグインをクロスプラットフォーム .anm スクリプトへ一括変換しました",
+                    paths.len()
+                );
+            }
+            Err(e) => {
+                self.status = format!("⚠ 一括変換に失敗しました: {e}");
             }
         }
     }
@@ -1872,3 +2263,17 @@ impl EditorState {
         self.dirty = true;
     }
 }
+
+fn set_or_remove_text_param(eff: &mut au2_core::Effect, key: &str, value: String) {
+    if value.is_empty() {
+        eff.params.retain(|p| p.key != key);
+    } else if let Some(p) = eff.params.iter_mut().find(|p| p.key == key) {
+        p.value = au2_core::ParamValue::Text(value);
+    } else {
+        eff.params.push(au2_core::Param {
+            key: key.to_string(),
+            value: au2_core::ParamValue::Text(value),
+        });
+    }
+}
+

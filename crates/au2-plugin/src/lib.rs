@@ -5,6 +5,7 @@
 //! 拡張編集スクリプト（`.anm`, `.obj`, `.cam`, `.scn`, `.tra`, `.anm2`, `.obj2` 等）の
 //! 検出・解析・Lua 実行・PE ブリッジ管理クレート。
 
+pub mod auf_converter;
 pub mod lua_vm;
 pub mod pe_loader;
 
@@ -18,6 +19,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use au2_core::{Effect, Frame, TimelineObject, Track};
+pub use auf_converter::{
+    generate_anm_script, generate_json_spec, generate_rust_effect_code, generate_wgsl_shader,
+    synthesize_entry_lua_body, AufPortingReport, InferredAufCategory, PortingDifficulty,
+};
 pub use lua_vm::{execute_lua_script, LuaDrawCall, LuaFilterCall, LuaLoadedPrimitive, LuaObjState, LuaPolyCall, LuaVal};
 pub use pe_loader::{
     build_sample_32bit_auf_bytes, build_sample_64bit_auf_bytes, build_sample_aviutl2_auf2_bytes,
@@ -278,6 +283,8 @@ pub struct PluginDescriptor {
     pub status: SupportStatus,
     pub description: String,
     pub exports: Vec<String>,
+    pub imports: Vec<String>,
+    pub filter_flags: u32,
     /// 含まれるエントリ一覧（スクリプトセクションまたは `FILTER_DLL` エントリ）
     pub entries: Vec<ScriptEntry>,
 }
@@ -337,7 +344,10 @@ pub fn parse_script_entries(stem: &str, text: &str) -> Vec<ScriptEntry> {
                     && prev.checks.is_empty()
                     && prev.check_name.is_none()
                     && prev.dialogs.is_empty()
-                    && prev.script_body.trim().is_empty();
+                    && prev.script_body.lines().all(|l| {
+                        let t = l.trim();
+                        t.is_empty() || t.starts_with("--")
+                    });
                 if !is_empty_preamble {
                     entries.push(prev);
                 }
@@ -580,6 +590,8 @@ pub fn inspect_plugin_file(path: &Path) -> Option<PluginDescriptor> {
             status: SupportStatus::Supported,
             description,
             exports: Vec::new(),
+            imports: Vec::new(),
+            filter_flags: 0,
             entries,
         })
     } else {
@@ -592,6 +604,8 @@ pub fn inspect_plugin_file(path: &Path) -> Option<PluginDescriptor> {
             status: SupportStatus::Supported,
             description: pe_info.description,
             exports: pe_info.exports,
+            imports: pe_info.imports,
+            filter_flags: pe_info.filter_flags,
             entries: pe_info.entries,
         })
     }
@@ -645,6 +659,71 @@ impl PluginRegistry {
         if !cam_path.exists() {
             let _ = fs::write(&cam_path, DEFAULT_CAM_SCRIPT);
         }
+
+        // 5. サンプル 32-bit .auf / 64-bit .auf / AviUtl2 .auf2 フィルタプラグイン
+        let auf32_path = self.plugin_dir.join("sample_glow32.auf");
+        if !auf32_path.exists() {
+            let _ = fs::write(&auf32_path, build_sample_32bit_auf_bytes());
+        }
+        let auf64_path = self.plugin_dir.join("sample_chroma64.auf");
+        if !auf64_path.exists() {
+            let _ = fs::write(&auf64_path, build_sample_64bit_auf_bytes());
+        }
+        let auf2_path = self.plugin_dir.join("sample_neon.auf2");
+        if !auf2_path.exists() {
+            let _ = fs::write(&auf2_path, build_sample_aviutl2_auf2_bytes());
+        }
+    }
+
+    /// 指定した `.auf` / `.auf2` プラグインをクロスプラットフォーム `.anm` (Lua スクリプト) に自動変換し、
+    /// `plugin_dir` に保存して再スキャン・登録します。
+    pub fn convert_plugin_to_anm(&mut self, plugin_idx: usize) -> std::io::Result<PathBuf> {
+        let desc = self
+            .plugins
+            .get(plugin_idx)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "プラグインが見つかりません"))?
+            .clone();
+        self.convert_descriptor_to_anm(&desc)
+    }
+
+    /// 任意の [`PluginDescriptor`] から `.anm` を生成して `plugin_dir` に保存し、再スキャンします。
+    pub fn convert_descriptor_to_anm(&mut self, desc: &PluginDescriptor) -> std::io::Result<PathBuf> {
+        fs::create_dir_all(&self.plugin_dir)?;
+        let stem = Path::new(&desc.file_name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("converted_filter");
+        let out_path = self.plugin_dir.join(format!("{stem}_ported.anm"));
+        let script = generate_anm_script(desc);
+        fs::write(&out_path, script)?;
+        self.reload();
+        Ok(out_path)
+    }
+
+    /// 登録されているすべての `.auf` / `.auf2` プラグインを一括でクロスプラットフォーム `.anm` スクリプトに変換します。
+    pub fn convert_all_auf_to_anm(&mut self) -> std::io::Result<Vec<PathBuf>> {
+        fs::create_dir_all(&self.plugin_dir)?;
+        let targets: Vec<PluginDescriptor> = self
+            .plugins
+            .iter()
+            .filter(|p| matches!(p.kind, PluginKind::FilterDll))
+            .cloned()
+            .collect();
+        let mut out_paths = Vec::new();
+        for desc in &targets {
+            let stem = Path::new(&desc.file_name)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("converted_filter");
+            let out_path = self.plugin_dir.join(format!("{stem}_ported.anm"));
+            let script = generate_anm_script(desc);
+            fs::write(&out_path, script)?;
+            out_paths.push(out_path);
+        }
+        if !out_paths.is_empty() {
+            self.reload();
+        }
+        Ok(out_paths)
     }
 
     /// ディレクトリを再スキャンします（サブフォルダ 1 階層も検索）。
@@ -695,6 +774,8 @@ impl PluginRegistry {
                 status: SupportStatus::Supported,
                 description: format!("標準組み込みスクリプト ({} 個)", entries.len()),
                 exports: entries.iter().map(|e| e.display_name.clone()).collect(),
+                imports: Vec::new(),
+                filter_flags: 0,
                 entries,
             });
         }
@@ -2231,6 +2312,8 @@ end
             status: SupportStatus::Supported,
             description: "Legacy Script".into(),
             exports: Vec::new(),
+            imports: Vec::new(),
+            filter_flags: 0,
             entries: entries.clone(),
         });
         assert!(reg.execute_effect(&eff, 0, &mut st));
@@ -2282,6 +2365,8 @@ end)
             status: SupportStatus::Supported,
             description: "AviUtl2 Script".into(),
             exports: Vec::new(),
+            imports: Vec::new(),
+            filter_flags: 0,
             entries,
         });
         let mut st = LuaObjState::default();
@@ -2347,6 +2432,62 @@ end)
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn test_auf_auto_analysis_and_cross_platform_conversion() {
+        for (name, bytes) in [
+            ("sample_glow32.auf", build_sample_32bit_auf_bytes()),
+            ("sample_chroma64.auf", build_sample_64bit_auf_bytes()),
+            ("sample_neon.auf2", build_sample_aviutl2_auf2_bytes()),
+        ] {
+            let stem = name.split('.').next().unwrap();
+            let pe_info = inspect_native_pe_plugin(stem, PluginKind::FilterDll, &bytes);
+            assert!(!pe_info.entries.is_empty(), "{name} should have extracted entries");
+
+            let desc = PluginDescriptor {
+                file_name: name.to_string(),
+                path: PathBuf::from(name),
+                kind: PluginKind::FilterDll,
+                arch: pe_info.arch,
+                status: SupportStatus::Supported,
+                description: pe_info.description,
+                exports: pe_info.exports,
+                imports: pe_info.imports,
+                filter_flags: pe_info.filter_flags,
+                entries: pe_info.entries,
+            };
+
+            // 1. 診断レポート
+            let report = AufPortingReport::analyze(&desc);
+            assert_eq!(report.difficulty, PortingDifficulty::AutoCompatible);
+            assert!(report.total_tracks >= 1);
+
+            // 2. .anm スクリプト自動生成と再パース・実行検証
+            let anm_code = generate_anm_script(&desc);
+            let parsed = parse_script_entries(stem, &anm_code);
+            assert_eq!(parsed.len(), desc.entries.len());
+            assert_eq!(parsed[0].tracks.len(), desc.entries[0].tracks.len());
+            assert_eq!(parsed[0].checks.len(), desc.entries[0].checks.len());
+
+            let mut lua_st = LuaObjState::default();
+            lua_vm::execute_compiled_script(&parsed[0].compiled_ast, &mut lua_st);
+            assert!(
+                !lua_st.filter_calls.is_empty(),
+                "generated .anm for {name} should emit filter_calls"
+            );
+
+            // 3. WGSL / Rust / JSON 生成検証
+            let wgsl = generate_wgsl_shader(&desc);
+            assert!(wgsl.contains("struct AufParams"));
+            assert!(wgsl.contains("@fragment"));
+
+            let rust_code = generate_rust_effect_code(&desc);
+            assert!(rust_code.contains("pub fn evaluate_auf_filter"));
+
+            let json_spec = generate_json_spec(&desc);
+            assert!(json_spec.contains("\"tracks\":"));
         }
     }
 }
