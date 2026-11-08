@@ -1,0 +1,20 @@
+# Rust / Cargo build & release artifacts
+/target/
+/dist/
+**/*.rs.bk
+*.pdb
+
+# OS / Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*~
+
+# User-installed external binary plugins (keep bundled scripts)
+/plugins/*.auf
+/plugins/*.aui
+/plugins/*.auo
+/plugins/*.auc
+/plugins/*.dll

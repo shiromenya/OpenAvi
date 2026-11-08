@@ -1,0 +1,7 @@
+# Windows のバッチ/PowerShell は CRLF 必須 (LF のままだと cmd.exe がラベルや日本語行を誤解釈して失敗する)
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.rs text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
