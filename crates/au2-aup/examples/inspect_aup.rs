@@ -10,9 +10,6 @@ fn main() {
         return;
     }
 
-    let test_copy = r"C:\Users\user\.gemini\antigravity\scratch\openavi\crates\au2-aup\test_data\dist_24fps.aup";
-    let _ = std::fs::copy(target, test_copy);
-
     let data = std::fs::read(target).expect("read aup");
     let doc = au2_aup::parse_aup_bytes(&data).expect("parse aup");
 
