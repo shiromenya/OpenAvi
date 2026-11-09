@@ -1,4 +1,4 @@
-﻿//! オブジェクト・シェイプ・画像・動画・フィルタの合成レンダリング
+//! オブジェクト・シェイプ・画像・動画・フィルタの合成レンダリング
 
 use std::f32::consts::{PI, TAU};
 
@@ -1862,7 +1862,8 @@ fn draw_single_instance(
         EffectKind::Text => {
             // epaint のフォントアトラスは巨大フォント（>100pt）でアトラス境界違反・クラッシュを起こすため、
             // フォントのラスタライズサイズは最大 96.0 に抑え、それ以上の超巨大テキストはメッシュ頂点スケーリングで安全に描画する
-            let max_font_size = 96.0_f32;
+            // 高解像度ディスプレイ・巨大テロップ・拡大時でもボケないよう、フォントラスタライズ上限を 512.0pt に拡大
+            let max_font_size = 512.0_f32;
             let raw_canvas_size = src.eval("サイズ", rel, 34.0).max(1.0) as f32;
             let scaled_raw_size = (raw_canvas_size * k).max(1.0);
             let (font_size, scale_up) = if scaled_raw_size > max_font_size {
@@ -2015,13 +2016,13 @@ fn draw_single_instance(
                 if text_type == 1 || text_type == 2 {
                     // 多層ソフトドロップシャドウ（自然で上品なテロップ影）
                     let sh_a = if text_type == 1 { 0.85 } else { 0.45 };
-                    let d = (raw_canvas_size * 0.075).clamp(2.0, 7.0);
+                    let d = (raw_canvas_size * 0.075).clamp(2.0, 64.0);
                     let base_sc = color2.gamma_multiply(alpha * sh_a);
                     let _ = draw_galley_at(painter, item_off + vec2(d, d), galley.clone(), base_sc, None);
 
                     // 微細ブラー層（ソフトエッジ）
                     let blur_sc = color2.gamma_multiply(alpha * sh_a * 0.35);
-                    let blur_r = (d * 0.45).clamp(1.0, 3.0);
+                    let blur_r = (d * 0.45).clamp(1.0, 24.0);
                     for (bx, by) in [(-blur_r, 0.0), (blur_r, 0.0), (0.0, -blur_r), (0.0, blur_r)] {
                         let _ = draw_galley_at(painter, item_off + vec2(d + bx, d + by), galley.clone(), blur_sc, None);
                     }
@@ -2030,9 +2031,9 @@ fn draw_single_instance(
                     let bw = if fx.border_width > 0.5 {
                         fx.border_width
                     } else if text_type == 3 {
-                        (raw_canvas_size * 0.075).clamp(2.0, 6.5)
+                        (raw_canvas_size * 0.075).clamp(2.0, 64.0)
                     } else {
-                        (raw_canvas_size * 0.040).clamp(1.2, 3.2)
+                        (raw_canvas_size * 0.040).clamp(1.2, 32.0)
                     };
                     let bc = if fx.border_width > 0.5 {
                         fx.border_color.unwrap_or(color2)
@@ -2042,11 +2043,20 @@ fn draw_single_instance(
                     .gamma_multiply(alpha);
 
                     // 太さに応じて 16 または 24 方向を全周サンプリング（滑らかな角丸縁取り）
-                    let samples = if bw >= 3.5 { 24 } else { 16 };
+                    let samples = if bw >= 12.0 { 32 } else if bw >= 3.5 { 24 } else { 16 };
                     let step_angle = std::f32::consts::TAU / (samples as f32);
 
                     // 太い縁取りの時は内側の隙間を埋めるため中間半径もサンプリング
-                    if bw >= 2.5 {
+                    if bw >= 8.0 {
+                        let r1 = bw * 0.33;
+                        let r2 = bw * 0.66;
+                        for i in 0..samples {
+                            let angle = i as f32 * step_angle;
+                            let (sa, ca) = (angle.sin(), angle.cos());
+                            let _ = draw_galley_at(painter, item_off + vec2(ca * r1, sa * r1), galley.clone(), bc, None);
+                            let _ = draw_galley_at(painter, item_off + vec2(ca * r2, sa * r2), galley.clone(), bc, None);
+                        }
+                    } else if bw >= 2.5 {
                         let inner_r = bw * 0.55;
                         for i in 0..samples {
                             let angle = i as f32 * step_angle;

@@ -851,3 +851,18 @@ fn test_dark_and_light_mode_rendering() {
     theme::set_mode_no_save(renderer.context(), toggled);
     assert!(theme::is_dark());
 }
+
+#[test]
+fn test_font_size_rendering() {
+    let ctx = egui::Context::default();
+    let raw = egui::RawInput::default();
+    let full = ctx.run(raw, |ctx| {
+        let painter = ctx.layer_painter(egui::LayerId::background());
+        for size in [34.0, 96.0, 150.0, 200.0, 300.0, 400.0, 500.0] {
+            let galley = painter.layout_no_wrap("あ漢A".to_string(), egui::FontId::proportional(size), egui::Color32::WHITE);
+            painter.add(egui::Shape::Text(egui::epaint::TextShape::new(egui::Pos2::ZERO, galley, egui::Color32::WHITE)));
+        }
+    });
+    let prims = ctx.tessellate(full.shapes, 1.0);
+    assert!(!prims.is_empty(), "Tessellation with 500pt font should succeed");
+}
