@@ -1,4 +1,4 @@
-﻿//! 設定ダイアログ（選択中オブジェクトのパラメータ編集）。
+//! 設定ダイアログ（選択中オブジェクトのパラメータ編集）。
 //!
 //! AviUtl と同様、中間点を持つトラックは「現在フレームを含む区間」の
 //! 左（区間開始）・右（区間終了）の値を編集します。
@@ -648,30 +648,24 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                                 }
                                 ParamValue::Text(s) if key == "font" => {
                                     let mut font_changed = false;
-                                    let popular_fonts = [
-                                        "LINE Seed JP",
-                                        "メイリオ",
-                                        "游ゴシック",
-                                        "MS UI Gothic",
-                                        "MS ゴシック",
-                                        "MS 明朝",
-                                        "Meiryo UI",
-                                        "Segoe UI",
-                                        "Arial",
-                                    ];
+                                    let available_fonts = crate::fonts::list_available_fonts();
                                     ui.horizontal(|ui| {
                                         egui::ComboBox::from_id_salt(("au2-font-combo", id, ei))
                                             .selected_text(if s.is_empty() { "フォント選択" } else { s.as_str() })
-                                            .width(120.0)
+                                            .width(130.0)
                                             .show_ui(ui, |ui| {
-                                                for f in popular_fonts {
+                                                for f in &available_fonts {
                                                     if ui.selectable_label(s == f, f).clicked() {
                                                         *s = f.to_string();
                                                         font_changed = true;
+                                                        crate::fonts::ensure_font_family(ui.ctx(), s);
                                                     }
                                                 }
                                             });
-                                        font_changed |= ui.add(TextEdit::singleline(s).desired_width(80.0)).changed();
+                                        if ui.add(TextEdit::singleline(s).desired_width(90.0)).changed() {
+                                            font_changed = true;
+                                            crate::fonts::ensure_font_family(ui.ctx(), s);
+                                        }
                                     });
                                     font_changed
                                 }

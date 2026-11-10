@@ -446,6 +446,8 @@ struct EngineSharedState {
     seek_generation: u64,
     seek_start_sec: f64,
     seek_instant: Option<Instant>,
+    peak_l: f32,
+    peak_r: f32,
 }
 
 #[cfg(windows)]
@@ -499,13 +501,14 @@ extern "system" {
 
 /// `cursor_sample_frame` から `chunk_frames` サンプルフレーム分の音声を全トラックから合成し、
 /// リトルエンディアン 16-bit ステレオ PCM バイト列として `target_buf` に書き込みます。
+/// 合成された (L, R) の正規化ピーク振幅 (0.0..=1.0) を返します。
 pub fn mix_audio_chunk(
     tracks: &[AudioTrackItem],
     cursor_sample_frame: usize,
     chunk_frames: usize,
     fps: f64,
     target_buf: &mut [u8],
-) {
+) -> (f32, f32) {
     let mut mix_buf = vec![0.0f32; chunk_frames * (CHANNELS as usize)];
     let chunk_start_sec = cursor_sample_frame as f64 / SAMPLE_RATE as f64;
     let chunk_end_sec = (cursor_sample_frame + chunk_frames) as f64 / SAMPLE_RATE as f64;
@@ -537,7 +540,14 @@ pub fn mix_audio_chunk(
         }
     }
 
+    let mut max_l: f32 = 0.0;
+    let mut max_r: f32 = 0.0;
     for (i, &sample_f32) in mix_buf.iter().enumerate() {
+        if i % 2 == 0 {
+            max_l = max_l.max(sample_f32.abs());
+        } else {
+            max_r = max_r.max(sample_f32.abs());
+        }
         let clamped = sample_f32.clamp(-32768.0, 32767.0) as i16;
         let b = clamped.to_le_bytes();
         if i * 2 + 1 < target_buf.len() {
@@ -545,6 +555,7 @@ pub fn mix_audio_chunk(
             target_buf[i * 2 + 1] = b[1];
         }
     }
+    ((max_l / 32768.0).min(1.0), (max_r / 32768.0).min(1.0))
 }
 
 #[cfg(target_os = "macos")]
@@ -644,6 +655,8 @@ impl AudioEngine {
             seek_generation: 0,
             seek_start_sec: 0.0,
             seek_instant: None,
+            peak_l: 0.0,
+            peak_r: 0.0,
         }));
         let running = Arc::new(AtomicBool::new(true));
 
@@ -709,7 +722,22 @@ impl AudioEngine {
             if st.playing {
                 st.playing = false;
                 st.seek_instant = None;
+                st.peak_l = 0.0;
+                st.peak_r = 0.0;
             }
+        }
+    }
+
+    /// 現在再生中のステレオ音声の正規化ピーク振幅 (L, R: 0.0..=1.0) を取得します。
+    pub fn peak_levels(&self) -> (f32, f32) {
+        if let Ok(st) = self.shared.lock() {
+            if st.playing {
+                (st.peak_l, st.peak_r)
+            } else {
+                (0.0, 0.0)
+            }
+        } else {
+            (0.0, 0.0)
         }
     }
 
@@ -829,7 +857,11 @@ impl AudioEngine {
 
             // `cursor_sample_frame` から正確に `CHUNK_FRAMES` 分をミックスして書き込む
             let target_buf = &mut raw_buffers[buf_idx];
-            mix_audio_chunk(&tracks, cursor_sample_frame, CHUNK_FRAMES, fps, target_buf);
+            let (pl, pr) = mix_audio_chunk(&tracks, cursor_sample_frame, CHUNK_FRAMES, fps, target_buf);
+            if let Ok(mut st) = shared.lock() {
+                st.peak_l = pl;
+                st.peak_r = pr;
+            }
 
             let hdr = &mut hdrs[buf_idx];
             hdr.lpData = target_buf.as_mut_ptr();
@@ -969,7 +1001,11 @@ impl AudioEngine {
             if !buf_ptr.is_null() {
                 unsafe {
                     let slice = std::slice::from_raw_parts_mut((*buf_ptr).mAudioData, buf_byte_size as usize);
-                    mix_audio_chunk(&tracks, cursor_sample_frame, CHUNK_FRAMES, fps, slice);
+                    let (pl, pr) = mix_audio_chunk(&tracks, cursor_sample_frame, CHUNK_FRAMES, fps, slice);
+                    if let Ok(mut st) = shared.lock() {
+                        st.peak_l = pl;
+                        st.peak_r = pr;
+                    }
                     (*buf_ptr).mAudioDataByteSize = buf_byte_size;
                     in_queue[buf_idx].store(true, Ordering::Release);
                     if AudioQueueEnqueueBuffer(aq, buf_ptr, 0, std::ptr::null()) == 0 {
@@ -1087,7 +1123,11 @@ impl AudioEngine {
                 continue;
             }
 
-            mix_audio_chunk(&tracks, cursor_sample_frame, CHUNK_FRAMES, fps, &mut pcm_buf);
+            let (pl, pr) = mix_audio_chunk(&tracks, cursor_sample_frame, CHUNK_FRAMES, fps, &mut pcm_buf);
+            if let Ok(mut st) = shared.lock() {
+                st.peak_l = pl;
+                st.peak_r = pr;
+            }
             if let Some(child) = &mut sink {
                 if let Some(stdin) = &mut child.stdin {
                     if stdin.write_all(&pcm_buf).is_err() {
@@ -1214,7 +1254,7 @@ mod tests {
             volume: 0.5,
         };
         let mut buf = vec![0u8; 2 * 4]; // 2 frames * 2ch * 2bytes
-        mix_audio_chunk(&[trk1, trk2], 0, 2, 30.0, &mut buf);
+        let (pl, pr) = mix_audio_chunk(&[trk1, trk2], 0, 2, 30.0, &mut buf);
         let s0_l = i16::from_le_bytes([buf[0], buf[1]]);
         let s0_r = i16::from_le_bytes([buf[2], buf[3]]);
         let s1_l = i16::from_le_bytes([buf[4], buf[5]]);
@@ -1223,6 +1263,8 @@ mod tests {
         assert_eq!(s0_r, -750);
         assert_eq!(s1_l, 2500);
         assert_eq!(s1_r, -1500);
+        assert!(pl > 0.0 && pl <= 1.0);
+        assert!(pr > 0.0 && pr <= 1.0);
     }
 
     #[test]

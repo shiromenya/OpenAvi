@@ -1874,6 +1874,24 @@ fn draw_single_instance(
 
             let base_color = src.text("color").and_then(parse_color).unwrap_or(Color32::WHITE);
             let color2 = src.text("color2").and_then(parse_color).unwrap_or(Color32::BLACK);
+            let font_name = src.text("font").map(|f| f.trim()).filter(|f| !f.is_empty());
+            if let Some(name) = font_name {
+                let _ = crate::fonts::ensure_font_family(painter.ctx(), name);
+            }
+            let font_id = if let Some(name) = font_name {
+                let fam = egui::FontFamily::Name(name.to_string().into());
+                let is_bound = painter.ctx().fonts(|f| {
+                    f.lock().fonts.definitions().families.contains_key(&fam)
+                });
+                if is_bound {
+                    FontId::new(font_size, fam)
+                } else {
+                    FontId::proportional(font_size)
+                }
+            } else {
+                FontId::proportional(font_size)
+            };
+
             let text_type = src
                 .text("type")
                 .and_then(|s| s.trim().parse::<u8>().ok())
@@ -1984,7 +2002,7 @@ fn draw_single_instance(
                 }
                 let item_off = vec2(item.local_x, item.local_y);
                 let main_col = apply_tint(item.color_override.unwrap_or(base_color));
-                let galley = painter.layout_no_wrap(item.ch.clone(), FontId::proportional(font_size), main_col);
+                let galley = painter.layout_no_wrap(item.ch.clone(), font_id.clone(), main_col);
 
                 // 1. グロー効果 (`fx.glow_strength`)
                 if fx.glow_strength > 0.01 {

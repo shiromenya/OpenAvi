@@ -395,11 +395,26 @@ fn bottom_transport_bar(ui: &mut egui::Ui, st: &mut EditorState) {
         st.set_frame(last);
     }
 
-    // 右端：解像度表示（ボタン群と重ならない余白がある時のみ）
+    // 右端：オーディオピークメーター (L/R) ＆ 解像度表示
+    let (peak_l, peak_r) = st.audio.peak_levels();
+    if st.playing {
+        ui.ctx().request_repaint();
+    }
+
+    let meter_w = 60.0_f32;
     let s = &st.scene.settings;
     let res_text = format!("{}×{}  {:.0}fps", s.width, s.height, s.frame_rate.as_f64());
     let res_w = res_text.chars().count() as f32 * 7.0;
-    if row2_rect.right() - (group_x + group_w) >= res_w + 16.0 {
+
+    let right_available = row2_rect.right() - (group_x + group_w);
+    if right_available >= meter_w + res_w + 24.0 {
+        // メーターと解像度の両方を表示
+        let meter_rect = Rect::from_min_size(
+            pos2(row2_rect.right() - res_w - meter_w - 16.0, center_y - 8.0),
+            vec2(meter_w, 17.0),
+        );
+        draw_audio_peak_meter(ui.painter(), meter_rect, peak_l, peak_r);
+
         ui.painter().text(
             pos2(row2_rect.right().floor(), center_y),
             Align2::RIGHT_CENTER,
@@ -407,6 +422,56 @@ fn bottom_transport_bar(ui: &mut egui::Ui, st: &mut EditorState) {
             FontId::monospace(11.0),
             crate::theme::text_muted(),
         );
+    } else if right_available >= meter_w + 12.0 {
+        // メーターのみ表示
+        let meter_rect = Rect::from_min_size(
+            pos2(row2_rect.right() - meter_w, center_y - 8.0),
+            vec2(meter_w, 17.0),
+        );
+        draw_audio_peak_meter(ui.painter(), meter_rect, peak_l, peak_r);
+    } else if right_available >= res_w + 16.0 {
+        // 解像度のみ表示
+        ui.painter().text(
+            pos2(row2_rect.right().floor(), center_y),
+            Align2::RIGHT_CENTER,
+            res_text,
+            FontId::monospace(11.0),
+            crate::theme::text_muted(),
+        );
+    }
+}
+
+/// リアルタイムオーディオピークメーター (L/R) の描画
+fn draw_audio_peak_meter(painter: &egui::Painter, rect: Rect, peak_l: f32, peak_r: f32) {
+    let bar_h = 7.0_f32;
+    let label_w = 10.0_f32;
+    let bar_w = (rect.width() - label_w - 4.0).max(10.0);
+
+    for (idx, (label, val)) in [("L", peak_l), ("R", peak_r)].iter().enumerate() {
+        let y = rect.top() + idx as f32 * (bar_h + 3.0);
+        painter.text(
+            pos2(rect.left(), y + bar_h * 0.5),
+            Align2::LEFT_CENTER,
+            label,
+            FontId::monospace(8.0),
+            crate::theme::text_muted(),
+        );
+
+        let meter_rect = Rect::from_min_size(pos2(rect.left() + label_w, y), vec2(bar_w, bar_h));
+        painter.rect_filled(meter_rect, 1.0, Color32::from_rgb(18, 22, 28));
+
+        let fill_w = (bar_w * val.clamp(0.0, 1.0)).round();
+        if fill_w > 0.5 {
+            let fill_rect = Rect::from_min_size(meter_rect.min, vec2(fill_w, bar_h));
+            let color = if *val > 0.90 {
+                Color32::from_rgb(231, 76, 60) // 赤 (ピーク・クリッピング注意)
+            } else if *val > 0.70 {
+                Color32::from_rgb(241, 196, 15) // 黄 (-6dB 〜 -1dB)
+            } else {
+                Color32::from_rgb(46, 204, 113) // 緑 (適正レベル)
+            };
+            painter.rect_filled(fill_rect, 1.0, color);
+        }
     }
 }
 
