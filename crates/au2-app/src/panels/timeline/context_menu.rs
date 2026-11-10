@@ -17,6 +17,25 @@ pub(crate) fn context_menu_ui(ui: &mut egui::Ui, st: &mut EditorState) {
     );
     ui.separator();
 
+    // 選択範囲 (In / Out 点) の設定
+    ui.horizontal(|ui| {
+        if ui.button("📍 In 点に設定 (I)").clicked() {
+            st.set_in_point(Some(start));
+            ui.close_menu();
+        }
+        if ui.button("📍 Out 点に設定 (O)").clicked() {
+            st.set_out_point(Some(start));
+            ui.close_menu();
+        }
+    });
+    if st.timeline.in_point.is_some() || st.timeline.out_point.is_some() {
+        if ui.button("❌ 選択範囲 (In/Out) を解除").clicked() {
+            st.clear_range();
+            ui.close_menu();
+        }
+    }
+    ui.separator();
+
     // クリップボードにアイテムがあれば貼り付けを表示
     if !st.clipboard.is_empty() {
         if ui.button(format!("📋 ここに貼り付け ({} 個のオブジェクト)", st.clipboard.len())).clicked() {

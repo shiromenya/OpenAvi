@@ -57,6 +57,23 @@ pub struct TimelineView {
     pub selected_layer: usize,
     /// タイムラインのレーン表示領域（外部D&Dやヒットテスト判定用）
     pub lanes_rect: Option<egui::Rect>,
+    /// 選択範囲・書き出し範囲の開始フレーム（In点）
+    pub in_point: Option<Frame>,
+    /// 選択範囲・書き出し範囲の終了フレーム（Out点）
+    pub out_point: Option<Frame>,
+}
+
+/// プレビュー画面上でのオブジェクト直接ドラッグ操作状態
+#[derive(Clone, Copy, Debug)]
+pub struct PreviewDrag {
+    /// 操作対象のオブジェクト ID
+    pub object_id: ObjectId,
+    /// ドラッグ開始時のスクリーン座標
+    pub start_pointer: egui::Pos2,
+    /// ドラッグ開始時の X トラック値（区間の開始値, 終了値）
+    pub orig_x: (f64, f64),
+    /// ドラッグ開始時の Y トラック値（区間の開始値, 終了値）
+    pub orig_y: (f64, f64),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -96,6 +113,8 @@ impl Default for TimelineView {
             active_snap_line: None,
             selected_layer: 0,
             lanes_rect: None,
+            in_point: None,
+            out_point: None,
         }
     }
 }

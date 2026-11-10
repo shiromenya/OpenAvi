@@ -1067,6 +1067,42 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
         painter.rect_stroke(sel_rect, 2.0, Stroke::new(1.5_f32, Color32::from_rgb(80, 180, 255)));
     }
 
+    // 選択範囲（In点・Out点）のハイライト帯およびマーカー描画
+    if let (Some(in_f), Some(out_f)) = (st.timeline.in_point, st.timeline.out_point) {
+        let (start_f, end_f) = (in_f.min(out_f), in_f.max(out_f));
+        let x0 = fx(start_f as f32).clamp(lanes.left(), lanes.right());
+        let x1 = fx((end_f + 1) as f32).clamp(lanes.left(), lanes.right());
+        if x1 > x0 {
+            // ルーラーおよびレーン全体に薄い選択範囲ハイライト
+            let range_rect = Rect::from_min_max(pos2(x0, ruler.top()), pos2(x1, lanes.bottom()));
+            painter.rect_filled(range_rect, 0.0, Color32::from_rgba_unmultiplied(60, 140, 255, 30));
+            let ruler_range = Rect::from_min_max(pos2(x0, ruler.top()), pos2(x1, ruler.bottom()));
+            painter.rect_filled(ruler_range, 0.0, Color32::from_rgba_unmultiplied(60, 160, 255, 60));
+        }
+    }
+    if let Some(in_f) = st.timeline.in_point {
+        let ix = fx(in_f as f32);
+        if ix >= lanes.left() && ix <= lanes.right() {
+            painter.line_segment([pos2(ix, ruler.top()), pos2(ix, lanes.bottom())], Stroke::new(1.5_f32, Color32::from_rgb(50, 160, 255)));
+            painter.add(Shape::convex_polygon(
+                vec![pos2(ix, ruler.top()), pos2(ix + 8.0, ruler.top()), pos2(ix + 8.0, ruler.top() + 4.0), pos2(ix + 2.0, ruler.top() + 4.0), pos2(ix + 2.0, ruler.top() + 10.0), pos2(ix, ruler.top() + 10.0)],
+                Color32::from_rgb(50, 160, 255),
+                Stroke::NONE,
+            ));
+        }
+    }
+    if let Some(out_f) = st.timeline.out_point {
+        let ox = fx((out_f + 1) as f32);
+        if ox >= lanes.left() && ox <= lanes.right() {
+            painter.line_segment([pos2(ox, ruler.top()), pos2(ox, lanes.bottom())], Stroke::new(1.5_f32, Color32::from_rgb(50, 160, 255)));
+            painter.add(Shape::convex_polygon(
+                vec![pos2(ox, ruler.top()), pos2(ox - 8.0, ruler.top()), pos2(ox - 8.0, ruler.top() + 4.0), pos2(ox - 2.0, ruler.top() + 4.0), pos2(ox - 2.0, ruler.top() + 10.0), pos2(ox, ruler.top() + 10.0)],
+                Color32::from_rgb(50, 160, 255),
+                Stroke::NONE,
+            ));
+        }
+    }
+
     // 再生位置
     let px = fx(st.frame as f32);
     if px >= lanes.left() && px <= lanes.right() {

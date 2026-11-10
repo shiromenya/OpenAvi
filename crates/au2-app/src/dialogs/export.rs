@@ -67,7 +67,10 @@ impl ExportModalState {
         cfg.quality = self.config.quality;
         cfg.encoder = self.config.encoder;
         cfg.include_audio = self.config.include_audio;
-        if !self.use_content_range {
+        if let (Some(in_f), Some(out_f)) = (st.timeline.in_point, st.timeline.out_point) {
+            cfg.start_frame = in_f.min(out_f);
+            cfg.end_frame = in_f.max(out_f);
+        } else if !self.use_content_range {
             cfg.end_frame = st.last_frame();
         }
         self.config = cfg;
@@ -405,6 +408,18 @@ impl OpenAviApp {
                                             }
                                         });
                                         ui.horizontal(|ui| {
+                                            if let (Some(inf), Some(outf)) = (self.st.timeline.in_point, self.st.timeline.out_point) {
+                                                let (sf, ef) = (inf.min(outf), inf.max(outf));
+                                                let btn = egui::Button::new(
+                                                    RichText::new(format!("📍 選択範囲 ({}〜{}F)", sf + 1, ef + 1))
+                                                        .color(Color32::WHITE)
+                                                        .strong(),
+                                                ).fill(crate::theme::accent());
+                                                if ui.add(btn).clicked() {
+                                                    self.export_modal.config.start_frame = sf;
+                                                    self.export_modal.config.end_frame = ef;
+                                                }
+                                            }
                                             if ui
                                                 .small_button(format!("オブジェクト終端まで (1〜{}F)", content_end + 1))
                                                 .clicked()

@@ -213,6 +213,18 @@ fn handle_shortcuts(ctx: &egui::Context, st: &mut EditorState) {
                 "🧲 スナップ（吸着）を無効にしました".into()
             };
         }
+        // 選択範囲（In点・Out点）ショートカット
+        if !i.modifiers.command && !i.modifiers.ctrl && !i.modifiers.alt {
+            if i.key_pressed(Key::I) || i.key_pressed(Key::OpenBracket) {
+                st.set_in_point(Some(st.frame));
+            }
+            if i.key_pressed(Key::O) || i.key_pressed(Key::CloseBracket) {
+                st.set_out_point(Some(st.frame));
+            }
+        }
+        if (i.modifiers.alt || i.modifiers.shift) && i.key_pressed(Key::X) {
+            st.clear_range();
+        }
     });
 }
 

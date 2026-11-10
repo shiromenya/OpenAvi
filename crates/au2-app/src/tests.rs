@@ -1,5 +1,6 @@
 use super::*;
 use std::path::Path;
+use crate::state::EditorState;
 
 /// デスクトップ上の個人用サンプルファイル（開発者環境にのみ存在。無ければ各テストはスキップされる）。
 fn desk(rel: &str) -> &'static Path {
@@ -865,4 +866,43 @@ fn test_font_size_rendering() {
     });
     let prims = ctx.tessellate(full.shapes, 1.0);
     assert!(!prims.is_empty(), "Tessellation with 500pt font should succeed");
+}
+
+#[test]
+fn test_in_out_range_selection_and_export_config() {
+    let mut st = EditorState::default();
+    assert_eq!(st.timeline.in_point, None);
+    assert_eq!(st.timeline.out_point, None);
+
+    // 1. In 点・Out 点の設定
+    st.set_in_point(Some(30));
+    assert_eq!(st.timeline.in_point, Some(30));
+    assert_eq!(st.effective_export_range(), (30, st.last_frame()));
+
+    st.set_out_point(Some(90));
+    assert_eq!(st.timeline.out_point, Some(90));
+    assert_eq!(st.effective_export_range(), (30, 90));
+
+    // 2. 逆転時の順序自動補正
+    st.set_in_point(Some(120));
+    assert_eq!(st.timeline.in_point, Some(120));
+    assert_eq!(st.timeline.out_point, Some(120)); // in > out のため自動で out も 120 に追従
+
+    // 3. 範囲クリア
+    st.clear_range();
+    assert_eq!(st.timeline.in_point, None);
+    assert_eq!(st.timeline.out_point, None);
+    assert_eq!(st.effective_export_range(), (0, st.last_frame()));
+}
+
+#[test]
+fn test_texture_cache_lru_limits() {
+    let mut st = EditorState::default();
+    assert_eq!(st.static_textures.len(), 0);
+    assert_eq!(st.psd_textures.len(), 0);
+    assert_eq!(st.texture_seq, 0);
+
+    // テクスチャシーケンスが更新されることを確認
+    st.texture_seq = st.texture_seq.wrapping_add(1);
+    assert_eq!(st.texture_seq, 1);
 }

@@ -515,10 +515,21 @@ impl EditorState {
             _ => frame_index,
         };
 
-        // 1. 静止画または動画の先頭サムネイル (frame 0) は static_textures に永続キャッシュ
+        // 1. 静止画または動画の先頭サムネイル (frame 0) は static_textures に LRU キャッシュ
         if key_frame == 0 {
-            if let Some((handle, size)) = self.static_textures.get(&path) {
+            self.texture_seq = self.texture_seq.wrapping_add(1);
+            let cur_seq = self.texture_seq;
+            if let Some((handle, size, seq)) = self.static_textures.get_mut(&path) {
+                *seq = cur_seq;
                 return Some((handle.id(), *size));
+            }
+            // 上限 256 件を超えたら最も古い 32 件を自動解放して VRAM/メモリを最適化
+            if self.static_textures.len() >= 256 {
+                let mut entries: Vec<(PathBuf, u64)> = self.static_textures.iter().map(|(p, (_, _, s))| (p.clone(), *s)).collect();
+                entries.sort_by_key(|e| e.1);
+                for (old_path, _) in entries.into_iter().take(32) {
+                    self.static_textures.remove(&old_path);
+                }
             }
             let rgba = self.media.get_frame_arc(&path, 0, 0.0)?;
             let tex_size = [rgba.width as usize, rgba.height as usize];
@@ -530,7 +541,7 @@ impl EditorState {
                 TextureOptions::LINEAR,
             );
             let id = handle.id();
-            self.static_textures.insert(path, (handle, display_size));
+            self.static_textures.insert(path, (handle, display_size, cur_seq));
             return Some((id, display_size));
         }
 
@@ -672,13 +683,22 @@ impl EditorState {
             audio_amp,
         )?;
 
+        self.texture_seq = self.texture_seq.wrapping_add(1);
+        let cur_seq = self.texture_seq;
+
         let cache_key = (path.clone(), state_hash);
-        if let Some((handle, size)) = self.psd_textures.get(&cache_key) {
+        if let Some((handle, size, seq)) = self.psd_textures.get_mut(&cache_key) {
+            *seq = cur_seq;
             return Some((handle.id(), *size));
         }
 
-        if self.psd_textures.len() >= 64 {
-            self.psd_textures.clear();
+        // 上限 128 件を超えたら最も古い 32 件を自動解放（全消去によるフレームドロップを完全防止）
+        if self.psd_textures.len() >= 128 {
+            let mut entries: Vec<((PathBuf, u64), u64)> = self.psd_textures.iter().map(|(k, (_, _, s))| (k.clone(), *s)).collect();
+            entries.sort_by_key(|e| e.1);
+            for (old_key, _) in entries.into_iter().take(32) {
+                self.psd_textures.remove(&old_key);
+            }
         }
 
         let tex_size = [rgba.width as usize, rgba.height as usize];
@@ -690,7 +710,7 @@ impl EditorState {
             TextureOptions::LINEAR,
         );
         let id = handle.id();
-        self.psd_textures.insert(cache_key, (handle, display_size));
+        self.psd_textures.insert(cache_key, (handle, display_size, cur_seq));
         Some((id, display_size))
     }
 

@@ -12,7 +12,7 @@ members = [
 default-members = ["crates/au2-app"]
 
 [workspace.package]
-version = "2.4.0"
+version = "2.6.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/shiromenya/OpenAvi"

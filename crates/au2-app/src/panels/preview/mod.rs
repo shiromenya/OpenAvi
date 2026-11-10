@@ -1,4 +1,4 @@
-﻿//! プレビュー画面パネル
+//! プレビュー画面パネル
 //! 
 //! - 3Dカメラ投影、テキスト組版、図形、メディア画像/動画、フィルタの合成プレビューを行います。
 
@@ -31,7 +31,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     let preview_h = (total_h - control_height).max(64.0);
     let preview_size = vec2(total_w.max(64.0), preview_h);
 
-    let (resp, painter) = ui.allocate_painter(preview_size, Sense::click());
+    let (resp, painter) = ui.allocate_painter(preview_size, Sense::click_and_drag());
     let area = resp.rect;
     painter.rect_filled(area, 0.0, crate::theme::flip(Color32::from_gray(24)));
 
@@ -132,6 +132,103 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     };
 
     render_scene_at(&ctx, &st.scene, frame, st.selected);
+
+    // 2. プレビュー画面上でのマウスドラッグ操作によるオブジェクト直接移動 & センタースナップ
+    if let Some(id) = st.selected {
+        if resp.drag_started() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                if canvas.contains(p) {
+                    st.push_undo("プレビュー上でオブジェクト位置の移動");
+                    if let Some((_, obj)) = st.scene.find(id) {
+                        let rel = frame.saturating_sub(obj.frame_start);
+                        let keys = obj.key_frames();
+                        let seg = keys.partition_point(|&k| k <= rel).saturating_sub(1).min(keys.len().saturating_sub(2));
+                        let orig_x = obj.source().and_then(|s| s.track("X")).map(|t| get_track_segment_values(t, &keys, seg)).unwrap_or((0.0, 0.0));
+                        let orig_y = obj.source().and_then(|s| s.track("Y")).map(|t| get_track_segment_values(t, &keys, seg)).unwrap_or((0.0, 0.0));
+                        st.preview_drag = Some(crate::state::PreviewDrag {
+                            object_id: id,
+                            start_pointer: p,
+                            orig_x,
+                            orig_y,
+                        });
+                        st.preview_snap_x = false;
+                        st.preview_snap_y = false;
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(drag) = st.preview_drag {
+        if resp.dragged() {
+            if let Some(cur_pos) = resp.interact_pointer_pos() {
+                let delta = cur_pos - drag.start_pointer;
+                let dx = (delta.x / scale) as f64;
+                let dy = (delta.y / scale) as f64;
+
+                let mut target_xa = drag.orig_x.0 + dx;
+                let mut target_xb = drag.orig_x.1 + dx;
+                let mut target_ya = drag.orig_y.0 + dy;
+                let mut target_yb = drag.orig_y.1 + dy;
+
+                // 画面中央スナップ（8px 以内で X=0 または Y=0 に吸着）
+                let snap_threshold_canvas = 8.0_f64 / (scale as f64);
+                let mut snapped_x = false;
+                let mut snapped_y = false;
+
+                if target_xa.abs() <= snap_threshold_canvas {
+                    let snap_d = -target_xa;
+                    target_xa = 0.0;
+                    target_xb += snap_d;
+                    snapped_x = true;
+                }
+                if target_ya.abs() <= snap_threshold_canvas {
+                    let snap_d = -target_ya;
+                    target_ya = 0.0;
+                    target_yb += snap_d;
+                    snapped_y = true;
+                }
+
+                st.preview_snap_x = snapped_x;
+                st.preview_snap_y = snapped_y;
+
+                if let Some((_, obj)) = st.scene.find_mut(drag.object_id) {
+                    let rel = frame.saturating_sub(obj.frame_start);
+                    let keys = obj.key_frames();
+                    let seg = keys.partition_point(|&k| k <= rel).saturating_sub(1).min(keys.len().saturating_sub(2));
+                    if let Some(src) = obj.source_mut() {
+                        if let Some(tx) = src.track_mut("X") {
+                            set_track_segment_values(tx, &keys, seg, target_xa, target_xb);
+                        }
+                        if let Some(ty) = src.track_mut("Y") {
+                            set_track_segment_values(ty, &keys, seg, target_ya, target_yb);
+                        }
+                    }
+                    st.dirty = true;
+                }
+            }
+        }
+
+        if resp.drag_stopped() {
+            st.preview_drag = None;
+            st.preview_snap_x = false;
+            st.preview_snap_y = false;
+        }
+    }
+
+    // スナップ吸着ガイド線の描画（画面中央の縦線・横線）
+    if st.preview_snap_x {
+        painter.line_segment(
+            [pos2(canvas.center().x, canvas.top()), pos2(canvas.center().x, canvas.bottom())],
+            Stroke::new(1.5_f32, Color32::from_rgb(0, 220, 255)),
+        );
+    }
+    if st.preview_snap_y {
+        painter.line_segment(
+            [pos2(canvas.left(), canvas.center().y), pos2(canvas.right(), canvas.center().y)],
+            Stroke::new(1.5_f32, Color32::from_rgb(0, 220, 255)),
+        );
+    }
 
     let last = st.last_frame();
     let total_digits = ((last + 1).max(1) as f64).log10().floor() as usize + 1;
@@ -310,6 +407,40 @@ fn bottom_transport_bar(ui: &mut egui::Ui, st: &mut EditorState) {
             FontId::monospace(11.0),
             crate::theme::text_muted(),
         );
+    }
+}
+
+/// オブジェクトの特定トラック（"X", "Y" など）の現在区間の値を取得します。
+fn get_track_segment_values(t: &au2_core::Track, keys: &[au2_core::Frame], seg: usize) -> (f64, f64) {
+    if !t.is_animated() {
+        let v = t.keyframes.first().map(|k| k.value).unwrap_or(0.0);
+        (v, v)
+    } else {
+        let find = |f: au2_core::Frame| t.keyframes.iter().position(|k| k.frame == f);
+        let li = keys.get(seg).and_then(|&f| find(f)).unwrap_or(0);
+        let ri = keys.get(seg + 1).and_then(|&f| find(f)).unwrap_or(t.keyframes.len().saturating_sub(1));
+        let a = t.keyframes.get(li).map(|k| k.value).unwrap_or(0.0);
+        let b = t.keyframes.get(ri).map(|k| k.value).unwrap_or(0.0);
+        (a, b)
+    }
+}
+
+/// オブジェクトの特定トラックの現在区間の値を更新します。
+fn set_track_segment_values(t: &mut au2_core::Track, keys: &[au2_core::Frame], seg: usize, val_a: f64, val_b: f64) {
+    if !t.is_animated() {
+        if !t.keyframes.is_empty() {
+            t.keyframes[0].value = val_a;
+        }
+    } else {
+        let find = |f: au2_core::Frame| t.keyframes.iter().position(|k| k.frame == f);
+        let li = keys.get(seg).and_then(|&f| find(f)).unwrap_or(0);
+        let ri = keys.get(seg + 1).and_then(|&f| find(f)).unwrap_or(t.keyframes.len().saturating_sub(1));
+        if t.keyframes.len() > li {
+            t.keyframes[li].value = val_a;
+        }
+        if t.keyframes.len() > ri {
+            t.keyframes[ri].value = val_b;
+        }
     }
 }
 

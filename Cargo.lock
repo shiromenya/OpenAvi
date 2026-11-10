@@ -492,7 +492,7 @@ dependencies = [
 
 [[package]]
 name = "au2-app"
-version = "2.4.0"
+version = "2.6.0"
 dependencies = [
  "au2-aup",
  "au2-core",
@@ -510,7 +510,7 @@ dependencies = [
 
 [[package]]
 name = "au2-aup"
-version = "2.4.0"
+version = "2.6.0"
 dependencies = [
  "au2-core",
  "au2-exo",
@@ -520,11 +520,11 @@ dependencies = [
 
 [[package]]
 name = "au2-core"
-version = "2.4.0"
+version = "2.6.0"
 
 [[package]]
 name = "au2-exo"
-version = "2.4.0"
+version = "2.6.0"
 dependencies = [
  "au2-core",
  "encoding_rs",
@@ -533,7 +533,7 @@ dependencies = [
 
 [[package]]
 name = "au2-media"
-version = "2.4.0"
+version = "2.6.0"
 dependencies = [
  "au2-platform",
  "encoding_rs",
@@ -544,11 +544,11 @@ dependencies = [
 
 [[package]]
 name = "au2-platform"
-version = "2.4.0"
+version = "2.6.0"
 
 [[package]]
 name = "au2-plugin"
-version = "2.4.0"
+version = "2.6.0"
 dependencies = [
  "au2-core",
  "au2-platform",

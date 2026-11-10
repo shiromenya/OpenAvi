@@ -68,12 +68,19 @@ pub struct EditorState {
     pub sources: Vec<SourceMediaItem>,
     /// ソースパネルで現在プレビュー選択中の素材インデックス
     pub selected_source: Option<usize>,
-    /// 静止画および動画サムネイル (frame 0) 用の永続 GPU テクスチャキャッシュ
-    pub(crate) static_textures: HashMap<PathBuf, (TextureHandle, [usize; 2])>,
+    /// 静止画および動画サムネイル (frame 0) 用の LRU GPU テクスチャキャッシュ (Path -> (Handle, 解像度, 最終アクセス世代))
+    pub(crate) static_textures: HashMap<PathBuf, (TextureHandle, [usize; 2], u64)>,
     /// 動画再生フレーム用の In-Place 更新 GPU テクスチャキャッシュ (Path -> (Handle, 現在フレーム番号, 解像度))
     pub(crate) stream_textures: HashMap<PathBuf, (TextureHandle, u32, [usize; 2])>,
-    /// PSD / PSB レイヤー合成状態ごとの GPU テクスチャキャッシュ ((Path, StateHash) -> (Handle, 解像度))
-    pub(crate) psd_textures: HashMap<(PathBuf, u64), (TextureHandle, [usize; 2])>,
+    /// PSD / PSB レイヤー合成状態ごとの LRU GPU テクスチャキャッシュ ((Path, StateHash) -> (Handle, 解像度, 最終アクセス世代))
+    pub(crate) psd_textures: HashMap<(PathBuf, u64), (TextureHandle, [usize; 2], u64)>,
+    /// テクスチャアクセスカウンタ（LRU 管理用）
+    pub(crate) texture_seq: u64,
+    /// プレビュー画面上でのオブジェクト直接ドラッグ状態
+    pub preview_drag: Option<PreviewDrag>,
+    /// プレビュー画面の中央吸着ガイド線（X軸中央 = 縦線, Y軸中央 = 横線）
+    pub preview_snap_x: bool,
+    pub preview_snap_y: bool,
     /// ファイルパス解決のキャッシュ（毎フレームの OS ディスク IO / exists 呼び出しを削減）
     pub resolved_paths: HashMap<String, Option<PathBuf>>,
     /// ユーザーが「フォルダから一括再リンク」で指定した追加の素材検索フォルダ
@@ -113,12 +120,64 @@ impl Default for EditorState {
             static_textures: HashMap::new(),
             stream_textures: HashMap::new(),
             psd_textures: HashMap::new(),
+            texture_seq: 0,
+            preview_drag: None,
+            preview_snap_x: false,
+            preview_snap_y: false,
             resolved_paths: HashMap::new(),
             extra_search_dirs: Vec::new(),
             ffmpeg_dl: FfmpegDownload::Idle,
             dirty: false,
             autosave: AutoSaveSettings::default(),
             auf_porter: AufPorterModalState::default(),
+        }
+    }
+}
+
+impl EditorState {
+    /// 現在の再生ヘッド位置に In 点（選択範囲・書き出し開始点）を設定します。
+    pub fn set_in_point(&mut self, frame: Option<Frame>) {
+        self.timeline.in_point = frame;
+        if let (Some(in_f), Some(out_f)) = (self.timeline.in_point, self.timeline.out_point) {
+            if in_f > out_f {
+                self.timeline.out_point = Some(in_f);
+            }
+        }
+        self.status = match self.timeline.in_point {
+            Some(f) => format!("In 点を設定しました ({}F)", f + 1),
+            None => "In 点を解除しました".into(),
+        };
+    }
+
+    /// 現在の再生ヘッド位置に Out 点（選択範囲・書き出し終了点）を設定します。
+    pub fn set_out_point(&mut self, frame: Option<Frame>) {
+        self.timeline.out_point = frame;
+        if let (Some(in_f), Some(out_f)) = (self.timeline.in_point, self.timeline.out_point) {
+            if out_f < in_f {
+                self.timeline.in_point = Some(out_f);
+            }
+        }
+        self.status = match self.timeline.out_point {
+            Some(f) => format!("Out 点を設定しました ({}F)", f + 1),
+            None => "Out 点を解除しました".into(),
+        };
+    }
+
+    /// 選択範囲（In点・Out点）を解除します。
+    pub fn clear_range(&mut self) {
+        self.timeline.in_point = None;
+        self.timeline.out_point = None;
+        self.status = "選択範囲 (In/Out) を解除しました".into();
+    }
+
+    /// 現在設定されている書き出し範囲を取得します（In/Out 点があればその区間、なければシーン全体）。
+    #[allow(dead_code)]
+    pub fn effective_export_range(&self) -> (Frame, Frame) {
+        match (self.timeline.in_point, self.timeline.out_point) {
+            (Some(i), Some(o)) => (i.min(o), i.max(o)),
+            (Some(i), None) => (i, self.last_frame()),
+            (None, Some(o)) => (0, o),
+            (None, None) => (0, self.last_frame()),
         }
     }
 }
