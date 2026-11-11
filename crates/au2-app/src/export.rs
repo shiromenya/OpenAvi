@@ -709,6 +709,12 @@ impl SceneSoftwareRenderer {
             }
         }
 
+        // シーン内で使われるカスタムフォントを事前登録し、新規登録時は空パスで定義を即時反映させる
+        if crate::fonts::prepare_fonts_for_scenes(&self.ctx, &st.scene, &st.scenes) {
+            let pre = self.ctx.run(egui::RawInput::default(), |_| {});
+            self.sync_textures_delta(&pre.textures_delta);
+        }
+
         let raw_input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(w as f32, h as f32))),
             ..Default::default()

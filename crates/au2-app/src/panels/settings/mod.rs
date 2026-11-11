@@ -654,17 +654,26 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                                             .selected_text(if s.is_empty() { "フォント選択" } else { s.as_str() })
                                             .width(130.0)
                                             .show_ui(ui, |ui| {
-                                                for f in &available_fonts {
+                                                for f in available_fonts {
                                                     if ui.selectable_label(s == f, f).clicked() {
                                                         *s = f.to_string();
                                                         font_changed = true;
-                                                        crate::fonts::ensure_font_family(ui.ctx(), s);
+                                                        if crate::fonts::ensure_font_family(ui.ctx(), s) {
+                                                            ui.ctx().request_repaint();
+                                                        }
                                                     }
                                                 }
                                             });
-                                        if ui.add(TextEdit::singleline(s).desired_width(90.0)).changed() {
+                                        let edit_resp = ui.add(TextEdit::singleline(s).desired_width(90.0));
+                                        if edit_resp.changed() {
                                             font_changed = true;
-                                            crate::fonts::ensure_font_family(ui.ctx(), s);
+                                        }
+                                        if (edit_resp.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                                            && !s.trim().is_empty()
+                                        {
+                                            if crate::fonts::ensure_font_family(ui.ctx(), s) {
+                                                ui.ctx().request_repaint();
+                                            }
                                         }
                                     });
                                     font_changed

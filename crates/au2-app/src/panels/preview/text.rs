@@ -237,8 +237,9 @@ pub(crate) fn layout_aviutl_text(
         idx += 1;
     }
 
-    // 末尾の空行が改行由来でない場合は維持しつつ、各文字のキャンバス幅を算出
+    // 末尾の空行が改行由来でない場合は維持しつつ、各文字のキャンバス幅を指定フォント実幅から算出
     let measure_font_sz = 32.0_f32;
+    let measure_family = crate::fonts::resolve_bound_font_family(ctx.painter.ctx(), src.text("font"));
     let char_canvas_width = |ch: char| -> f32 {
         if monospace {
             return raw_size;
@@ -251,10 +252,10 @@ pub(crate) fn layout_aviutl_text(
         }
         let g = ctx.painter.layout_no_wrap(
             ch.to_string(),
-            FontId::proportional(measure_font_sz),
+            FontId::new(measure_font_sz, measure_family.clone()),
             Color32::WHITE,
         );
-        let ratio = (g.size().x / measure_font_sz).clamp(0.3, 1.25);
+        let ratio = (g.size().x / measure_font_sz).clamp(0.25, 1.30);
         raw_size * ratio
     };
 

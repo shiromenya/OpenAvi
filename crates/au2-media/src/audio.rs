@@ -8,6 +8,7 @@
 //! 動画および音声ファイルから抽出された 44.1kHz 16-bit ステレオ PCM を
 //! サンプル単位で欠落・重複なく連続ストリーミング再生します。
 
+use std::collections::VecDeque;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -439,6 +440,13 @@ pub struct AudioTrackItem {
     pub volume: f32,
 }
 
+struct PeakHistorySample {
+    start_sec: f64,
+    end_sec: f64,
+    peak_l: f32,
+    peak_r: f32,
+}
+
 struct EngineSharedState {
     playing: bool,
     fps: f64,
@@ -448,6 +456,25 @@ struct EngineSharedState {
     seek_instant: Option<Instant>,
     peak_l: f32,
     peak_r: f32,
+    peak_history: VecDeque<PeakHistorySample>,
+}
+
+impl EngineSharedState {
+    fn record_chunk_peak(&mut self, cursor_sf: usize, chunk_frames: usize, pl: f32, pr: f32) {
+        self.peak_l = pl;
+        self.peak_r = pr;
+        let start_sec = cursor_sf as f64 / SAMPLE_RATE as f64;
+        let end_sec = (cursor_sf + chunk_frames) as f64 / SAMPLE_RATE as f64;
+        if self.peak_history.len() >= 32 {
+            self.peak_history.pop_front();
+        }
+        self.peak_history.push_back(PeakHistorySample {
+            start_sec,
+            end_sec,
+            peak_l: pl,
+            peak_r: pr,
+        });
+    }
 }
 
 #[cfg(windows)]
@@ -657,6 +684,7 @@ impl AudioEngine {
             seek_instant: None,
             peak_l: 0.0,
             peak_r: 0.0,
+            peak_history: VecDeque::with_capacity(32),
         }));
         let running = Arc::new(AtomicBool::new(true));
 
@@ -687,8 +715,12 @@ impl AudioEngine {
                 st.seek_generation = st.seek_generation.wrapping_add(1);
                 st.seek_start_sec = cur_sec;
                 st.seek_instant = Some(Instant::now());
+                st.peak_history.clear();
             } else if !playing && st.playing {
                 st.seek_instant = None;
+                st.peak_l = 0.0;
+                st.peak_r = 0.0;
+                st.peak_history.clear();
             } else if playing {
                 // 再生中に大きくシークまたはループバックした場合のみ再シーク（許容差を1.0秒に設定し、描画負荷によるリセット誤爆を防止）
                 if let Some(inst) = st.seek_instant {
@@ -697,11 +729,13 @@ impl AudioEngine {
                         st.seek_generation = st.seek_generation.wrapping_add(1);
                         st.seek_start_sec = cur_sec;
                         st.seek_instant = Some(Instant::now());
+                        st.peak_history.clear();
                     }
                 } else {
                     st.seek_generation = st.seek_generation.wrapping_add(1);
                     st.seek_start_sec = cur_sec;
                     st.seek_instant = Some(Instant::now());
+                    st.peak_history.clear();
                 }
             }
             st.playing = playing;
@@ -724,18 +758,35 @@ impl AudioEngine {
                 st.seek_instant = None;
                 st.peak_l = 0.0;
                 st.peak_r = 0.0;
+                st.peak_history.clear();
             }
         }
     }
 
-    /// 現在再生中のステレオ音声の正規化ピーク振幅 (L, R: 0.0..=1.0) を取得します。
+    /// 現在スピーカーから実際に鳴っている再生位置の正規化ピーク振幅 (L, R: 0.0..=1.0) を取得します。
     pub fn peak_levels(&self) -> (f32, f32) {
         if let Ok(st) = self.shared.lock() {
-            if st.playing {
-                (st.peak_l, st.peak_r)
-            } else {
-                (0.0, 0.0)
+            if !st.playing {
+                return (0.0, 0.0);
             }
+            if let Some(inst) = st.seek_instant {
+                let now_sec = st.seek_start_sec + inst.elapsed().as_secs_f64();
+                if let Some(hit) = st
+                    .peak_history
+                    .iter()
+                    .find(|p| now_sec >= p.start_sec && now_sec <= p.end_sec)
+                {
+                    return (hit.peak_l, hit.peak_r);
+                }
+                if let Some(nearest) = st.peak_history.iter().min_by(|a, b| {
+                    let da = ((a.start_sec + a.end_sec) * 0.5 - now_sec).abs();
+                    let db = ((b.start_sec + b.end_sec) * 0.5 - now_sec).abs();
+                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                }) {
+                    return (nearest.peak_l, nearest.peak_r);
+                }
+            }
+            (st.peak_l, st.peak_r)
         } else {
             (0.0, 0.0)
         }
@@ -859,8 +910,7 @@ impl AudioEngine {
             let target_buf = &mut raw_buffers[buf_idx];
             let (pl, pr) = mix_audio_chunk(&tracks, cursor_sample_frame, CHUNK_FRAMES, fps, target_buf);
             if let Ok(mut st) = shared.lock() {
-                st.peak_l = pl;
-                st.peak_r = pr;
+                st.record_chunk_peak(cursor_sample_frame, CHUNK_FRAMES, pl, pr);
             }
 
             let hdr = &mut hdrs[buf_idx];
@@ -1003,8 +1053,7 @@ impl AudioEngine {
                     let slice = std::slice::from_raw_parts_mut((*buf_ptr).mAudioData, buf_byte_size as usize);
                     let (pl, pr) = mix_audio_chunk(&tracks, cursor_sample_frame, CHUNK_FRAMES, fps, slice);
                     if let Ok(mut st) = shared.lock() {
-                        st.peak_l = pl;
-                        st.peak_r = pr;
+                        st.record_chunk_peak(cursor_sample_frame, CHUNK_FRAMES, pl, pr);
                     }
                     (*buf_ptr).mAudioDataByteSize = buf_byte_size;
                     in_queue[buf_idx].store(true, Ordering::Release);
@@ -1125,8 +1174,7 @@ impl AudioEngine {
 
             let (pl, pr) = mix_audio_chunk(&tracks, cursor_sample_frame, CHUNK_FRAMES, fps, &mut pcm_buf);
             if let Ok(mut st) = shared.lock() {
-                st.peak_l = pl;
-                st.peak_r = pr;
+                st.record_chunk_peak(cursor_sample_frame, CHUNK_FRAMES, pl, pr);
             }
             if let Some(child) = &mut sink {
                 if let Some(stdin) = &mut child.stdin {
@@ -1148,6 +1196,9 @@ impl AudioEngine {
 impl Drop for AudioEngine {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Relaxed);
+        if let Some(handle) = self._worker.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -1291,5 +1342,27 @@ mod tests {
         // 時間範囲サンプリング
         let amp = peaks.sample_range_amplitude(0.1, 0.2);
         assert!((amp - 0.5).abs() < 0.05);
+    }
+
+    #[test]
+    fn test_audio_engine_peak_history_and_clean_drop() {
+        let engine = AudioEngine::new();
+        // 停止中は常に (0.0, 0.0)
+        assert_eq!(engine.peak_levels(), (0.0, 0.0));
+
+        // 履歴から再生中時刻に対応するチャンクを正確に拾えること
+        engine.sync_playback(true, 0, 30.0);
+        if let Ok(mut st) = engine.shared.lock() {
+            st.record_chunk_peak(0, 22050, 0.2, 0.3); // 0.0..0.5s
+            st.record_chunk_peak(22050, 22050, 0.8, 0.9); // 0.5..1.0s
+        }
+        let (pl, pr) = engine.peak_levels();
+        assert!((pl - 0.2).abs() < 0.01);
+        assert!((pr - 0.3).abs() < 0.01);
+
+        engine.stop();
+        assert_eq!(engine.peak_levels(), (0.0, 0.0));
+        // Clean drop (worker join) がハングせず即完了すること
+        drop(engine);
     }
 }

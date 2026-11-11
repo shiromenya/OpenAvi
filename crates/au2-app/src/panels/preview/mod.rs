@@ -401,7 +401,7 @@ fn bottom_transport_bar(ui: &mut egui::Ui, st: &mut EditorState) {
         ui.ctx().request_repaint();
     }
 
-    let meter_w = 60.0_f32;
+    let meter_w = 68.0_f32;
     let s = &st.scene.settings;
     let res_text = format!("{}×{}  {:.0}fps", s.width, s.height, s.frame_rate.as_f64());
     let res_w = res_text.chars().count() as f32 * 7.0;
@@ -413,7 +413,7 @@ fn bottom_transport_bar(ui: &mut egui::Ui, st: &mut EditorState) {
             pos2(row2_rect.right() - res_w - meter_w - 16.0, center_y - 8.0),
             vec2(meter_w, 17.0),
         );
-        draw_audio_peak_meter(ui.painter(), meter_rect, peak_l, peak_r);
+        draw_audio_peak_meter(ui, meter_rect, peak_l, peak_r);
 
         ui.painter().text(
             pos2(row2_rect.right().floor(), center_y),
@@ -428,7 +428,7 @@ fn bottom_transport_bar(ui: &mut egui::Ui, st: &mut EditorState) {
             pos2(row2_rect.right() - meter_w, center_y - 8.0),
             vec2(meter_w, 17.0),
         );
-        draw_audio_peak_meter(ui.painter(), meter_rect, peak_l, peak_r);
+        draw_audio_peak_meter(ui, meter_rect, peak_l, peak_r);
     } else if right_available >= res_w + 16.0 {
         // 解像度のみ表示
         ui.painter().text(
@@ -441,13 +441,77 @@ fn bottom_transport_bar(ui: &mut egui::Ui, st: &mut EditorState) {
     }
 }
 
-/// リアルタイムオーディオピークメーター (L/R) の描画
-fn draw_audio_peak_meter(painter: &egui::Painter, rect: Rect, peak_l: f32, peak_r: f32) {
+#[derive(Clone, Copy, Default)]
+struct AudioMeterAnimState {
+    disp_l: f32,
+    disp_r: f32,
+    hold_l: f32,
+    hold_r: f32,
+    hold_timer_l: f32,
+    hold_timer_r: f32,
+    last_time: Option<f64>,
+}
+
+/// リニア振幅 (0.0..=1.0) を -60dB〜0dB 基準の正規化メーター位置 (0.0..=1.0) へ変換します。
+fn linear_to_db_meter(amp: f32) -> f32 {
+    if amp <= 0.001 {
+        return 0.0;
+    }
+    let db = 20.0 * amp.log10(); // -60.0 ..= 0.0
+    ((db + 60.0) / 60.0).clamp(0.0, 1.0)
+}
+
+fn step_meter_channel(target: f32, dt: f32, disp: &mut f32, hold: &mut f32, hold_timer: &mut f32) {
+    if target >= *disp {
+        *disp = target;
+    } else {
+        *disp = (*disp - dt * 1.4).max(target).max(0.0);
+    }
+    if target >= *hold {
+        *hold = target;
+        *hold_timer = 0.65;
+    } else if *hold_timer > 0.0 {
+        *hold_timer = (*hold_timer - dt).max(0.0);
+    } else {
+        *hold = (*hold - dt * 0.65).max(*disp).max(0.0);
+    }
+}
+
+/// リアルタイムオーディオピークメーター (L/R) の描画（対数 dB スケール＋スムージング＋ピークホールド）
+fn draw_audio_peak_meter(ui: &egui::Ui, rect: Rect, peak_l: f32, peak_r: f32) {
+    let target_l = linear_to_db_meter(peak_l.clamp(0.0, 1.0));
+    let target_r = linear_to_db_meter(peak_r.clamp(0.0, 1.0));
+    let now = ui.input(|i| i.time);
+
+    let state = ui.ctx().data_mut(|d| {
+        let st = d.get_temp_mut_or_insert_with(egui::Id::new("openavi_audio_meter_anim"), AudioMeterAnimState::default);
+        let dt = st
+            .last_time
+            .map(|prev| ((now - prev) as f32).clamp(0.0, 0.1))
+            .unwrap_or(1.0 / 60.0);
+        st.last_time = Some(now);
+
+        step_meter_channel(target_l, dt, &mut st.disp_l, &mut st.hold_l, &mut st.hold_timer_l);
+        step_meter_channel(target_r, dt, &mut st.disp_r, &mut st.hold_r, &mut st.hold_timer_r);
+        *st
+    });
+
+    if state.disp_l > 0.005 || state.disp_r > 0.005 || state.hold_l > 0.005 || state.hold_r > 0.005 {
+        ui.ctx().request_repaint();
+    }
+
+    let painter = ui.painter();
     let bar_h = 7.0_f32;
     let label_w = 10.0_f32;
     let bar_w = (rect.width() - label_w - 4.0).max(10.0);
 
-    for (idx, (label, val)) in [("L", peak_l), ("R", peak_r)].iter().enumerate() {
+    for (idx, (label, disp, hold)) in [
+        ("L", state.disp_l, state.hold_l),
+        ("R", state.disp_r, state.hold_r),
+    ]
+    .iter()
+    .enumerate()
+    {
         let y = rect.top() + idx as f32 * (bar_h + 3.0);
         painter.text(
             pos2(rect.left(), y + bar_h * 0.5),
@@ -460,17 +524,34 @@ fn draw_audio_peak_meter(painter: &egui::Painter, rect: Rect, peak_l: f32, peak_
         let meter_rect = Rect::from_min_size(pos2(rect.left() + label_w, y), vec2(bar_w, bar_h));
         painter.rect_filled(meter_rect, 1.0, Color32::from_rgb(18, 22, 28));
 
-        let fill_w = (bar_w * val.clamp(0.0, 1.0)).round();
-        if fill_w > 0.5 {
-            let fill_rect = Rect::from_min_size(meter_rect.min, vec2(fill_w, bar_h));
-            let color = if *val > 0.90 {
-                Color32::from_rgb(231, 76, 60) // 赤 (ピーク・クリッピング注意)
-            } else if *val > 0.70 {
-                Color32::from_rgb(241, 196, 15) // 黄 (-6dB 〜 -1dB)
+        // 緑 (-60..-15dB: 0.0..0.75) / 黄 (-15..-6dB: 0.75..0.90) / 赤 (-6..0dB: 0.90..1.0) のセグメント描画
+        let bands: &[(f32, f32, Color32)] = &[
+            (0.0, 0.75, Color32::from_rgb(46, 204, 113)),
+            (0.75, 0.90, Color32::from_rgb(241, 196, 15)),
+            (0.90, 1.00, Color32::from_rgb(231, 76, 60)),
+        ];
+        for &(b_start, b_end, col) in bands {
+            if *disp > b_start {
+                let seg_end = disp.min(b_end);
+                let x0 = meter_rect.left() + (bar_w * b_start).round();
+                let x1 = meter_rect.left() + (bar_w * seg_end).round();
+                if x1 > x0 {
+                    let seg_rect = Rect::from_min_max(pos2(x0, y), pos2(x1, y + bar_h));
+                    painter.rect_filled(seg_rect, 0.5, col);
+                }
+            }
+        }
+
+        // ピークホールドインジケーター (幅 2px)
+        if *hold > 0.02 {
+            let hx = (meter_rect.left() + (bar_w * hold.clamp(0.0, 1.0)).round() - 1.0)
+                .clamp(meter_rect.left(), meter_rect.right() - 2.0);
+            let h_col = if *hold > 0.90 {
+                Color32::from_rgb(255, 92, 92)
             } else {
-                Color32::from_rgb(46, 204, 113) // 緑 (適正レベル)
+                Color32::from_rgb(235, 240, 248)
             };
-            painter.rect_filled(fill_rect, 1.0, color);
+            painter.rect_filled(Rect::from_min_size(pos2(hx, y), vec2(2.0, bar_h)), 0.5, h_col);
         }
     }
 }
@@ -506,6 +587,33 @@ fn set_track_segment_values(t: &mut au2_core::Track, keys: &[au2_core::Frame], s
         if t.keyframes.len() > ri {
             t.keyframes[ri].value = val_b;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_audio_meter_db_conversion_and_decay() {
+        assert_eq!(linear_to_db_meter(0.0), 0.0);
+        assert_eq!(linear_to_db_meter(0.001), 0.0);
+        assert!((linear_to_db_meter(1.0) - 1.0).abs() < 1e-4);
+        // -6dB (約 0.501) は約 0.90 の位置
+        let db6 = linear_to_db_meter(0.5);
+        assert!(db6 > 0.88 && db6 < 0.92);
+
+        let mut disp = 0.0;
+        let mut hold = 0.0;
+        let mut timer = 0.0;
+        // アタック時は即時追従
+        step_meter_channel(0.95, 0.016, &mut disp, &mut hold, &mut timer);
+        assert!((disp - 0.95).abs() < 1e-5);
+        assert!((hold - 0.95).abs() < 1e-5);
+        // 入力が 0 になってもディケイ＆ホールドが効くこと
+        step_meter_channel(0.0, 0.1, &mut disp, &mut hold, &mut timer);
+        assert!(disp > 0.7 && disp < 0.95);
+        assert!((hold - 0.95).abs() < 1e-5);
     }
 }
 

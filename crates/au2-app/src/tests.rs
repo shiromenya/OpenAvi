@@ -906,3 +906,60 @@ fn test_texture_cache_lru_limits() {
     st.texture_seq = st.texture_seq.wrapping_add(1);
     assert_eq!(st.texture_seq, 1);
 }
+
+#[test]
+fn test_export_renders_multiple_custom_fonts_at_frame_zero() {
+    let mut st = state::EditorState::default();
+    let available: Vec<String> = crate::fonts::list_available_fonts()
+        .iter()
+        .filter(|n| n.as_str() != "LINE Seed JP")
+        .cloned()
+        .collect();
+
+    // 1. UI 側で事前にロードしても、書き出し側レンダラの別 Context を妨害しないことを確認
+    let ui_ctx = egui::Context::default();
+    crate::fonts::install_japanese_font(&ui_ctx);
+    for name in available.iter().take(2) {
+        let _ = crate::fonts::ensure_font_family(&ui_ctx, name);
+    }
+
+    // 2. シーンに複数フォント（実在2種＋未存在1種）のテキストオブジェクトを配置
+    let set_font_param = |obj: &mut au2_core::TimelineObject, font: &str| {
+        if let Some(au2_core::ParamValue::Text(s)) = obj.effects[0].param_mut("font") {
+            *s = font.to_string();
+        }
+    };
+    let mut obj1 = au2_core::TimelineObject::new_text(0, 30, "テスト1");
+    if let Some(f0) = available.first() {
+        set_font_param(&mut obj1, f0.as_str());
+    }
+    st.scene.layers[0].objects.push(obj1);
+
+    let mut obj2 = au2_core::TimelineObject::new_text(0, 30, "Test 2");
+    if let Some(f1) = available.get(1) {
+        set_font_param(&mut obj2, f1.as_str());
+    }
+    st.scene.layers[1].objects.push(obj2);
+
+    let mut obj_missing = au2_core::TimelineObject::new_text(0, 30, "Fallback");
+    set_font_param(&mut obj_missing, "NonExistentFontXYZ_9999");
+    st.scene.layers[2].objects.push(obj_missing);
+
+    // 3. 書き出し用ソフトウェアレンダラの 0 フレーム目で全指定フォントが確実にバインドされ描画されること
+    let mut renderer = export::SceneSoftwareRenderer::new();
+    let rgba = renderer.render_frame(&mut st, 0, 320, 180, 30.0);
+    assert_eq!(rgba.len(), 320 * 180 * 4);
+
+    let non_black_pixels = rgba
+        .chunks_exact(4)
+        .filter(|px| px[0] > 10 || px[1] > 10 || px[2] > 10)
+        .count();
+    assert!(non_black_pixels > 0, "テキストが第0フレームで実際に描画されていること");
+
+    for name in available.iter().take(2) {
+        assert!(
+            crate::fonts::is_font_family_bound_now(renderer.context(), name),
+            "書き出しコンテキストで第0フレームからフォント '{name}' がバインド維持されていること"
+        );
+    }
+}

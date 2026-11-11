@@ -51,6 +51,7 @@ pub struct OpenAviApp {
     pub(crate) export_modal: ExportModalState,
     pub(crate) last_title: String,
     pub(crate) logo_texture: Option<egui::TextureHandle>,
+    pub(crate) allow_close: bool,
 }
 
 pub use crate::dialogs::*;
@@ -94,6 +95,7 @@ impl OpenAviApp {
             export_modal: ExportModalState::default(),
             last_title: String::new(),
             logo_texture: None,
+            allow_close: false,
         }
     }
 
@@ -140,6 +142,7 @@ impl OpenAviApp {
             export_modal: ExportModalState::default(),
             last_title: String::new(),
             logo_texture: None,
+            allow_close: false,
         }
     }
 }
@@ -261,6 +264,12 @@ impl TabViewer for Viewer<'_> {
     }
 }
 
+impl Drop for OpenAviApp {
+    fn drop(&mut self) {
+        self.st.audio.stop();
+    }
+}
+
 impl eframe::App for OpenAviApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.update_ui(ctx);
@@ -275,12 +284,16 @@ impl OpenAviApp {
 
         // ウィンドウ閉じる要求 (Alt+F4 や [X] ボタン) を検知
         if ctx.input(|i| i.viewport().close_requested()) {
-            if self.st.dirty {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                self.handle_close_request();
+            if !self.allow_close {
+                if self.st.dirty {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    self.handle_close_request(ctx);
+                } else {
+                    self.st.audio.stop();
+                    self.allow_close = true;
+                }
             } else {
                 self.st.audio.stop();
-                std::process::exit(0);
             }
         }
 
@@ -532,12 +545,7 @@ impl OpenAviApp {
                     ui.separator();
                     if ui.button("終了").clicked() {
                         ui.close_menu();
-                        if self.st.dirty {
-                            self.handle_close_request();
-                        } else {
-                            self.st.audio.stop();
-                            std::process::exit(0);
-                        }
+                        self.handle_close_request(ctx);
                     }
                 });
                 ui.menu_button("編集", |ui| {
@@ -1002,10 +1010,12 @@ impl OpenAviApp {
     }
 
     /// アプリケーション終了要求時の保存確認処理（OS 標準のメッセージボックスを表示）。
-    fn handle_close_request(&mut self) {
+    fn handle_close_request(&mut self, ctx: &egui::Context) {
         if !self.st.dirty {
             self.st.audio.stop();
-            std::process::exit(0);
+            self.allow_close = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
         }
 
         let doc_name = self
@@ -1020,13 +1030,15 @@ impl OpenAviApp {
             ConfirmResult::Save => {
                 if self.st.save_project() {
                     self.st.audio.stop();
-                    std::process::exit(0);
+                    self.allow_close = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }
             ConfirmResult::DontSave => {
                 self.st.dirty = false;
                 self.st.audio.stop();
-                std::process::exit(0);
+                self.allow_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             ConfirmResult::Cancel => {
                 // 保存も終了もせず、編集作業を継続
