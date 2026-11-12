@@ -5,6 +5,7 @@ pub mod edit;
 pub mod playback;
 pub mod project;
 pub mod media;
+pub mod audio_sync;
 pub mod plugins;
 
 #[cfg(test)]
@@ -83,6 +84,8 @@ pub struct EditorState {
     pub preview_snap_y: bool,
     /// ファイルパス解決のキャッシュ（毎フレームの OS ディスク IO / exists 呼び出しを削減）
     pub resolved_paths: HashMap<String, Option<PathBuf>>,
+    /// 再生中の音声トラック構成キャッシュ（毎フレームの全オブジェクト走査・再構築を回避）
+    pub(crate) audio_sync_cache: Option<audio_sync::AudioSyncCache>,
     /// ユーザーが「フォルダから一括再リンク」で指定した追加の素材検索フォルダ
     pub extra_search_dirs: Vec<PathBuf>,
     /// FFmpeg（動画・音声デコーダー）のアプリ内ダウンロード状態
@@ -125,6 +128,7 @@ impl Default for EditorState {
             preview_snap_x: false,
             preview_snap_y: false,
             resolved_paths: HashMap::new(),
+            audio_sync_cache: None,
             extra_search_dirs: Vec::new(),
             ffmpeg_dl: FfmpegDownload::Idle,
             dirty: false,

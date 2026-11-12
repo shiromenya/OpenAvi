@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use au2_core::{EffectKind, Frame, ObjectId, TimelineObject, Track};
-use au2_media::{AudioTrackItem, MediaKind};
+use au2_media::MediaKind;
 use eframe::egui::{self, ColorImage, TextureOptions};
 
 use super::{EditorState, MissingMediaItem, SourceMediaItem};
@@ -375,88 +375,6 @@ impl EditorState {
             log::info!("未検出メディア {updated} 件を手元の実在ファイルに自動再リンクしました");
         }
         updated
-    }
-
-    /// 現在のタイムライン上の音声トラックをオーディオエンジンに同期供給します。
-    pub fn sync_audio_playback(&mut self) {
-        let fps = self.scene.settings.frame_rate.as_f64();
-        let cur_frame = self.frame;
-
-        // 1. 再生対象の候補を収集
-        struct Candidate {
-            is_audio_obj: bool,
-            file_str: String,
-            frame_start: Frame,
-            frame_end: Frame,
-            start_pos: f64,
-            volume: f32,
-        }
-        let mut candidates = Vec::new();
-
-        for layer in &self.scene.layers {
-            if !layer.visible {
-                continue;
-            }
-            for obj in &layer.objects {
-                let Some(src) = obj.source().filter(|s| s.enabled) else {
-                    continue;
-                };
-                if !matches!(src.kind, EffectKind::AudioFile | EffectKind::VideoFile) {
-                    continue;
-                }
-                let Some(file_str) = src.text("file").filter(|s| !s.trim().is_empty()) else {
-                    continue;
-                };
-                let rel = (cur_frame as i64 - obj.frame_start as i64).max(0) as u32;
-                let start_pos = if src.kind == EffectKind::AudioFile {
-                    src.eval("再生位置", rel, 0.0).max(0.0)
-                } else {
-                    ((src.eval("再生位置", rel, 1.0) - 1.0) / fps.max(1.0)).max(0.0)
-                };
-                let volume = (obj
-                    .effect(&EffectKind::StandardPlayback)
-                    .map(|e| e.eval("音量", rel, 100.0))
-                    .unwrap_or(100.0)
-                    / 100.0) as f32;
-
-                candidates.push(Candidate {
-                    is_audio_obj: src.kind == EffectKind::AudioFile,
-                    file_str: file_str.to_string(),
-                    frame_start: obj.frame_start,
-                    frame_end: obj.frame_end,
-                    start_pos,
-                    volume,
-                });
-            }
-        }
-
-        let mut active_tracks = Vec::new();
-        let mut registered_keys: std::collections::HashSet<(PathBuf, Frame)> = std::collections::HashSet::new();
-
-        // AudioFile オブジェクトを優先登録し、ペアの VideoFile との2重再生を防止
-        candidates.sort_by_key(|c| !c.is_audio_obj);
-
-        for c in candidates {
-            let Some(path) = self.resolve_cached_path(&c.file_str) else {
-                continue;
-            };
-            if !registered_keys.insert((path.clone(), c.frame_start)) {
-                continue;
-            }
-            let Some(pcm) = self.media.get_audio_pcm(&path) else {
-                continue;
-            };
-            active_tracks.push(AudioTrackItem {
-                audio: pcm,
-                start_frame: c.frame_start,
-                end_frame: c.frame_end,
-                offset_sec: c.start_pos,
-                volume: c.volume,
-            });
-        }
-
-        self.audio.set_active_tracks(active_tracks);
-        self.audio.sync_playback(self.playing, self.frame, fps);
     }
 
     /// ソースパネルにメディアファイルを登録します（重複する場合は既存インデックスを返す）。
@@ -1079,6 +997,7 @@ impl EditorState {
         }
 
         // キャッシュクリア＆再キャッシュ
+        self.invalidate_audio_sync_cache();
         self.resolved_paths.clear();
         self.resolved_paths.insert(new_path_str.clone(), Some(new_path.to_path_buf()));
         if !old_path.is_empty() {
@@ -1102,6 +1021,7 @@ impl EditorState {
             self.extra_search_dirs.insert(0, folder);
         }
         // 未検出として記憶した結果を破棄して再探索
+        self.invalidate_audio_sync_cache();
         self.resolved_paths.clear();
         let relinked = self.auto_relink_missing_media();
         self.sync_sources_from_scene();
@@ -1176,6 +1096,7 @@ impl EditorState {
 
     /// メディアキャッシュを破棄し、ソース一覧とオーディオ再生キューを最新状態に再同期します。
     pub fn invalidate_media_cache(&mut self) {
+        self.invalidate_audio_sync_cache();
         self.resolved_paths.clear();
         self.sync_sources_from_scene();
         self.sync_audio_playback();

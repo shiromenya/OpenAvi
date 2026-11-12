@@ -55,6 +55,7 @@ impl EditorState {
             Some(Ok(dir)) => {
                 self.ffmpeg_dl = FfmpegDownload::Idle;
                 if self.media.reload_ffmpeg() {
+                    self.invalidate_audio_sync_cache();
                     self.static_textures.clear();
                     self.stream_textures.clear();
                     self.status = format!("FFmpeg を導入しました ({})。動画・音声が再生できます", dir.display());

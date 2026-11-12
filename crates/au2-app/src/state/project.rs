@@ -95,6 +95,7 @@ impl EditorState {
             preview_snap_x: false,
             preview_snap_y: false,
             resolved_paths: HashMap::new(),
+            audio_sync_cache: None,
             extra_search_dirs: Vec::new(),
             ffmpeg_dl: FfmpegDownload::Idle,
             dirty: false,
