@@ -63,7 +63,7 @@ impl OpenAviApp {
         let mut close_modal = false;
         let mut do_create = false;
 
-        egui::Window::new("📄 新規プロジェクトの作成")
+        egui::Window::new("新規プロジェクトの作成")
             .id(egui::Id::new("new_project_modal_window"))
             .frame(egui::Frame::window(&ctx.style()).fill(crate::theme::surface()))
             .collapsible(false)
@@ -74,12 +74,9 @@ impl OpenAviApp {
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing = vec2(10.0, 10.0);
 
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("🎬").size(28.0).color(crate::theme::accent_text()));
-                    ui.vertical(|ui| {
-                        ui.strong(RichText::new("新規プロジェクトの設定").size(15.0));
-                        ui.weak("プロジェクト名とファイル形式、および自動保存を設定して編集を開始します。");
-                    });
+                ui.vertical(|ui| {
+                    ui.strong(RichText::new("新規プロジェクトの設定").size(15.0));
+                    ui.weak("プロジェクト名とファイル形式、および自動保存を設定して編集を開始します。");
                 });
 
                 ui.separator();
@@ -114,7 +111,7 @@ impl OpenAviApp {
                                         dir_str
                                     }).on_hover_text(self.new_project_modal.dir.display().to_string());
 
-                                    if ui.button("📁 選択...").clicked() {
+                                    if ui.button("選択...").clicked() {
                                         if let Some(folder) = rfd::FileDialog::new()
                                             .set_directory(&self.new_project_modal.dir)
                                             .set_title("保存先フォルダーを選択")
@@ -246,7 +243,7 @@ impl OpenAviApp {
                     .inner_margin(egui::Margin::same(10.0))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.checkbox(&mut self.new_project_modal.autosave_enabled, RichText::new("💾 編集時の自動保存を有効にする").strong());
+                            ui.checkbox(&mut self.new_project_modal.autosave_enabled, RichText::new("編集時の自動保存を有効にする").strong());
                             if self.new_project_modal.autosave_enabled {
                                 ui.label(RichText::new("推奨").color(crate::theme::ok_text()).size(11.0));
                             }
@@ -266,7 +263,7 @@ impl OpenAviApp {
                 // 下部アクションボタン
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let create_btn = egui::Button::new(
-                        RichText::new("🚀 作成して編集を開始")
+                        RichText::new("作成して編集を開始")
                             .color(Color32::WHITE)
                             .strong()
                             .size(13.5),

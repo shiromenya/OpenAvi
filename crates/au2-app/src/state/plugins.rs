@@ -49,7 +49,7 @@ impl EditorState {
         self.auf_porter.is_open = true;
     }
 
-    /// 指定した `.auf` / `.auf2` プラグインをクロスプラットフォーム `.anm` スクリプトに変換して `plugins/` に登録します。
+    /// 指定した `.auf` / `.auf2` プラグインから `.anm` 代替スクリプト雛形を生成して `plugins/` に登録します。
     pub fn convert_auf_to_anm(&mut self, plugin_idx: usize) {
         match self.plugins.convert_plugin_to_anm(plugin_idx) {
             Ok(out_path) => {
@@ -58,26 +58,26 @@ impl EditorState {
                     .map(|f| f.to_string_lossy().into_owned())
                     .unwrap_or_default();
                 self.status = format!(
-                    "✨ クロスプラットフォーム `.anm` スクリプト `{fname}` を自動生成して登録しました (Windows / Mac / Linux 全OS対応)"
+                    "パラメータ定義から代替 `.anm` スクリプト雛形 `{fname}` を生成して登録しました"
                 );
             }
             Err(e) => {
-                self.status = format!("⚠ .anm への変換に失敗しました: {e}");
+                self.status = format!("⚠ .anm 雛形の生成に失敗しました: {e}");
             }
         }
     }
 
-    /// 登録済みの全 `.auf` / `.auf2` プラグインを一括で `.anm` スクリプトに変換します。
+    /// 登録済みの全 `.auf` / `.auf2` プラグインから一括で `.anm` 代替スクリプト雛形を生成します。
     pub fn convert_all_auf_to_anm(&mut self) {
         match self.plugins.convert_all_auf_to_anm() {
             Ok(paths) => {
                 self.status = format!(
-                    "✨ 全 {} 件の .auf / .auf2 プラグインをクロスプラットフォーム .anm スクリプトへ一括変換しました",
+                    "{} 件の .auf / .auf2 から代替 .anm スクリプト雛形を一括生成しました",
                     paths.len()
                 );
             }
             Err(e) => {
-                self.status = format!("⚠ 一括変換に失敗しました: {e}");
+                self.status = format!("⚠ 一括生成に失敗しました: {e}");
             }
         }
     }

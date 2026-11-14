@@ -58,10 +58,22 @@ pub(crate) fn fit_timeline_to_view(st: &mut EditorState, view_w: f32) {
 
 pub(crate) fn category_color(c: ObjectCategory) -> Color32 {
     match c {
-        ObjectCategory::Media => Color32::from_rgb(72, 112, 196),
-        ObjectCategory::Audio => Color32::from_rgb(180, 70, 80),
-        ObjectCategory::Filter => Color32::from_rgb(70, 150, 90),
-        ObjectCategory::Control => Color32::from_rgb(190, 150, 60),
+        ObjectCategory::Media => Color32::from_rgb(38, 114, 120),
+        ObjectCategory::Audio => Color32::from_rgb(148, 66, 76),
+        ObjectCategory::Filter => Color32::from_rgb(56, 118, 82),
+        ObjectCategory::Control => Color32::from_rgb(148, 110, 48),
+    }
+}
+
+/// オブジェクト種別に応じた落ち着いたプロ編集ソフト風クリップ色を返す。
+pub(crate) fn clip_color(obj: &TimelineObject) -> Color32 {
+    match obj.source().map(|s| &s.kind) {
+        Some(EffectKind::VideoFile) => Color32::from_rgb(30, 116, 122),
+        Some(EffectKind::ImageFile) => Color32::from_rgb(52, 96, 134),
+        Some(EffectKind::Text) => Color32::from_rgb(92, 76, 128),
+        Some(EffectKind::Shape) => Color32::from_rgb(54, 90, 108),
+        Some(EffectKind::AudioFile) => Color32::from_rgb(148, 66, 76),
+        _ => category_color(obj.category()),
     }
 }
 
@@ -86,30 +98,30 @@ pub(crate) fn is_render_or_playback(kind: &EffectKind) -> bool {
 /// クリップ種別に応じたアイコン文字を返す。
 pub(crate) fn clip_kind_icon(obj: &TimelineObject) -> &'static str {
     if obj.camera_target {
-        return "🎥";
+        return "◎";
     }
     match obj.source().map(|s| &s.kind) {
-        Some(EffectKind::VideoFile) => "🎬",
+        Some(EffectKind::VideoFile) => "▶",
         Some(EffectKind::ImageFile) => {
             if obj
                 .source()
                 .and_then(effect_file_path)
                 .is_some_and(|p| p.to_ascii_lowercase().ends_with(".psd") || p.to_ascii_lowercase().ends_with(".psb"))
             {
-                "🎨"
+                "◈"
             } else {
-                "🖼"
+                "▣"
             }
         }
-        Some(EffectKind::AudioFile) => "🔊",
-        Some(EffectKind::Text) => "🔤",
-        Some(EffectKind::Shape) => "🔷",
-        Some(EffectKind::FrameBuffer) => "🪞",
-        Some(EffectKind::GroupControl) => "📁",
-        Some(EffectKind::Camera) => "🎥",
-        Some(EffectKind::TimeControl) => "⏳",
-        Some(EffectKind::AudioWaveform) => "📊",
-        _ => "📦",
+        Some(EffectKind::AudioFile) => "♪",
+        Some(EffectKind::Text) => "T",
+        Some(EffectKind::Shape) => "◆",
+        Some(EffectKind::FrameBuffer) => "⧉",
+        Some(EffectKind::GroupControl) => "▤",
+        Some(EffectKind::Camera) => "◎",
+        Some(EffectKind::TimeControl) => "◷",
+        Some(EffectKind::AudioWaveform) => "∿",
+        _ => "▫",
     }
 }
 

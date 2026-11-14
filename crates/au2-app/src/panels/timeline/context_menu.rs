@@ -19,17 +19,17 @@ pub(crate) fn context_menu_ui(ui: &mut egui::Ui, st: &mut EditorState) {
 
     // 選択範囲 (In / Out 点) の設定
     ui.horizontal(|ui| {
-        if ui.button("📍 In 点に設定 (I)").clicked() {
+        if ui.button("In 点に設定 (I)").clicked() {
             st.set_in_point(Some(start));
             ui.close_menu();
         }
-        if ui.button("📍 Out 点に設定 (O)").clicked() {
+        if ui.button("Out 点に設定 (O)").clicked() {
             st.set_out_point(Some(start));
             ui.close_menu();
         }
     });
     if st.timeline.in_point.is_some() || st.timeline.out_point.is_some() {
-        if ui.button("❌ 選択範囲 (In/Out) を解除").clicked() {
+        if ui.button("選択範囲 (In/Out) を解除").clicked() {
             st.clear_range();
             ui.close_menu();
         }
@@ -38,7 +38,7 @@ pub(crate) fn context_menu_ui(ui: &mut egui::Ui, st: &mut EditorState) {
 
     // クリップボードにアイテムがあれば貼り付けを表示
     if !st.clipboard.is_empty() {
-        if ui.button(format!("📋 ここに貼り付け ({} 個のオブジェクト)", st.clipboard.len())).clicked() {
+        if ui.button(format!("ここに貼り付け ({} 個のオブジェクト)", st.clipboard.len())).clicked() {
             st.paste_clipboard(Some(target.layer), Some(start));
             ui.close_menu();
         }
@@ -65,23 +65,23 @@ pub(crate) fn context_menu_ui(ui: &mut egui::Ui, st: &mut EditorState) {
                     .color(Color32::from_rgb(255, 100, 100))
                     .strong()
             } else {
-                egui::RichText::new("🎵 メディアファイルを再割り当て...")
+                egui::RichText::new("メディアファイルを再割り当て...")
             };
             if ui.button(label).clicked() {
                 ui.close_menu();
                 st.relink_media_dialog(Some(obj_id), &old_file, is_audio);
             }
             if is_psd && !is_missing {
-                ui.menu_button("🎨 PSDレイヤーごとにメディアを分解", |ui| {
+                ui.menu_button("PSDレイヤーごとにメディアを分解", |ui| {
                     if ui
-                        .button("📁 パーツ(フォルダ)単位でタイムラインへ分解配置")
+                        .button("パーツ(フォルダ)単位でタイムラインへ分解配置")
                         .clicked()
                     {
                         ui.close_menu();
                         st.decompose_psd_object(obj_id, true, true);
                     }
                     if ui
-                        .button("📑 表示レイヤーを1枚ずつタイムラインへ分解配置")
+                        .button("表示レイヤーを1枚ずつタイムラインへ分解配置")
                         .clicked()
                     {
                         ui.close_menu();
@@ -89,14 +89,14 @@ pub(crate) fn context_menu_ui(ui: &mut egui::Ui, st: &mut EditorState) {
                     }
                     ui.separator();
                     if ui
-                        .button("💾 パーツ(フォルダ)単位で透過PNG一括書き出し...")
+                        .button("パーツ(フォルダ)単位で透過PNG一括書き出し...")
                         .clicked()
                     {
                         ui.close_menu();
                         st.export_psd_layers_png_dialog(obj_id, true, false);
                     }
                     if ui
-                        .button("💾 表示レイヤーを1枚ずつ透過PNG一括書き出し...")
+                        .button("表示レイヤーを1枚ずつ透過PNG一括書き出し...")
                         .clicked()
                     {
                         ui.close_menu();
@@ -107,14 +107,14 @@ pub(crate) fn context_menu_ui(ui: &mut egui::Ui, st: &mut EditorState) {
             ui.separator();
         }
 
-        if ui.button("📋 コピー (Ctrl+C)").clicked() {
+        if ui.button("コピー (Ctrl+C)").clicked() {
             if !st.selected_objects.contains(&obj_id) {
                 st.select_single(obj_id);
             }
             st.copy_selected();
             ui.close_menu();
         }
-        if ui.button("📄 複製 (Ctrl+D)").clicked() {
+        if ui.button("複製 (Ctrl+D)").clicked() {
             if !st.selected_objects.contains(&obj_id) {
                 st.select_single(obj_id);
             }
@@ -126,7 +126,7 @@ pub(crate) fn context_menu_ui(ui: &mut egui::Ui, st: &mut EditorState) {
 
         if let Some((_, obj)) = st.scene.find_mut(obj_id) {
             let mut clip = obj.clipping;
-            if ui.checkbox(&mut clip, "📎 上のオブジェクトでクリッピング").changed() {
+            if ui.checkbox(&mut clip, "上のオブジェクトでクリッピング").changed() {
                 obj.clipping = clip;
                 st.dirty = true;
                 st.status = if clip {
@@ -149,7 +149,7 @@ pub(crate) fn context_menu_ui(ui: &mut egui::Ui, st: &mut EditorState) {
             }
             ui.close_menu();
         }
-        if ui.button("✂ クリック位置で分割").clicked() {
+        if ui.button("クリック位置で分割").clicked() {
             st.push_undo("オブジェクト分割");
             let split_result = st
                 .scene
@@ -166,14 +166,14 @@ pub(crate) fn context_menu_ui(ui: &mut egui::Ui, st: &mut EditorState) {
             }
             ui.close_menu();
         }
-        if ui.button("✂ 再生ヘッド位置で分割 (Ctrl+K)").clicked() {
+        if ui.button("再生ヘッド位置で分割 (Ctrl+K)").clicked() {
             if !st.selected_objects.contains(&obj_id) {
                 st.select_single(obj_id);
             }
             st.split_at_playhead();
             ui.close_menu();
         }
-        if ui.button("🗑 削除 (Delete)").clicked() {
+        if ui.button("削除 (Delete)").clicked() {
             if st.selected_objects.contains(&obj_id) && st.selected_objects.len() > 1 {
                 st.delete_selected_objects();
             } else {
@@ -222,7 +222,7 @@ pub(crate) fn context_menu_ui(ui: &mut egui::Ui, st: &mut EditorState) {
                 st.add_object_at(target.layer, obj);
             }
         }
-        if ui.button("🎨 PSDファイル (立ち絵・レイヤー切替)...").clicked() {
+        if ui.button("PSDファイル (立ち絵・レイヤー切替)...").clicked() {
             ui.close_menu();
             if let Some(path) = rfd::FileDialog::new()
                 .add_filter("Photoshop PSD / PSB ファイル (*.psd, *.psb)", &["psd", "psb"])
@@ -406,7 +406,7 @@ pub(crate) fn context_menu_ui(ui: &mut egui::Ui, st: &mut EditorState) {
         });
     });
 
-    if ui.button("📂 メディアファイルを選択して配置...").clicked() {
+    if ui.button("メディアファイルを選択して配置...").clicked() {
         ui.close_menu();
         st.add_media_dialog(target.layer, start);
     }
@@ -417,9 +417,9 @@ pub(crate) fn context_menu_ui(ui: &mut egui::Ui, st: &mut EditorState) {
     let layer_state = st.scene.layers.get(target.layer).map(|l| (l.visible, l.locked));
     if let Some((cur_vis, cur_lock)) = layer_state {
         let vis_label = if cur_vis {
-            "👁 レイヤーを非表示にする"
+            "レイヤーを非表示にする"
         } else {
-            "👁 レイヤーを表示する"
+            "レイヤーを表示する"
         };
         if ui.button(vis_label).clicked() {
             st.push_undo(if cur_vis { format!("Layer {} を非表示", target.layer + 1) } else { format!("Layer {} を表示", target.layer + 1) });
@@ -430,9 +430,9 @@ pub(crate) fn context_menu_ui(ui: &mut egui::Ui, st: &mut EditorState) {
             ui.close_menu();
         }
         let lock_label = if cur_lock {
-            "🔓 レイヤーのロックを解除"
+            "レイヤーのロックを解除"
         } else {
-            "🔒 レイヤーをロックする"
+            "レイヤーをロックする"
         };
         if ui.button(lock_label).clicked() {
             st.push_undo(if cur_lock { format!("Layer {} のロックを解除", target.layer + 1) } else { format!("Layer {} をロック", target.layer + 1) });
@@ -446,7 +446,7 @@ pub(crate) fn context_menu_ui(ui: &mut egui::Ui, st: &mut EditorState) {
 
     ui.separator();
     if ui
-        .checkbox(&mut st.timeline.show_clip_previews, "🖼 クリップ内プレビューを表示")
+        .checkbox(&mut st.timeline.show_clip_previews, "クリップ内プレビューを表示")
         .changed()
     {
         ui.close_menu();

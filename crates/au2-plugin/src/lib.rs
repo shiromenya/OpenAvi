@@ -1,9 +1,11 @@
 //! # au2-plugin
 //!
-//! OpenAvi における初代 AviUtl (32-bit) および AviUtl2 (64-bit) の
-//! プラグイン（`.auf`, `.aui`, `.auo`, `.auc`, `.auf2` 等）および
-//! 拡張編集スクリプト（`.anm`, `.obj`, `.cam`, `.scn`, `.tra`, `.anm2`, `.obj2` 等）の
-//! 検出・解析・Lua 実行・PE ブリッジ管理クレート。
+//! OpenAvi における拡張編集スクリプト（`.anm`, `.obj`, `.cam`, `.scn`, `.tra`, `.anm2`, `.obj2` 等）の
+//! パース・組み込み Lua サブセット実行、およびネイティブプラグイン DLL（`.auf`, `.aui`, `.auo`, `.auc`, `.auf2` 等）の
+//! PE テーブル静的パラメータ定義抽出・移植テンプレート生成を行うクレート。
+//!
+//! ※ ネイティブ DLL（`.auf` 等）については `LoadLibrary` / `libloading` による動的ロードや機械語コード（`func_proc`・独自 HWND UI）の実行は行わず、
+//! PE セクション内の `FILTER_DLL` / `FILTER_PLUGIN_TABLE` 構造体からトラックバー・チェックボックス等のパラメータ定義を静的に読み取ります。
 
 pub mod auf_converter;
 pub mod lua_vm;
@@ -21,7 +23,7 @@ use std::path::{Path, PathBuf};
 use au2_core::{Effect, Frame, TimelineObject, Track};
 pub use auf_converter::{
     generate_anm_script, generate_json_spec, generate_rust_effect_code, generate_wgsl_shader,
-    synthesize_entry_lua_body, AufPortingReport, InferredAufCategory, PortingDifficulty,
+    synthesize_entry_lua_body, AufPortingReport, PortingDifficulty,
 };
 pub use lua_vm::{execute_lua_script, LuaDrawCall, LuaFilterCall, LuaLoadedPrimitive, LuaObjState, LuaPolyCall, LuaVal};
 pub use pe_loader::{
@@ -97,17 +99,14 @@ impl PluginKind {
         )
     }
 
-    /// タイムライン上の既存オブジェクトにフィルタ効果として追加可能かどうか。
+    /// タイムライン上の既存オブジェクトにフィルタ効果として追加可能かどうか（実行可能なスクリプトのみ）。
     pub fn can_apply_to_object(self) -> bool {
-        matches!(
-            self,
-            Self::AnmScript | Self::CamScript | Self::ScnScript | Self::FilterDll
-        )
+        matches!(self, Self::AnmScript | Self::CamScript | Self::ScnScript)
     }
 
-    /// タイムライン上に単体オブジェクトとして直接配置可能かどうか。
+    /// タイムライン上に単体オブジェクトとして直接配置可能かどうか（実行可能なスクリプトのみ）。
     pub fn can_place_as_object(self) -> bool {
-        matches!(self, Self::ObjScript | Self::ScnScript | Self::FilterDll)
+        matches!(self, Self::ObjScript | Self::ScnScript)
     }
 }
 
@@ -147,23 +146,23 @@ impl BinaryArch {
 /// 現在の動作サポート状態。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SupportStatus {
-    /// パラメータ解析・Lua/ブリッジ実行・タイムライン適用・プレビュー反映に完全対応
+    /// スクリプトのパラメータ解析および組み込み Lua サブセット実行に対応
     Supported,
-    /// パラメータ展開対応
+    /// スクリプトのパラメータ展開および一部 Lua サブセット実行に対応
     PartialScript,
-    /// 32bit プラグインブリッジ動作対応
+    /// 32-bit ネイティブ DLL（PE 構造体からパラメータ定義のみ静的抽出・機械語コードは未実行）
     RequiresBridge32,
-    /// 64bit ネイティブホスト動作対応
+    /// 64-bit ネイティブ DLL（PE 構造体からパラメータ定義のみ静的抽出・機械語コードは未実行）
     PendingNativeHost,
 }
 
 impl SupportStatus {
     pub fn summary(self) -> &'static str {
         match self {
-            Self::Supported => "動作対応 (Lua/PEブリッジ・プレビュー反映)",
-            Self::PartialScript => "動作対応 (Luaスクリプト実行)",
-            Self::RequiresBridge32 => "動作対応 (32bit PEブリッジ展開済)",
-            Self::PendingNativeHost => "動作対応 (64bit ネイティブ展開済)",
+            Self::Supported => "スクリプト対応 (組み込みLuaサブセット)",
+            Self::PartialScript => "一部対応 (組み込みLuaサブセット)",
+            Self::RequiresBridge32 => "定義のみ読込 (32-bit DLL / ネイティブ処理は未実行)",
+            Self::PendingNativeHost => "定義のみ読込 (64-bit DLL / ネイティブ処理は未実行)",
         }
     }
 }
@@ -578,7 +577,7 @@ pub fn inspect_plugin_file(path: &Path) -> Option<PluginDescriptor> {
         let text = decode_auto(&bytes);
         let entries = parse_script_entries(&stem, &text);
         let description = format!(
-            "{} ({} セクション / 初代AviUtl & AviUtl2 Luaエンジン対応)",
+            "{} ({} セクション / 組み込みLuaサブセット対応)",
             kind.label(),
             entries.len()
         );
@@ -596,12 +595,17 @@ pub fn inspect_plugin_file(path: &Path) -> Option<PluginDescriptor> {
         })
     } else {
         let pe_info = inspect_native_pe_plugin(&stem, kind, &bytes);
+        let status = match pe_info.arch {
+            BinaryArch::X86_32 => SupportStatus::RequiresBridge32,
+            BinaryArch::X86_64 => SupportStatus::PendingNativeHost,
+            _ => SupportStatus::PendingNativeHost,
+        };
         Some(PluginDescriptor {
             file_name,
             path: path.to_path_buf(),
             kind,
             arch: pe_info.arch,
-            status: SupportStatus::Supported,
+            status,
             description: pe_info.description,
             exports: pe_info.exports,
             imports: pe_info.imports,
@@ -660,18 +664,19 @@ impl PluginRegistry {
             let _ = fs::write(&cam_path, DEFAULT_CAM_SCRIPT);
         }
 
-        // 5. サンプル 32-bit .auf / 64-bit .auf / AviUtl2 .auf2 フィルタプラグイン
-        let auf32_path = self.plugin_dir.join("sample_glow32.auf");
-        if !auf32_path.exists() {
-            let _ = fs::write(&auf32_path, build_sample_32bit_auf_bytes());
-        }
-        let auf64_path = self.plugin_dir.join("sample_chroma64.auf");
-        if !auf64_path.exists() {
-            let _ = fs::write(&auf64_path, build_sample_64bit_auf_bytes());
-        }
-        let auf2_path = self.plugin_dir.join("sample_neon.auf2");
-        if !auf2_path.exists() {
-            let _ = fs::write(&auf2_path, build_sample_aviutl2_auf2_bytes());
+        // 旧バージョンのテスト用ダミー .auf バイナリが plugins/ に残っている場合は自動削除
+        for legacy_dummy in [
+            "sample_glow32.auf",
+            "sample_chroma64.auf",
+            "sample_neon.auf2",
+            "sample_glow32_ported.anm",
+            "sample_chroma64_ported.anm",
+            "sample_neon_ported.anm",
+        ] {
+            let p = self.plugin_dir.join(legacy_dummy);
+            if p.exists() {
+                let _ = fs::remove_file(p);
+            }
         }
     }
 
@@ -2437,21 +2442,32 @@ end)
 
     #[test]
     fn test_auf_auto_analysis_and_cross_platform_conversion() {
-        for (name, bytes) in [
-            ("sample_glow32.auf", build_sample_32bit_auf_bytes()),
-            ("sample_chroma64.auf", build_sample_64bit_auf_bytes()),
-            ("sample_neon.auf2", build_sample_aviutl2_auf2_bytes()),
+        for (name, bytes, expected_status) in [
+            ("sample_glow32.auf", build_sample_32bit_auf_bytes(), SupportStatus::RequiresBridge32),
+            ("sample_chroma64.auf", build_sample_64bit_auf_bytes(), SupportStatus::PendingNativeHost),
+            ("sample_neon.auf2", build_sample_aviutl2_auf2_bytes(), SupportStatus::PendingNativeHost),
         ] {
             let stem = name.split('.').next().unwrap();
             let pe_info = inspect_native_pe_plugin(stem, PluginKind::FilterDll, &bytes);
             assert!(!pe_info.entries.is_empty(), "{name} should have extracted entries");
+            assert!(
+                pe_info.entries[0].compiled_ast.is_empty(),
+                "{name} should only extract static parameter definitions without silently injecting Lua AST"
+            );
+
+            let status = match pe_info.arch {
+                BinaryArch::X86_32 => SupportStatus::RequiresBridge32,
+                BinaryArch::X86_64 => SupportStatus::PendingNativeHost,
+                _ => SupportStatus::PendingNativeHost,
+            };
+            assert_eq!(status, expected_status);
 
             let desc = PluginDescriptor {
                 file_name: name.to_string(),
                 path: PathBuf::from(name),
                 kind: PluginKind::FilterDll,
                 arch: pe_info.arch,
-                status: SupportStatus::Supported,
+                status,
                 description: pe_info.description,
                 exports: pe_info.exports,
                 imports: pe_info.imports,
@@ -2464,7 +2480,7 @@ end)
             assert_eq!(report.difficulty, PortingDifficulty::AutoCompatible);
             assert!(report.total_tracks >= 1);
 
-            // 2. .anm スクリプト自動生成と再パース・実行検証
+            // 2. .anm ボイラープレート生成と再パース検証（名称推測による勝手なエフェクト注入が無いこと）
             let anm_code = generate_anm_script(&desc);
             let parsed = parse_script_entries(stem, &anm_code);
             assert_eq!(parsed.len(), desc.entries.len());
@@ -2474,8 +2490,8 @@ end)
             let mut lua_st = LuaObjState::default();
             lua_vm::execute_compiled_script(&parsed[0].compiled_ast, &mut lua_st);
             assert!(
-                !lua_st.filter_calls.is_empty(),
-                "generated .anm for {name} should emit filter_calls"
+                lua_st.filter_calls.is_empty(),
+                "generated .anm boilerplate for {name} should not inject fake filter_calls"
             );
 
             // 3. WGSL / Rust / JSON 生成検証

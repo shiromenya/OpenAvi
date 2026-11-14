@@ -232,9 +232,9 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
             st.timeline.drag = if btn_snap.contains(p) {
                 st.timeline.snap_enabled = !st.timeline.snap_enabled;
                 st.status = if st.timeline.snap_enabled {
-                    "🧲 スナップ（吸着）を有効にしました".into()
+                    "スナップ（吸着）を有効にしました".into()
                 } else {
-                    "🧲 スナップ（吸着）を無効にしました".into()
+                    "スナップ（吸着）を無効にしました".into()
                 };
                 None
             } else if btn_fit.contains(p) {
@@ -573,9 +573,9 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
             if btn_snap.contains(p) {
                 st.timeline.snap_enabled = !st.timeline.snap_enabled;
                 st.status = if st.timeline.snap_enabled {
-                    "🧲 スナップ（吸着）を有効にしました".into()
+                    "スナップ（吸着）を有効にしました".into()
                 } else {
-                    "🧲 スナップ（吸着）を無効にしました".into()
+                    "スナップ（吸着）を無効にしました".into()
                 };
             } else if corner.contains(p) {
                 st.timeline.show_clip_previews = !st.timeline.show_clip_previews;
@@ -626,15 +626,15 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
         let r = Rect::from_min_size(pos2(lanes.left(), y), vec2(lanes.width(), layer_h));
         let row_bg = if is_dark {
             if li % 2 == 0 {
-                Color32::from_rgb(23, 25, 31)
+                Color32::from_rgb(23, 23, 25)
             } else {
-                Color32::from_rgb(31, 34, 43)
+                Color32::from_rgb(31, 32, 33)
             }
         } else {
             if li % 2 == 0 {
                 Color32::from_rgb(255, 255, 255)
             } else {
-                Color32::from_rgb(233, 238, 247)
+                Color32::from_rgb(233, 234, 237)
             }
         };
         lane_painter.rect_filled(r, 0.0, row_bg);
@@ -642,7 +642,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
         let divider_color = if is_dark {
             Color32::from_gray(38)
         } else {
-            Color32::from_rgb(216, 222, 234)
+            Color32::from_rgb(216, 218, 220)
         };
         lane_painter.line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(1.0_f32, divider_color));
     }
@@ -735,12 +735,12 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
             let selected = st.selected == Some(obj.id) || st.selected_objects.contains(&obj.id);
             let dimmed = !layer.visible || obj.source().is_some_and(|s| !s.enabled);
             let mut base_color = if is_missing {
-                Color32::from_rgb(180, 50, 50)
+                Color32::from_rgb(168, 52, 52)
             } else {
-                category_color(obj.category())
+                clip_color(obj)
             };
             if selected {
-                base_color = base_color.linear_multiply(1.3);
+                base_color = base_color.linear_multiply(1.25);
             }
             if dimmed {
                 base_color = base_color.gamma_multiply(0.35);
@@ -748,14 +748,14 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
 
             if show_previews {
                 // --- Premiere Pro 風の2段表示（ヘッダー + ボディプレビュー） ---
-                let body_bg = base_color.gamma_multiply(0.45);
-                lane_painter.rect_filled(r, 3.5, body_bg);
+                let body_bg = base_color.gamma_multiply(0.42);
+                lane_painter.rect_filled(r, 2.0, body_bg);
 
                 let header_bottom = (r.top() + CLIP_HEADER_H).min(r.bottom());
                 let header_rect = Rect::from_min_max(r.min, pos2(r.right(), header_bottom));
                 let body_rect = Rect::from_min_max(pos2(r.left(), header_bottom), r.max);
 
-                lane_painter.rect_filled(header_rect, 3.5, base_color);
+                lane_painter.rect_filled(header_rect, 2.0, base_color);
 
                 let body_clip = body_rect.shrink(1.0).intersect(lanes);
                 if body_clip.width() > 4.0 && body_clip.height() > 6.0 {
@@ -785,9 +785,9 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                 }
 
                 if selected {
-                    lane_painter.rect_stroke(r, 3.5, Stroke::new(1.6_f32, Color32::WHITE));
+                    lane_painter.rect_stroke(r, 2.0, Stroke::new(1.5_f32, theme::accent_hi()));
                 } else {
-                    lane_painter.rect_stroke(r, 3.5, Stroke::new(1.0_f32, Color32::from_black_alpha(110)));
+                    lane_painter.rect_stroke(r, 2.0, Stroke::new(1.0_f32, Color32::from_black_alpha(120)));
                 }
 
                 if obj.clipping {
@@ -904,7 +904,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     }
 
     // ルーラー
-    painter.rect_filled(ruler, 0.0, flip(Color32::from_rgb(26, 28, 35)));
+    painter.rect_filled(ruler, 0.0, flip(Color32::from_rgb(26, 26, 28)));
     painter.line_segment([ruler.left_bottom(), ruler.right_bottom()], Stroke::new(1.0_f32, theme::border()));
     let rate = st.scene.settings.frame_rate;
     let fps = rate.as_f64().round().max(1.0) as u32;
@@ -932,22 +932,22 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
         let r = Rect::from_min_size(pos2(headers.left(), y), vec2(HEADER_W, layer_h));
         let h_row_bg = if is_dark {
             if li % 2 == 0 {
-                Color32::from_rgb(26, 28, 36)
+                Color32::from_rgb(26, 26, 28)
             } else {
-                Color32::from_rgb(33, 36, 46)
+                Color32::from_rgb(33, 34, 36)
             }
         } else {
             if li % 2 == 0 {
-                Color32::from_rgb(250, 251, 254)
+                Color32::from_rgb(250, 250, 251)
             } else {
-                Color32::from_rgb(235, 239, 247)
+                Color32::from_rgb(235, 236, 238)
             }
         };
         header_painter.rect_filled(r, 0.0, h_row_bg);
 
         let is_selected_layer = st.timeline.selected_layer == li;
         if is_selected_layer {
-            header_painter.rect_filled(r, 0.0, if is_dark { Color32::from_rgb(42, 48, 65) } else { Color32::from_rgb(220, 230, 248) });
+            header_painter.rect_filled(r, 0.0, if is_dark { Color32::from_rgb(42, 43, 47) } else { Color32::from_rgb(220, 230, 248) });
         }
 
         let layer = &st.scene.layers[li];
@@ -957,9 +957,9 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
         // レイヤーバッジ [L1]
         let badge_rect = Rect::from_min_size(pos2(r.left() + 5.0, r.center().y - 8.0), vec2(24.0, 16.0));
         let badge_bg = if is_selected_layer {
-            Color32::from_rgb(59, 130, 246)
+            theme::accent()
         } else if is_dark {
-            Color32::from_rgb(38, 42, 54)
+            Color32::from_rgb(38, 39, 41)
         } else {
             Color32::from_rgb(218, 226, 242)
         };
@@ -983,34 +983,34 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
             header_painter.rect_filled(lock_btn_rect, 2.5, Color32::from_white_alpha(35));
         }
 
-        // 👁️ 表示/非表示アイコン
-        let vis_icon = if layer.visible { "👁" } else { "🚫" };
+        // 表示/非表示アイコン
+        let vis_icon = if layer.visible { "●" } else { "–" };
         let vis_color = if layer.visible {
             if vis_hovered { Color32::WHITE } else { theme::text_muted() }
         } else {
-            Color32::from_rgb(255, 90, 90)
+            Color32::from_rgb(235, 95, 95)
         };
-        header_painter.text(vis_btn_rect.center(), Align2::CENTER_CENTER, vis_icon, FontId::proportional(11.0), vis_color);
+        header_painter.text(vis_btn_rect.center(), Align2::CENTER_CENTER, vis_icon, FontId::monospace(10.5), vis_color);
 
-        // 🔒 ロックアイコン
-        let lock_icon = if layer.locked { "🔒" } else { "🔓" };
+        // ロックアイコン
+        let lock_icon = if layer.locked { "L" } else { "·" };
         let lock_color = if layer.locked {
-            Color32::from_rgb(250, 204, 21)
+            Color32::from_rgb(235, 190, 50)
         } else if lock_hovered {
             Color32::WHITE
         } else {
-            Color32::from_white_alpha(40)
+            Color32::from_white_alpha(45)
         };
-        header_painter.text(lock_btn_rect.center(), Align2::CENTER_CENTER, lock_icon, FontId::proportional(10.5), lock_color);
+        header_painter.text(lock_btn_rect.center(), Align2::CENTER_CENTER, lock_icon, FontId::monospace(10.0), lock_color);
         header_painter.line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(1.0_f32, theme::border()));
     }
 
     // 左上コーナー：クリップ内プレビュー ON/OFF スタイリッシュピルボタン
     let corner_hovered = hover_pos.is_some_and(|p| corner.contains(p));
     let corner_bg = if is_dark {
-        Color32::from_rgb(22, 24, 30)
+        Color32::from_rgb(22, 22, 24)
     } else {
-        Color32::from_rgb(241, 244, 250)
+        Color32::from_rgb(241, 242, 243)
     };
     painter.rect_filled(corner, 0.0, corner_bg);
     painter.line_segment([corner.right_top(), corner.right_bottom()], Stroke::new(1.0_f32, theme::border()));
@@ -1019,22 +1019,22 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     let btn_rect = corner.shrink2(vec2(3.0, 2.5));
     let (btn_fill, btn_stroke, text_color) = if show_previews {
         if corner_hovered {
-            (Color32::from_rgb(45, 110, 245), Stroke::new(1.0_f32, Color32::from_rgb(147, 197, 253)), Color32::WHITE)
+            (theme::accent_hover(), Stroke::new(1.0_f32, theme::accent_hi()), Color32::WHITE)
         } else {
-            (Color32::from_rgb(37, 99, 235), Stroke::new(1.0_f32, Color32::from_rgb(96, 165, 250)), Color32::WHITE)
+            (theme::accent(), Stroke::new(1.0_f32, theme::accent_hi()), Color32::WHITE)
         }
     } else if corner_hovered {
-        (flip(Color32::from_rgb(52, 56, 68)), Stroke::new(1.0_f32, theme::border()), theme::text())
+        (flip(Color32::from_rgb(52, 53, 55)), Stroke::new(1.0_f32, theme::border()), theme::text())
     } else {
-        (flip(Color32::from_rgb(38, 41, 50)), Stroke::new(1.0_f32, theme::border()), theme::text_muted())
+        (flip(Color32::from_rgb(38, 39, 40)), Stroke::new(1.0_f32, theme::border()), theme::text_muted())
     };
-    painter.rect_filled(btn_rect, 4.0, btn_fill);
-    painter.rect_stroke(btn_rect, 4.0, btn_stroke);
+    painter.rect_filled(btn_rect, 2.5, btn_fill);
+    painter.rect_stroke(btn_rect, 2.5, btn_stroke);
 
     let toggle_label = if show_previews {
-        "🖼 プレビュー ON"
+        "プレビュー ON"
     } else {
-        "🖼 プレビュー OFF"
+        "プレビュー OFF"
     };
     painter.text(
         btn_rect.center(),
@@ -1063,8 +1063,8 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     // タイムライン上の矩形選択範囲（ラバーバンド枠）
     if let Some(TimelineDrag::BoxSelect { start_pos, current_pos }) = st.timeline.drag {
         let sel_rect = Rect::from_two_pos(start_pos, current_pos);
-        painter.rect_filled(sel_rect, 2.0, Color32::from_rgba_unmultiplied(40, 140, 255, 45));
-        painter.rect_stroke(sel_rect, 2.0, Stroke::new(1.5_f32, Color32::from_rgb(80, 180, 255)));
+        painter.rect_filled(sel_rect, 2.0, theme::accent_hi().gamma_multiply(0.18));
+        painter.rect_stroke(sel_rect, 2.0, Stroke::new(1.5_f32, theme::accent_hi()));
     }
 
     // 選択範囲（In点・Out点）のハイライト帯およびマーカー描画
@@ -1083,10 +1083,10 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     if let Some(in_f) = st.timeline.in_point {
         let ix = fx(in_f as f32);
         if ix >= lanes.left() && ix <= lanes.right() {
-            painter.line_segment([pos2(ix, ruler.top()), pos2(ix, lanes.bottom())], Stroke::new(1.5_f32, Color32::from_rgb(50, 160, 255)));
+            painter.line_segment([pos2(ix, ruler.top()), pos2(ix, lanes.bottom())], Stroke::new(1.5_f32, theme::accent_hi()));
             painter.add(Shape::convex_polygon(
                 vec![pos2(ix, ruler.top()), pos2(ix + 8.0, ruler.top()), pos2(ix + 8.0, ruler.top() + 4.0), pos2(ix + 2.0, ruler.top() + 4.0), pos2(ix + 2.0, ruler.top() + 10.0), pos2(ix, ruler.top() + 10.0)],
-                Color32::from_rgb(50, 160, 255),
+                theme::accent_hi(),
                 Stroke::NONE,
             ));
         }
@@ -1094,10 +1094,10 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     if let Some(out_f) = st.timeline.out_point {
         let ox = fx((out_f + 1) as f32);
         if ox >= lanes.left() && ox <= lanes.right() {
-            painter.line_segment([pos2(ox, ruler.top()), pos2(ox, lanes.bottom())], Stroke::new(1.5_f32, Color32::from_rgb(50, 160, 255)));
+            painter.line_segment([pos2(ox, ruler.top()), pos2(ox, lanes.bottom())], Stroke::new(1.5_f32, theme::accent_hi()));
             painter.add(Shape::convex_polygon(
                 vec![pos2(ox, ruler.top()), pos2(ox - 8.0, ruler.top()), pos2(ox - 8.0, ruler.top() + 4.0), pos2(ox - 2.0, ruler.top() + 4.0), pos2(ox - 2.0, ruler.top() + 10.0), pos2(ox, ruler.top() + 10.0)],
-                Color32::from_rgb(50, 160, 255),
+                theme::accent_hi(),
                 Stroke::NONE,
             ));
         }
@@ -1140,8 +1140,8 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                             pos2(sx1.min(lanes.right()), ly_bottom - 1.0),
                         );
                         if drop_rect.width() > 2.0 {
-                            painter.rect_filled(drop_rect, 3.5, Color32::from_rgba_unmultiplied(46, 134, 222, 90));
-                            painter.rect_stroke(drop_rect, 3.5, Stroke::new(1.8_f32, Color32::from_rgb(56, 189, 248)));
+                            painter.rect_filled(drop_rect, 3.5, theme::accent().gamma_multiply(0.35));
+                            painter.rect_stroke(drop_rect, 3.5, Stroke::new(1.8_f32, theme::accent_hi()));
                         }
                     }
                 }
@@ -1150,7 +1150,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                 if sx0 >= lanes.left() && sx0 <= lanes.right() {
                     painter.line_segment(
                         [pos2(sx0, lanes.top()), pos2(sx0, lanes.bottom())],
-                        Stroke::new(2.0_f32, Color32::from_rgb(56, 189, 248)),
+                        Stroke::new(2.0_f32, theme::accent_hi()),
                     );
                 }
 
@@ -1160,14 +1160,14 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                     (hp.y - 28.0).max(lanes.top() + 4.0),
                 );
                 let label_text = if hovered_files.len() == 1 {
-                    format!("📥 Layer {} : {}F に配置", hover_layer + 1, snap_f)
+                    format!("Layer {} : {}F に配置", hover_layer + 1, snap_f)
                 } else {
-                    format!("📥 Layer {}〜 : {}F に配置 ({}件)", hover_layer + 1, snap_f, hovered_files.len())
+                    format!("Layer {}〜 : {}F に配置 ({}件)", hover_layer + 1, snap_f, hovered_files.len())
                 };
                 let galley = painter.layout_no_wrap(label_text, FontId::proportional(11.0), Color32::WHITE);
                 let badge_rect = Rect::from_min_size(badge_pos, vec2(galley.size().x + 16.0, 22.0));
                 painter.rect_filled(badge_rect, 4.0, Color32::from_rgba_unmultiplied(15, 23, 42, 230));
-                painter.rect_stroke(badge_rect, 4.0, Stroke::new(1.0_f32, Color32::from_rgb(56, 189, 248)));
+                painter.rect_stroke(badge_rect, 4.0, Stroke::new(1.0_f32, theme::accent_hi()));
                 painter.galley(pos2(badge_pos.x + 8.0, badge_pos.y + 4.0), galley, Color32::WHITE);
             }
         }
@@ -1188,7 +1188,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     painter.rect_stroke(thumb_rect, 3.0, Stroke::new(1.0_f32, theme::border()));
 
     // 右下ズームツールバー
-    painter.rect_filled(zoom_bar, 0.0, flip(Color32::from_rgb(24, 26, 32)));
+    painter.rect_filled(zoom_bar, 0.0, flip(Color32::from_rgb(24, 24, 26)));
     painter.line_segment([zoom_bar.left_top(), zoom_bar.right_top()], Stroke::new(1.0_f32, theme::border()));
     painter.line_segment([zoom_bar.left_top(), zoom_bar.left_bottom()], Stroke::new(1.0_f32, theme::border()));
 
@@ -1196,7 +1196,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     let snap_hovered = hover_pos.is_some_and(|p| btn_snap.contains(p));
     let snap_on = st.timeline.snap_enabled;
     let snap_bg = if snap_on {
-        if snap_hovered { Color32::from_rgb(32, 108, 196) } else { Color32::from_rgb(24, 88, 164) }
+        if snap_hovered { theme::accent_hover() } else { theme::accent() }
     } else {
         if snap_hovered { flip(Color32::from_gray(56)) } else { flip(Color32::from_gray(38)) }
     };
@@ -1204,9 +1204,9 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     painter.rect_stroke(
         btn_snap,
         3.0,
-        Stroke::new(1.0_f32, if snap_on { Color32::from_rgb(80, 180, 255) } else { theme::border() }),
+        Stroke::new(1.0_f32, if snap_on { theme::accent_hi() } else { theme::border() }),
     );
-    let snap_label = if snap_on { "🧲 ON" } else { "🧲 OFF" };
+    let snap_label = if snap_on { "吸着 ON" } else { "吸着 OFF" };
     painter.text(
         btn_snap.center(),
         Align2::CENTER_CENTER,
@@ -1282,7 +1282,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     );
 
     // 左下角
-    painter.rect_filled(corner_bl, 0.0, flip(Color32::from_rgb(24, 26, 32)));
+    painter.rect_filled(corner_bl, 0.0, flip(Color32::from_rgb(24, 24, 26)));
     painter.line_segment([corner_bl.left_top(), corner_bl.right_top()], Stroke::new(1.0_f32, theme::border()));
     painter.line_segment([corner_bl.right_top(), corner_bl.right_bottom()], Stroke::new(1.0_f32, theme::border()));
 }

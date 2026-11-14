@@ -14,11 +14,11 @@ pub fn parse_color(hex: &str) -> Option<Color32> {
 }
 
 /// ボタンの標準高さ。
-pub const BUTTON_H: f32 = 30.0;
+pub const BUTTON_H: f32 = 26.0;
 /// 行内に置く小さめボタンの標準高さ。
-pub const SMALL_BUTTON_H: f32 = 26.0;
+pub const SMALL_BUTTON_H: f32 = 24.0;
 /// 行内に置くスリムな極小ボタンの標準高さ。
-pub const TINY_BUTTON_H: f32 = 21.0;
+pub const TINY_BUTTON_H: f32 = 20.0;
 
 /// 利用可能幅いっぱいに、同じ幅のボタンを整列して並べます（最終行は残りの数で等分）。
 /// 各項目は `(ラベル, ツールチップ)`。クリックされた項目の添字を返します。

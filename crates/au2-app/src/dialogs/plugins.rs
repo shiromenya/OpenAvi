@@ -26,13 +26,13 @@ impl OpenAviApp {
                         self.st.install_plugin_dialog();
                     }
                     if ui
-                        .button(RichText::new("🔄 .auf 仕様解析 & 移植スタジオ").strong())
+                        .button(RichText::new(".auf パラメータ抽出 & 雛形生成").strong())
                         .clicked()
                     {
                         self.st.open_auf_porter(None);
                     }
                 });
-                ui.weak("※ ウィンドウに .anm / .obj / .auf 等のファイルをドラッグ＆ドロップしてもインストールできます。");
+                ui.weak("※ スクリプト (.anm/.obj 等) は組み込み Lua サブセットで動作します。ネイティブ DLL (.auf 等) はパラメータ定義の静的読込のみで DLL 機械語は実行されません。");
                 ui.separator();
 
                 if self.st.plugins.plugins.is_empty() {
@@ -89,20 +89,21 @@ impl OpenAviApp {
         self.show_plugins = open;
     }
 
-    /// `.auf` / `.auf2` バイナリ構造の自動解析と、クロスプラットフォーム `.anm` (Lua) / WGSL シェーダー / Rust コード自動生成スタジオ。
+    /// `.auf` / `.auf2` バイナリのパラメータ定義抽出と、手動移植・代替用 `.anm` (Lua) / WGSL / Rust 雛形コード生成ウィンドウ。
     pub fn auf_porter_window(&mut self, ctx: &egui::Context) {
         if !self.st.auf_porter.is_open {
             return;
         }
         let mut is_open = self.st.auf_porter.is_open;
 
-        egui::Window::new("🔄 .auf / .auf2 仕様解析 & クロスプラットフォーム移植スタジオ")
+        egui::Window::new(".auf / .auf2 パラメータ定義抽出 & 代替スクリプト雛形生成")
             .frame(egui::Frame::window(&ctx.style()).fill(crate::theme::surface()))
             .open(&mut is_open)
             .default_size([780.0, 620.0])
             .resizable(true)
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
+                ui.weak("※ DLL 内のネイティブ機械語 (func_proc) や独自ウィンドウ UI は実行されません。PE テーブルから静的に抽出したパラメータ定義と、名称からの簡易近似に基づく .anm / WGSL / Rust 雛形コードを生成します。");
 
                 // 上部ツールバー：対象プラグイン選択・外部ファイル読込・一括変換
                 egui::Frame::none()
@@ -129,9 +130,9 @@ impl OpenAviApp {
                                     .show_ui(ui, |ui| {
                                         for (idx, p) in self.st.plugins.plugins.iter().enumerate() {
                                             let prefix = if matches!(p.kind, au2_plugin::PluginKind::FilterDll) {
-                                                "🧪 [ネイティブ .auf] "
+                                                "[ネイティブ .auf] "
                                             } else {
-                                                "✨ "
+                                                ""
                                             };
                                             let lbl = format!("{prefix}{} ({})", p.file_name, p.arch.label());
                                             ui.selectable_value(&mut self.st.auf_porter.selected_plugin_idx, idx, lbl);
@@ -140,7 +141,7 @@ impl OpenAviApp {
                             }
 
                             if ui
-                                .button("📂 外部の .auf / .auf2 を選択...")
+                                .button("外部の .auf / .auf2 を選択...")
                                 .on_hover_text("PC 上の任意の .auf / .auf2 ファイルを選択してインストール＆仕様解析します")
                                 .clicked()
                             {
@@ -168,11 +169,11 @@ impl OpenAviApp {
 
                             if ui
                                 .button(
-                                    RichText::new("⚡ 全 .auf を一括で .anm へ変換")
+                                    RichText::new("全 .auf の .anm 雛形を一括生成")
                                         .color(crate::theme::ok_text())
                                         .strong(),
                                  )
-                                .on_hover_text("登録されているすべての .auf / .auf2 プラグインを一括で Mac / Linux / Windows 互換の .anm スクリプトに変換します")
+                                .on_hover_text("登録されているすべての .auf / .auf2 プラグインからパラメータ定義を引き継いだ代替 .anm スクリプト雛形を一括生成します")
                                 .clicked()
                             {
                                 self.st.convert_all_auf_to_anm();
@@ -201,7 +202,7 @@ impl OpenAviApp {
                     .inner_margin(egui::Margin::same(10.0))
                     .show(ui, |ui| {
                         ui.horizontal_wrapped(|ui| {
-                            ui.strong(RichText::new(format!("🔍 バイナリ仕様診断: {}", desc.file_name)).size(13.5));
+                            ui.strong(RichText::new(format!("バイナリ仕様診断: {}", desc.file_name)).size(13.5));
                             ui.separator();
                             ui.colored_label(crate::theme::ok_text(), report.difficulty.badge_label());
                         });
@@ -246,19 +247,13 @@ impl OpenAviApp {
                         // 抽出されたトラックバー・チェックボックス一覧
                         ui.add_space(4.0);
                         egui::CollapsingHeader::new(
-                            RichText::new("📋 抽出された FILTER_DLL / FILTER_PLUGIN_TABLE パラメータ定義一覧").strong(),
+                            RichText::new("抽出された FILTER_DLL / FILTER_PLUGIN_TABLE パラメータ定義一覧").strong(),
                         )
                         .default_open(true)
                         .show(ui, |ui| {
-                            for (e_idx, entry) in desc.entries.iter().enumerate() {
-                                let cat = report
-                                    .entry_categories
-                                    .get(e_idx)
-                                    .map(|(_, c)| c.label())
-                                    .unwrap_or("汎用");
+                            for entry in &desc.entries {
                                 ui.horizontal(|ui| {
                                     ui.strong(format!("■ {}", entry.display_name));
-                                    ui.colored_label(crate::theme::accent_text(), format!("[自動推論: {cat}]"));
                                 });
                                 for t in &entry.tracks {
                                     ui.small(format!(
@@ -294,26 +289,26 @@ impl OpenAviApp {
 
                 ui.horizontal_wrapped(|ui| {
                     let convert_btn = egui::Button::new(
-                        RichText::new("🚀 ワンクリックで .anm スクリプトに変換してプラグイン登録")
+                        RichText::new(".anm 代替スクリプト雛形として plugins/ に出力")
                             .color(Color32::WHITE)
                             .strong(),
                     )
                     .fill(crate::theme::accent());
                     if ui
                         .add(convert_btn)
-                        .on_hover_text("生成されたクロスプラットフォーム .anm (Lua) スクリプトを plugins/ フォルダに書き出し、Mac / Linux / Windows で即座に使えるようにします")
+                        .on_hover_text("抽出したパラメータ定義と名称からの簡易近似による .anm (Lua) スクリプト雛形を plugins/ フォルダに書き出します")
                         .clicked()
                     {
                         let idx = self.st.auf_porter.selected_plugin_idx;
                         self.st.convert_auf_to_anm(idx);
                     }
 
-                    if ui.button("📋 コードをコピー").clicked() {
+                    if ui.button("コードをコピー").clicked() {
                         ui.ctx().copy_text(generated_code.clone());
                         self.st.status = "生成された移植コードをクリップボードにコピーしました".into();
                     }
 
-                    if ui.button("💾 ファイルに保存...").clicked() {
+                    if ui.button("ファイルに保存...").clicked() {
                         let stem = std::path::Path::new(&desc.file_name)
                             .file_stem()
                             .and_then(|s| s.to_str())
@@ -350,22 +345,22 @@ impl OpenAviApp {
                     ui.selectable_value(
                         &mut self.st.auf_porter.active_tab,
                         crate::state::AufPorterTab::AnmLua,
-                        "✨ 1. クロスプラットフォーム .anm (Lua)",
+                        "1. クロスプラットフォーム .anm (Lua)",
                     );
                     ui.selectable_value(
                         &mut self.st.auf_porter.active_tab,
                         crate::state::AufPorterTab::WgslShader,
-                        "🎨 2. WGSL (WebGPU シェーダー)",
+                        "2. WGSL (WebGPU シェーダー)",
                     );
                     ui.selectable_value(
                         &mut self.st.auf_porter.active_tab,
                         crate::state::AufPorterTab::RustCode,
-                        "🦀 3. Rust ネイティブコード",
+                        "3. Rust ネイティブコード",
                     );
                     ui.selectable_value(
                         &mut self.st.auf_porter.active_tab,
                         crate::state::AufPorterTab::JsonSpec,
-                        "📄 4. JSON 構造体ダンプ",
+                        "4. JSON 構造体ダンプ",
                     );
                 });
 

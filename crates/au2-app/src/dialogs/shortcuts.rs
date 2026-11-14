@@ -44,15 +44,15 @@ impl OpenAviApp {
                         ("Shift + ホイール", "タイムラインの横スクロール"),
                     ]);
 
-                    render_section(ui, "✂ 編集・オブジェクト操作", &[
+                    render_section(ui, "編集・オブジェクト操作", &[
                         ("S", "現在フレーム位置でオブジェクトを分割 (Split)"),
                         ("D", "中間点を追加（タイムラインの選択位置）"),
                         ("Delete", "選択中オブジェクトを削除"),
                         ("Ctrl + D", "選択中オブジェクトを複製"),
-                        ("🧲 (Sキー)", "スナップ（吸着）の ON / OFF 切り替え"),
+                        ("(Sキー)", "スナップ（吸着）の ON / OFF 切り替え"),
                     ]);
 
-                    render_section(ui, "📋 選択・履歴・クリップボード", &[
+                    render_section(ui, "選択・履歴・クリップボード", &[
                         ("Ctrl + Z", "元に戻す (Undo)"),
                         ("Ctrl + Y / Ctrl + Shift + Z", "やり直し (Redo)"),
                         ("Ctrl + A", "タイムライン上の全オブジェクトを選択"),
@@ -61,7 +61,7 @@ impl OpenAviApp {
                         ("Escape", "選択解除"),
                     ]);
 
-                    render_section(ui, "📁 ファイル・プロジェクト", &[
+                    render_section(ui, "ファイル・プロジェクト", &[
                         ("Ctrl + N", "新規プロジェクト作成"),
                         ("Ctrl + O", "プロジェクト / メディアを開く"),
                         ("Ctrl + S", "プロジェクトを上書き保存"),

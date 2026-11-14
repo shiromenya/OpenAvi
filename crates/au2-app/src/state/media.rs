@@ -561,6 +561,94 @@ impl EditorState {
         max_amp.clamp(0.0, 1.0)
     }
 
+    /// 指定フレーム位置におけるタイムライン上の音声トラックの波形配列（`bins` 個の振幅 `0.0..=1.0`）を取得します（音声波形表示オブジェクト連動用）。
+    /// アクティブな音声・動画クリップが存在しない場合は空の `Vec` を返します。
+    pub fn sample_audio_waveform_at(&mut self, abs_frame: Frame, bins: usize) -> Vec<f32> {
+        let bins = bins.max(1);
+        let fps = self.scene.settings.frame_rate.as_f64().max(1.0);
+        let mut active_audio_items: Vec<(String, f64, f32)> = Vec::new();
+        for layer in &self.scene.layers {
+            if !layer.visible {
+                continue;
+            }
+            for obj in &layer.objects {
+                if !obj.contains(abs_frame) {
+                    continue;
+                }
+                let Some(src) = obj.source().filter(|s| s.enabled) else {
+                    continue;
+                };
+                if !matches!(src.kind, EffectKind::AudioFile | EffectKind::VideoFile) {
+                    continue;
+                }
+                let Some(file_str) = src.text("file").filter(|s| !s.trim().is_empty()) else {
+                    continue;
+                };
+                let rel = abs_frame - obj.frame_start;
+                let start_pos = if src.kind == EffectKind::AudioFile {
+                    src.eval("再生位置", rel, 0.0).max(0.0)
+                } else {
+                    ((src.eval("再生位置", rel, 1.0) - 1.0) / fps).max(0.0)
+                };
+                let speed = (src.eval("再生速度", rel, 100.0) / 100.0).max(0.0);
+                let audio_sec = start_pos + (rel as f64 / fps) * speed;
+                let volume = (obj
+                    .effect(&EffectKind::StandardPlayback)
+                    .map(|e| e.eval("音量", rel, 100.0))
+                    .unwrap_or(100.0)
+                    / 100.0) as f32;
+                active_audio_items.push((file_str.to_string(), audio_sec, volume));
+            }
+        }
+        if active_audio_items.is_empty() {
+            return Vec::new();
+        }
+
+        let mut out = vec![0.0f32; bins];
+        let mut any_pcm = false;
+        let window_stereo_frames = ((44100.0 / fps).round() as usize).clamp(256, 4410);
+        for (file_str, audio_sec, volume) in active_audio_items {
+            if volume <= 0.001 {
+                continue;
+            }
+            let Some(path) = self.resolve_cached_path(&file_str) else {
+                continue;
+            };
+            let Some(pcm) = self.media.get_audio_pcm(&path) else {
+                continue;
+            };
+            any_pcm = true;
+            let start_sample_idx = ((audio_sec * 44100.0).round() as usize).saturating_mul(2);
+            let total_samples = window_stereo_frames * 2;
+            let end_sample_idx = (start_sample_idx + total_samples).min(pcm.len());
+            if start_sample_idx >= end_sample_idx {
+                continue;
+            }
+            let slice = &pcm[start_sample_idx..end_sample_idx];
+            let chunk_len = (slice.len() / bins).max(1);
+            for (b, slot) in out.iter_mut().enumerate() {
+                let c_start = (b * chunk_len).min(slice.len());
+                let c_end = ((b + 1) * chunk_len).min(slice.len());
+                if c_start >= c_end {
+                    continue;
+                }
+                let mut peak = 0.0f32;
+                for &s in &slice[c_start..c_end] {
+                    let v = (s as f32 / 32768.0).abs() * volume;
+                    if v > peak {
+                        peak = v;
+                    }
+                }
+                *slot = (*slot + peak).clamp(0.0, 1.0);
+            }
+        }
+        if any_pcm {
+            out
+        } else {
+            Vec::new()
+        }
+    }
+
     /// メディアファイルのオーディオ波形ピークデータ（タイムライン描画用）を取得します。
     pub fn get_audio_waveform(&mut self, path_str: &str) -> Option<std::sync::Arc<au2_media::AudioWaveformPeaks>> {
         let path = self.resolve_cached_path(path_str)?;

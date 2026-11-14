@@ -1,4 +1,4 @@
-﻿//! アプリ全体のテーマ（ダーク / ライト）とデザイントークン。
+//! アプリ全体のテーマ（ダーク / ライト）とデザイントークン。
 //!
 //! - [`apply`] で `egui` のスタイル（配色・余白・ボタン最小サイズ・角丸）を一括設定します。
 //! - 各パネルは色をハードコードせず、このモジュールの関数（[`surface`] / [`border`] / [`accent_text`] など）
@@ -26,9 +26,9 @@ impl ThemePreference {
     #[allow(dead_code)]
     pub fn label(self) -> &'static str {
         match self {
-            Self::Dark => "🌙 ダークモード",
-            Self::Light => "☀ ライトモード",
-            Self::System => "💻 システム設定に従う",
+            Self::Dark => "ダークモード",
+            Self::Light => "ライトモード",
+            Self::System => "システム設定に従う",
         }
     }
 
@@ -52,8 +52,8 @@ impl ThemeMode {
     #[allow(dead_code)]
     pub fn label(self) -> &'static str {
         match self {
-            Self::Dark => "🌙 ダークモード",
-            Self::Light => "☀ ライトモード",
+            Self::Dark => "ダークモード",
+            Self::Light => "ライトモード",
         }
     }
 
@@ -228,31 +228,39 @@ fn pick(dark: Color32, light: Color32) -> Color32 {
 
 /// カード / 入力欄などの面の色。
 pub fn surface() -> Color32 {
-    pick(Color32::from_rgb(20, 22, 27), Color32::from_rgb(255, 255, 255))
+    pick(Color32::from_rgb(20, 20, 23), Color32::from_rgb(255, 255, 255))
 }
 /// 少し沈んだ面（リスト行・サブカード）。
 pub fn surface_alt() -> Color32 {
-    pick(Color32::from_rgb(24, 26, 33), Color32::from_rgb(243, 245, 249))
+    pick(Color32::from_rgb(27, 27, 31), Color32::from_rgb(244, 244, 246))
 }
 /// 枠線。
 pub fn border() -> Color32 {
-    pick(Color32::from_gray(44), Color32::from_rgb(208, 213, 224))
+    pick(Color32::from_gray(47), Color32::from_rgb(212, 212, 218))
 }
-/// 主要ボタン / 選択色。
+/// 主要ボタン / 選択色（ティール）。
 pub fn accent() -> Color32 {
-    Color32::from_rgb(37, 99, 235)
+    Color32::from_rgb(15, 133, 124)
 }
-/// 強調テキスト（青系）。
+/// アクセントのホバー色。
+pub fn accent_hover() -> Color32 {
+    pick(Color32::from_rgb(20, 158, 147), Color32::from_rgb(13, 118, 110))
+}
+/// アクセントの明るい線・ハイライト色（選択枠・ガイド線など）。
+pub fn accent_hi() -> Color32 {
+    pick(Color32::from_rgb(45, 212, 191), Color32::from_rgb(13, 148, 136))
+}
+/// 強調テキスト（ティール系）。
 pub fn accent_text() -> Color32 {
-    pick(Color32::from_rgb(147, 197, 253), Color32::from_rgb(29, 78, 216))
+    pick(Color32::from_rgb(94, 214, 200), Color32::from_rgb(15, 110, 103))
 }
 /// 通常テキスト。
 pub fn text() -> Color32 {
-    pick(Color32::from_gray(225), Color32::from_rgb(10, 12, 16))
+    pick(Color32::from_gray(226), Color32::from_rgb(18, 18, 22))
 }
 /// 補助テキスト。
 pub fn text_muted() -> Color32 {
-    pick(Color32::from_gray(150), Color32::from_gray(100))
+    pick(Color32::from_gray(143), Color32::from_gray(105))
 }
 pub fn danger_text() -> Color32 {
     pick(Color32::from_rgb(255, 120, 120), Color32::from_rgb(185, 28, 28))
@@ -329,64 +337,69 @@ pub fn fg(c: Color32) -> Color32 {
 // ---------------------------------------------------------------------------
 
 /// 現在のモードに合わせて egui の Visuals / Style を設定します。
+///
+/// 方針: 無彩色（ニュートラルグレー）基調 + ティールのアクセント 1 色。
+/// 角丸は小さく、枠線は細く、余白は詰め気味にして「道具」らしい落ち着いた見た目にします。
 pub fn apply(ctx: &egui::Context) {
     let dark = is_dark();
     let mut v = if dark { egui::Visuals::dark() } else { egui::Visuals::light() };
 
-    let rounding = Rounding::same(6.0);
+    let rounding = Rounding::same(rounding::MD_PX);
     let accent = accent();
+    let accent_hi = accent_hi();
 
     if dark {
-        v.panel_fill = Color32::from_rgb(20, 21, 25);
-        v.window_fill = Color32::from_rgb(26, 28, 34);
-        v.extreme_bg_color = Color32::from_rgb(13, 14, 17);
-        v.faint_bg_color = Color32::from_rgb(28, 30, 36);
-        v.window_stroke = Stroke::new(1.0_f32, Color32::from_gray(50));
-        v.override_text_color = Some(Color32::from_gray(225));
+        v.panel_fill = Color32::from_rgb(24, 24, 27);
+        v.window_fill = Color32::from_rgb(30, 30, 34);
+        v.extreme_bg_color = Color32::from_rgb(15, 15, 17);
+        v.faint_bg_color = Color32::from_rgb(30, 30, 34);
+        v.window_stroke = Stroke::new(1.0_f32, Color32::from_gray(54));
+        v.override_text_color = Some(Color32::from_gray(226));
         v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, Color32::from_gray(200));
-        v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, Color32::from_gray(225));
+        v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, Color32::from_gray(226));
         v.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
         v.widgets.open.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
-        v.widgets.noninteractive.bg_fill = Color32::from_rgb(24, 25, 30);
-        v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, Color32::from_gray(38));
-        v.widgets.inactive.bg_fill = Color32::from_rgb(38, 42, 52);
-        v.widgets.inactive.weak_bg_fill = Color32::from_rgb(38, 42, 52);
+        v.widgets.noninteractive.bg_fill = Color32::from_rgb(27, 27, 31);
+        v.widgets.noninteractive.weak_bg_fill = Color32::from_rgb(27, 27, 31);
+        v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, Color32::from_gray(40));
+        v.widgets.inactive.bg_fill = Color32::from_rgb(42, 42, 48);
+        v.widgets.inactive.weak_bg_fill = Color32::from_rgb(42, 42, 48);
         v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, Color32::from_gray(58));
-        v.widgets.hovered.bg_fill = Color32::from_rgb(50, 58, 74);
-        v.widgets.hovered.weak_bg_fill = Color32::from_rgb(50, 58, 74);
-        v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(96, 165, 250));
-        v.widgets.open.bg_fill = Color32::from_rgb(38, 42, 52);
-        v.widgets.open.weak_bg_fill = Color32::from_rgb(38, 42, 52);
-        v.selection.stroke = Stroke::new(1.0_f32, Color32::from_rgb(96, 165, 250));
+        v.widgets.hovered.bg_fill = Color32::from_rgb(56, 56, 64);
+        v.widgets.hovered.weak_bg_fill = Color32::from_rgb(56, 56, 64);
+        v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, accent_hi);
+        v.widgets.open.bg_fill = Color32::from_rgb(42, 42, 48);
+        v.widgets.open.weak_bg_fill = Color32::from_rgb(42, 42, 48);
+        v.selection.stroke = Stroke::new(1.0_f32, accent_hi);
     } else {
-        v.panel_fill = Color32::from_rgb(241, 243, 247);
+        v.panel_fill = Color32::from_rgb(243, 243, 245);
         v.window_fill = Color32::from_rgb(255, 255, 255);
         v.extreme_bg_color = Color32::from_rgb(255, 255, 255);
-        v.faint_bg_color = Color32::from_rgb(235, 238, 244);
-        v.window_stroke = Stroke::new(1.0_f32, Color32::from_rgb(200, 206, 218));
-        v.override_text_color = Some(Color32::from_rgb(10, 12, 16));
-        v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(20, 24, 33));
-        v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(10, 12, 16));
+        v.faint_bg_color = Color32::from_rgb(236, 236, 240);
+        v.window_stroke = Stroke::new(1.0_f32, Color32::from_rgb(205, 205, 212));
+        v.override_text_color = Some(Color32::from_rgb(18, 18, 22));
+        v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(28, 28, 33));
+        v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(18, 18, 22));
         v.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, Color32::BLACK);
-        v.widgets.open.fg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(10, 12, 16));
-        v.widgets.noninteractive.bg_fill = Color32::from_rgb(248, 249, 252);
-        v.widgets.noninteractive.weak_bg_fill = Color32::from_rgb(120, 125, 135);
-        v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(214, 219, 229));
-        v.widgets.inactive.bg_fill = Color32::from_rgb(230, 234, 242);
-        v.widgets.inactive.weak_bg_fill = Color32::from_rgb(230, 234, 242);
-        v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(196, 203, 217));
-        v.widgets.hovered.bg_fill = Color32::from_rgb(214, 224, 244);
-        v.widgets.hovered.weak_bg_fill = Color32::from_rgb(214, 224, 244);
-        v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(59, 130, 246));
-        v.widgets.open.bg_fill = Color32::from_rgb(220, 227, 242);
-        v.widgets.open.weak_bg_fill = Color32::from_rgb(220, 227, 242);
-        v.selection.stroke = Stroke::new(1.0_f32, Color32::from_rgb(29, 78, 216));
+        v.widgets.open.fg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(18, 18, 22));
+        v.widgets.noninteractive.bg_fill = Color32::from_rgb(248, 248, 250);
+        v.widgets.noninteractive.weak_bg_fill = Color32::from_rgb(120, 120, 128);
+        v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(218, 218, 224));
+        v.widgets.inactive.bg_fill = Color32::from_rgb(232, 232, 236);
+        v.widgets.inactive.weak_bg_fill = Color32::from_rgb(232, 232, 236);
+        v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(200, 200, 208));
+        v.widgets.hovered.bg_fill = Color32::from_rgb(218, 226, 226);
+        v.widgets.hovered.weak_bg_fill = Color32::from_rgb(218, 226, 226);
+        v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, accent_hi);
+        v.widgets.open.bg_fill = Color32::from_rgb(224, 226, 230);
+        v.widgets.open.weak_bg_fill = Color32::from_rgb(224, 226, 230);
+        v.selection.stroke = Stroke::new(1.0_f32, accent);
     }
-    v.selection.bg_fill = if dark { accent } else { Color32::from_rgb(191, 213, 252) };
-    v.widgets.active.bg_fill = if dark { accent } else { Color32::from_rgb(190, 210, 245) };
-    v.widgets.active.weak_bg_fill = if dark { accent } else { Color32::from_rgb(190, 210, 245) };
-    v.widgets.active.bg_stroke = Stroke::new(1.0_f32, if dark { Color32::WHITE } else { Color32::from_rgb(29, 78, 216) });
-    v.widgets.active.fg_stroke = Stroke::new(1.0_f32, if dark { Color32::WHITE } else { Color32::from_rgb(10, 12, 16) });
+    v.selection.bg_fill = if dark { accent } else { Color32::from_rgb(178, 224, 218) };
+    v.widgets.active.bg_fill = if dark { accent } else { Color32::from_rgb(178, 224, 218) };
+    v.widgets.active.weak_bg_fill = if dark { accent } else { Color32::from_rgb(178, 224, 218) };
+    v.widgets.active.bg_stroke = Stroke::new(1.0_f32, if dark { accent_hi } else { accent });
+    v.widgets.active.fg_stroke = Stroke::new(1.0_f32, if dark { Color32::WHITE } else { Color32::from_rgb(18, 18, 22) });
     for w in [
         &mut v.widgets.noninteractive,
         &mut v.widgets.inactive,
@@ -396,23 +409,23 @@ pub fn apply(ctx: &egui::Context) {
     ] {
         w.rounding = rounding;
     }
-    v.window_rounding = Rounding::same(10.0);
-    v.menu_rounding = Rounding::same(8.0);
+    v.window_rounding = Rounding::same(rounding::LG_PX + 1.0);
+    v.menu_rounding = Rounding::same(rounding::LG_PX);
     v.popup_shadow.color = Color32::from_black_alpha(if dark { 140 } else { 50 });
     v.window_shadow.color = Color32::from_black_alpha(if dark { 160 } else { 60 });
     ctx.set_visuals(v.clone());
 
     let mut style = (*ctx.style()).clone();
     style.visuals = v;
-    style.spacing.item_spacing = vec2(8.0, 8.0);
+    style.spacing.item_spacing = vec2(7.0, 7.0);
     // ボタンは十分な高さ・左右余白を確保して、文字が詰まったり押しにくくならないようにする
-    style.spacing.button_padding = vec2(12.0, 6.0);
-    style.spacing.interact_size = vec2(44.0, 28.0);
+    style.spacing.button_padding = vec2(11.0, 5.0);
+    style.spacing.interact_size = vec2(40.0, 26.0);
     style.spacing.window_margin = egui::Margin::same(12.0);
-    style.spacing.menu_margin = egui::Margin::symmetric(8.0, 6.0);
+    style.spacing.menu_margin = egui::Margin::symmetric(6.0, 5.0);
     style.spacing.combo_width = 120.0;
-    style.spacing.icon_width = 18.0;
-    style.spacing.icon_width_inner = 10.0;
+    style.spacing.icon_width = 16.0;
+    style.spacing.icon_width_inner = 9.0;
     style.spacing.slider_width = 140.0;
     ctx.set_style(style);
 }
@@ -441,12 +454,12 @@ pub fn danger_button(text: impl Into<String>) -> egui::Button<'static> {
 pub mod rounding {
     use eframe::egui::Rounding;
 
-    /// 小さな要素（バッジ、タブ、インライン要素など）の角丸 (4px)
-    pub const SM_PX: f32 = 4.0;
+    /// 小さな要素（バッジ、タブ、インライン要素など）の角丸 (3px)
+    pub const SM_PX: f32 = 3.0;
     /// 標準UI要素（ボタン、入力欄、カードなど）の角丸 (6px)
-    pub const MD_PX: f32 = 6.0;
+    pub const MD_PX: f32 = 4.0;
     /// パネル、カード枠、ダイアログなどの角丸 (8px)
-    pub const LG_PX: f32 = 8.0;
+    pub const LG_PX: f32 = 6.0;
 
     #[inline]
     pub fn sm() -> Rounding {
@@ -468,7 +481,7 @@ pub mod spacing {
 
     /// 極小の余白 (2px)
     pub const XS: f32 = 2.0;
-    /// 小さな余白 (4px)
+    /// 小さな余白 (3px)
     pub const SM: f32 = 4.0;
     /// 標準の余白 (6px)
     pub const MD: f32 = 6.0;

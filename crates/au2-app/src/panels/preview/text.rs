@@ -54,6 +54,9 @@ pub(crate) struct TextCharLayout {
     pub(crate) local_x: f32,
     pub(crate) local_y: f32,
     pub(crate) color_override: Option<Color32>,
+    pub(crate) color2_override: Option<Color32>,
+    pub(crate) size_scale: f32,
+    pub(crate) font_override: Option<String>,
 }
 
 pub(crate) fn preprocess_aviutl2_text(raw: &str, ctx: &DrawCtx, rel: Frame) -> String {
@@ -159,11 +162,6 @@ pub(crate) fn layout_aviutl_text(
     let raw_size = src.eval("サイズ", rel, 34.0).max(1.0) as f32;
     let speed = src.eval("表示速度", rel, 0.0);
     let time_sec = rel as f64 / ctx.fps.max(1.0);
-    let max_visible_chars = if speed > 0.0 {
-        Some((time_sec * speed).floor().max(0.0) as usize)
-    } else {
-        None
-    };
 
     let align = src
         .text("align")
@@ -185,42 +183,200 @@ pub(crate) fn layout_aviutl_text(
         .unwrap_or(0)
         != 0;
 
-    // 制御タグ (<#rrggbb> 等) の解析と行分割
-    let mut lines: Vec<Vec<(char, Option<Color32>)>> = vec![Vec::new()];
+    #[derive(Clone)]
+    struct StyledChar {
+        ch: char,
+        color: Option<Color32>,
+        color2: Option<Color32>,
+        size_scale: f32,
+        font: Option<String>,
+        offset_x: f32,
+        offset_y: f32,
+    }
+
+    // 制御タグ (<#rrggbb,rrggbb>, <sN,Font>, <rN>, <wN>, <cN>, <pX,Y> 等) の解析と行分割
+    let mut lines: Vec<Vec<StyledChar>> = vec![Vec::new()];
     let mut current_color: Option<Color32> = None;
-    let mut visible_count = 0usize;
+    let mut current_color2: Option<Color32> = None;
+    let mut current_size_scale: f32 = 1.0;
+    let mut current_font: Option<String> = None;
+    let mut pos_offset: (f32, f32) = (0.0, 0.0);
+    let mut cur_speed: f64 = speed.max(0.0);
+    let mut elapsed_required: f64 = 0.0;
+
     let chars: Vec<char> = raw_text.chars().collect();
     let mut idx = 0;
     while idx < chars.len() {
-        if let Some(limit) = max_visible_chars {
-            if visible_count >= limit {
-                break;
-            }
-        }
         let c = chars[idx];
         if c == '<' {
             if let Some(close_rel) = chars[idx + 1..].iter().position(|&x| x == '>') {
                 let tag: String = chars[idx + 1..idx + 1 + close_rel].iter().collect();
                 let tag_trim = tag.trim();
-                if let Some(hex) = tag_trim.strip_prefix('#') {
-                    if hex.is_empty() {
+                if let Some(hex_part) = tag_trim.strip_prefix('#') {
+                    let hex_trim = hex_part.trim();
+                    if hex_trim.is_empty() {
                         current_color = None;
-                    } else if hex.len() >= 6 {
-                        if let Some(col) = parse_color(&hex[..6]) {
-                            current_color = Some(col);
+                        current_color2 = None;
+                    } else {
+                        let mut parts = hex_trim.split(',');
+                        if let Some(p1) = parts.next() {
+                            let p1 = p1.trim();
+                            if p1.len() >= 6 {
+                                if let Some(col) = parse_color(&p1[..6]) {
+                                    current_color = Some(col);
+                                }
+                            } else if p1.is_empty() {
+                                current_color = None;
+                            }
+                        }
+                        if let Some(p2) = parts.next() {
+                            let p2 = p2.trim();
+                            if p2.len() >= 6 {
+                                if let Some(col2) = parse_color(&p2[..6]) {
+                                    current_color2 = Some(col2);
+                                }
+                            } else if p2.is_empty() {
+                                current_color2 = None;
+                            }
                         }
                     }
                     idx += close_rel + 2;
                     continue;
-                } else if tag_trim.starts_with('s')
-                    || tag_trim.starts_with('r')
-                    || tag_trim.starts_with('w')
-                    || tag_trim.starts_with('c')
-                    || tag_trim.starts_with('p')
-                    || tag_trim.starts_with('@')
-                    || tag_trim == "/"
-                    || tag_trim == "!"
+                } else if let Some(s_body) = tag_trim.strip_prefix('s') {
+                    // <sN> / <sN,FontName> / <sN,FontName,B/I> / <s>
+                    let is_valid_s_tag = s_body.is_empty()
+                        || s_body.starts_with(',')
+                        || s_body
+                            .chars()
+                            .next()
+                            .map(|ch| ch.is_ascii_digit() || ch == '.' || ch == '+')
+                            .unwrap_or(false);
+                    if is_valid_s_tag {
+                        if s_body.trim().is_empty() {
+                            current_size_scale = 1.0;
+                            current_font = None;
+                        } else {
+                            let mut parts = s_body.split(',');
+                            if let Some(sz_str) = parts.next() {
+                                let sz_trim = sz_str.trim();
+                                if sz_trim.is_empty() {
+                                    current_size_scale = 1.0;
+                                } else if let Ok(sz) = sz_trim.parse::<f32>() {
+                                    if sz > 0.0 {
+                                        current_size_scale = (sz / raw_size).clamp(0.1, 20.0);
+                                    } else {
+                                        current_size_scale = 1.0;
+                                    }
+                                }
+                            }
+                            if let Some(font_str) = parts.next() {
+                                let ft = font_str.trim();
+                                if ft.is_empty() {
+                                    current_font = None;
+                                } else {
+                                    current_font = Some(ft.to_string());
+                                }
+                            }
+                        }
+                        idx += close_rel + 2;
+                        continue;
+                    }
+                } else if let Some(r_body) = tag_trim.strip_prefix('r') {
+                    // <rN> / <r> (文字表示速度変更)
+                    let r_trim = r_body.trim();
+                    if r_trim.is_empty() {
+                        cur_speed = speed.max(0.0);
+                        idx += close_rel + 2;
+                        continue;
+                    } else if let Ok(spd) = r_trim.parse::<f64>() {
+                        cur_speed = spd.max(0.0);
+                        idx += close_rel + 2;
+                        continue;
+                    }
+                } else if let Some((is_mult, w_str)) = tag_trim
+                    .strip_prefix("*w")
+                    .map(|s| (true, s))
+                    .or_else(|| tag_trim.strip_prefix("w*").map(|s| (true, s)))
+                    .or_else(|| tag_trim.strip_prefix('w').map(|s| (false, s)))
                 {
+                    // <wN> / <*wN> (表示ウェイト)
+                    if let Ok(w_val) = w_str.trim().parse::<f64>() {
+                        let wait_sec = if is_mult {
+                            if cur_speed > 0.0 {
+                                w_val.max(0.0) / cur_speed
+                            } else {
+                                w_val.max(0.0)
+                            }
+                        } else {
+                            w_val.max(0.0)
+                        };
+                        elapsed_required += wait_sec;
+                        if elapsed_required > time_sec + 1e-9 {
+                            break;
+                        }
+                        idx += close_rel + 2;
+                        continue;
+                    }
+                } else if let Some((is_mult, c_str)) = tag_trim
+                    .strip_prefix("*c")
+                    .map(|s| (true, s))
+                    .or_else(|| tag_trim.strip_prefix("c*").map(|s| (true, s)))
+                    .or_else(|| tag_trim.strip_prefix('c').map(|s| (false, s)))
+                {
+                    // <cN> / <*cN> (クリア待機)
+                    let c_trim = c_str.trim();
+                    let parsed_c = if c_trim.is_empty() {
+                        Some(0.0)
+                    } else {
+                        c_trim.parse::<f64>().ok()
+                    };
+                    if let Some(c_val) = parsed_c {
+                        let wait_sec = if is_mult {
+                            if cur_speed > 0.0 {
+                                c_val.max(0.0) / cur_speed
+                            } else {
+                                c_val.max(0.0)
+                            }
+                        } else {
+                            c_val.max(0.0)
+                        };
+                        elapsed_required += wait_sec;
+                        if elapsed_required > time_sec + 1e-9 {
+                            break;
+                        }
+                        lines = vec![Vec::new()];
+                        pos_offset = (0.0, 0.0);
+                        idx += close_rel + 2;
+                        continue;
+                    }
+                } else if let Some(p_body) = tag_trim.strip_prefix('p') {
+                    // <pX,Y> / <p+X,+Y> / <p> (表示座標オフセット)
+                    let p_trim = p_body.trim();
+                    if p_trim.is_empty() {
+                        pos_offset = (0.0, 0.0);
+                        idx += close_rel + 2;
+                        continue;
+                    } else if p_trim.contains(',') {
+                        let is_tag_rel = p_trim.starts_with('+');
+                        let mut parts = p_trim.split(',');
+                        let px_str = parts.next().unwrap_or("0").trim();
+                        let py_str = parts.next().unwrap_or("0").trim();
+                        if let (Ok(px), Ok(py)) = (px_str.parse::<f32>(), py_str.parse::<f32>()) {
+                            if is_tag_rel || px_str.starts_with('+') {
+                                pos_offset.0 += px;
+                            } else {
+                                pos_offset.0 = px;
+                            }
+                            if is_tag_rel || py_str.starts_with('+') {
+                                pos_offset.1 += py;
+                            } else {
+                                pos_offset.1 = py;
+                            }
+                            idx += close_rel + 2;
+                            continue;
+                        }
+                    }
+                } else if tag_trim.starts_with('@') || tag_trim == "/" || tag_trim == "!" {
                     idx += close_rel + 2;
                     continue;
                 }
@@ -229,10 +385,24 @@ pub(crate) fn layout_aviutl_text(
         if c == '\n' {
             lines.push(Vec::new());
         } else {
-            if let Some(last_line) = lines.last_mut() {
-                last_line.push((c, current_color));
+            if cur_speed > 0.0 {
+                let step_t = 1.0 / cur_speed;
+                if elapsed_required + step_t > time_sec + 1e-9 {
+                    break;
+                }
+                elapsed_required += step_t;
             }
-            visible_count += 1;
+            if let Some(last_line) = lines.last_mut() {
+                last_line.push(StyledChar {
+                    ch: c,
+                    color: current_color,
+                    color2: current_color2,
+                    size_scale: current_size_scale,
+                    font: current_font.clone(),
+                    offset_x: pos_offset.0,
+                    offset_y: pos_offset.1,
+                });
+            }
         }
         idx += 1;
     }
@@ -240,23 +410,29 @@ pub(crate) fn layout_aviutl_text(
     // 末尾の空行が改行由来でない場合は維持しつつ、各文字のキャンバス幅を指定フォント実幅から算出
     let measure_font_sz = 32.0_f32;
     let measure_family = crate::fonts::resolve_bound_font_family(ctx.painter.ctx(), src.text("font"));
-    let char_canvas_width = |ch: char| -> f32 {
+    let char_canvas_width = |sc: &StyledChar| -> f32 {
+        let eff_size = raw_size * sc.size_scale;
         if monospace {
-            return raw_size;
+            return eff_size;
         }
-        if ch == ' ' {
-            return raw_size * 0.35;
+        if sc.ch == ' ' {
+            return eff_size * 0.35;
         }
-        if ch == '　' {
-            return raw_size * 0.92;
+        if sc.ch == '　' {
+            return eff_size * 0.92;
         }
+        let family = if let Some(ref f_ov) = sc.font {
+            crate::fonts::resolve_bound_font_family(ctx.painter.ctx(), Some(f_ov.as_str()))
+        } else {
+            measure_family.clone()
+        };
         let g = ctx.painter.layout_no_wrap(
-            ch.to_string(),
-            FontId::new(measure_font_sz, measure_family.clone()),
+            sc.ch.to_string(),
+            FontId::new(measure_font_sz, family),
             Color32::WHITE,
         );
         let ratio = (g.size().x / measure_font_sz).clamp(0.25, 1.30);
-        raw_size * ratio
+        eff_size * ratio
     };
 
     let mut out = Vec::new();
@@ -280,7 +456,7 @@ pub(crate) fn layout_aviutl_text(
             if line.is_empty() {
                 continue;
             }
-            let widths: Vec<f32> = line.iter().map(|&(ch, _)| char_canvas_width(ch)).collect();
+            let widths: Vec<f32> = line.iter().map(&char_canvas_width).collect();
             let line_w: f32 = widths.iter().sum::<f32>()
                 + (line.len().saturating_sub(1) as f32) * spacing_x;
             let start_x = match h_align {
@@ -290,13 +466,16 @@ pub(crate) fn layout_aviutl_text(
             };
             let cy = start_y + row_idx as f32 * line_step_y + raw_size * 0.5;
             let mut cursor_x = start_x;
-            for ((ch, col_ov), w) in line.iter().zip(widths.into_iter()) {
+            for (sc, w) in line.iter().zip(widths.into_iter()) {
                 let cx = cursor_x + w * 0.5;
                 out.push(TextCharLayout {
-                    ch: ch.to_string(),
-                    local_x: cx,
-                    local_y: cy,
-                    color_override: *col_ov,
+                    ch: sc.ch.to_string(),
+                    local_x: cx + sc.offset_x,
+                    local_y: cy + sc.offset_y,
+                    color_override: sc.color,
+                    color2_override: sc.color2,
+                    size_scale: sc.size_scale,
+                    font_override: sc.font.clone(),
                 });
                 cursor_x += w + spacing_x;
             }
@@ -329,13 +508,16 @@ pub(crate) fn layout_aviutl_text(
             };
             max_bottom_y = max_bottom_y.max(start_y + col_h);
             let cx = col0_cx - col_idx as f32 * col_step_x;
-            for (char_row, (ch, col_ov)) in line.iter().enumerate() {
+            for (char_row, sc) in line.iter().enumerate() {
                 let cy = start_y + char_row as f32 * char_step_y + raw_size * 0.5;
                 out.push(TextCharLayout {
-                    ch: ch.to_string(),
-                    local_x: cx,
-                    local_y: cy,
-                    color_override: *col_ov,
+                    ch: sc.ch.to_string(),
+                    local_x: cx + sc.offset_x,
+                    local_y: cy + sc.offset_y,
+                    color_override: sc.color,
+                    color2_override: sc.color2,
+                    size_scale: sc.size_scale,
+                    font_override: sc.font.clone(),
                 });
             }
         }

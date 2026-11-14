@@ -86,7 +86,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.menu_button("＋ フィルタ効果を追加", |ui| {
                         // 1. 発光・ブラー・装飾系
-                        ui.menu_button("✨ 発光・ライト・ブラー", |ui| {
+                        ui.menu_button("発光・ライト・ブラー", |ui| {
                             if ui.button("グロー").clicked() {
                                 let mut eff = Effect::new("グロー");
                                 eff.push_track("強さ", Track::constant(60.0, 1));
@@ -145,7 +145,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                         });
 
                         // 2. 装飾・縁取り・シャドー系
-                        ui.menu_button("🖋 縁取り・シャドー・エッジ", |ui| {
+                        ui.menu_button("縁取り・シャドー・エッジ", |ui| {
                             if ui.button("縁取り").clicked() {
                                 let mut eff = Effect::new("縁取り");
                                 eff.push_track("サイズ", Track::constant(4.0, 0));
@@ -189,7 +189,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                         });
 
                         // 3. 色調・グラデーション・キーイング系
-                        ui.menu_button("🎨 色調・グラデーション・キーイング", |ui| {
+                        ui.menu_button("色調・グラデーション・キーイング", |ui| {
                             if ui.button("色調補正").clicked() {
                                 let mut eff = Effect::new("色調補正");
                                 eff.push_track("明るさ", Track::constant(100.0, 1));
@@ -250,7 +250,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                         });
 
                         // 4. クリッピング・マスク・ワイプ・フェード
-                        ui.menu_button("✂ フェード・ワイプ・マスク・クリッピング", |ui| {
+                        ui.menu_button("フェード・ワイプ・マスク・クリッピング", |ui| {
                             if ui.button("フェード").clicked() {
                                 let mut eff = Effect::new("フェード");
                                 eff.push_track("イン", Track::constant(0.50, 2));
@@ -306,7 +306,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                         });
 
                         // 5. 変形・配置・歪み・基本効果
-                        ui.menu_button("📐 変形・配置・歪み・基本効果", |ui| {
+                        ui.menu_button("変形・配置・歪み・基本効果", |ui| {
                             if ui.button("振動").clicked() {
                                 let mut eff = Effect::new("振動");
                                 eff.push_track("X", Track::constant(15.0, 1));
@@ -451,7 +451,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                         // 6. アニメーション効果 / スクリプト / .auf プラグイン
                         if !available_scripts.is_empty() {
                             ui.separator();
-                            ui.menu_button("🎬 アニメーション効果 (標準 & スクリプト)", |ui| {
+                            ui.menu_button("アニメーション効果 (標準 & スクリプト)", |ui| {
                                 for (kind, entry) in &available_scripts {
                                     if *kind == au2_plugin::PluginKind::AnmScript {
                                         let name = au2_plugin::clean_script_name(&entry.display_name);
@@ -462,7 +462,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                                     }
                                 }
                             });
-                            ui.menu_button("🎥 カメラ効果 / プラグイン効果 (.auf)", |ui| {
+                            ui.menu_button("カメラ効果 / プラグイン効果 (.auf)", |ui| {
                                 for (kind, entry) in &available_scripts {
                                     if *kind != au2_plugin::PluginKind::AnmScript {
                                         let name = au2_plugin::clean_script_name(&entry.display_name);
@@ -710,7 +710,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                                         if is_missing {
                                             ui.horizontal(|ui| {
                                                 ui.colored_label(theme::danger_text(), "⚠ ファイルが見つかりません（リンク切れ）");
-                                                if ui.button("🎵 手元のファイルを割り当てる...").clicked() {
+                                                if ui.button("手元のファイルを割り当てる...").clicked() {
                                                     pending_relink = Some((s.clone(), is_audio));
                                                 }
                                             });
@@ -788,7 +788,7 @@ fn draw_easing_curve_preview(ui: &mut egui::Ui, easing_id: i32, is_selected: boo
     painter.rect_stroke(
         rect,
         2.0_f32,
-        Stroke::new(1.0_f32, if is_selected { Color32::from_rgb(90, 160, 240) } else { Color32::from_gray(50) }),
+        Stroke::new(1.0_f32, if is_selected { theme::accent_hi() } else { Color32::from_gray(50) }),
     );
 
     let steps = 14;
@@ -879,7 +879,7 @@ fn track_interpolation_menu(ui: &mut egui::Ui, t: &mut Track, total_len: Frame) 
 
         if t.is_animated() {
             ui.separator();
-            ui.menu_button("⚡ 加減速設定 (Ease)", |ui| {
+            ui.menu_button("加減速設定 (Ease)", |ui| {
                 let cur_easing = t.interpolation.as_ref().map(|i| i.easing).unwrap_or(Easing::None);
                 if ui.selectable_label(cur_easing == Easing::None, "等速 (None)").clicked() {
                     if let Some(i) = &mut t.interpolation {
@@ -911,7 +911,7 @@ fn track_interpolation_menu(ui: &mut egui::Ui, t: &mut Track, total_len: Frame) 
                 }
             });
 
-            ui.menu_button("📈 イージング・プリセット (AviUtl 1〜41)", |ui| {
+            ui.menu_button("イージング・プリセット (AviUtl 1〜41)", |ui| {
                 ui.set_max_height(260.0);
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     let easings = [

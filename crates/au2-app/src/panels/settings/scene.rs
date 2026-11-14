@@ -12,7 +12,7 @@ pub(crate) fn scene_settings_ui(ui: &mut egui::Ui, st: &mut EditorState) {
         .inner_margin(egui::Margin::symmetric(theme::spacing::XL, theme::spacing::LG))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.heading(RichText::new(format!("🎬 シーン設定: {}", st.scene.name)).strong().size(theme::typography::HEADING));
+                ui.heading(RichText::new(format!("シーン設定: {}", st.scene.name)).strong().size(theme::typography::HEADING));
             });
             ui.add_space(theme::spacing::XS);
             ui.label(RichText::new("タイムライン上のオブジェクトをクリックすると、そのオブジェクトの個別パラメータを編集できます。").weak().size(theme::typography::BODY_SM));

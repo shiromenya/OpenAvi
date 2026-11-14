@@ -721,6 +721,20 @@ impl SceneSoftwareRenderer {
         };
 
         let has_ffmpeg = st.media.has_ffmpeg();
+        let needs_waveform = st.scene.layers.iter().any(|l| {
+            l.visible
+                && l.objects.iter().any(|o| {
+                    o.contains(frame)
+                        && o.source()
+                            .map(|s| matches!(s.kind, EffectKind::AudioWaveform | EffectKind::Scene))
+                            .unwrap_or(false)
+                })
+        });
+        let waveform_bins = if needs_waveform {
+            st.sample_audio_waveform_at(frame, 64)
+        } else {
+            Vec::new()
+        };
         let scene_ref = &st.scene;
         let plugins_ref = &st.plugins;
         let scenes_ref = &st.scenes;
@@ -743,6 +757,7 @@ impl SceneSoftwareRenderer {
                 camera: None,
                 group_transform: None,
                 scene_depth: 0,
+                audio_waveform: &waveform_bins,
             };
             render_scene_at(&draw_ctx, scene_ref, frame, None);
         });

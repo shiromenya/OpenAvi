@@ -1,10 +1,11 @@
 //! 初代 AviUtl (32-bit x86) および AviUtl2 (64-bit x64) のネイティブプラグイン DLL
-//! (`.auf`, `.aui`, `.auo`, `.auc`, `.auf2`, `.aui2`, `.auo2`, `.auc2`, `.mod2`, `.aux2`) 解析・ブリッジローダ。
+//! (`.auf`, `.aui`, `.auo`, `.auc`, `.auf2`, `.aui2`, `.auo2`, `.auc2`, `.mod2`, `.aux2`) の静的 PE 構造解析モジュール。
 //!
-//! 64-bit プロセス上でも 32-bit `.auf` 等の PE セクション・エクスポートテーブル・`FILTER_DLL` 構造体、
-//! および AviUtl2 SDK の `FILTER_PLUGIN_TABLE` / `SCRIPT_MODULE_TABLE` / `COMMON_PLUGIN_TABLE` 構造体を
-//! 直接解析し、プラグイン名・バージョン情報・トラックバー定義（最小値・最大値・初期値）・
-//! チェックボックス・選択リスト・色・ファイル定義を完全抽出してタイムラインおよびプレビューで動作可能にします。
+//! `LoadLibrary` / `libloading` による動的ロードや DLL 内の機械語コード（`func_proc`・独自 HWND ウィンドウ）の実行は行いません。
+//! PE セクション・エクスポートテーブル・`FILTER_DLL` 構造体および AviUtl2 SDK の `FILTER_PLUGIN_TABLE` /
+//! `SCRIPT_MODULE_TABLE` / `COMMON_PLUGIN_TABLE` 構造体をバイト列から静的に解析し、
+//! プラグイン名・バージョン情報・トラックバー定義（最小値・最大値・初期値）・チェックボックス・
+//! 選択リスト・色・ファイル定義を抽出します。
 
 use crate::{BinaryArch, PluginKind, ScriptCheckDef, ScriptDialogParam, ScriptEntry, ScriptTrackDef};
 
@@ -1037,21 +1038,14 @@ pub fn inspect_native_pe_plugin(stem: &str, kind: PluginKind, bytes: &[u8]) -> N
         });
     }
 
-    // 4. 抽出された全フィルタエントリに対し、Mac / Linux / Windows 全環境で動作する互換 Lua ブリッジコードを自動合成・AST事前コンパイル
-    if matches!(kind, PluginKind::FilterDll) {
-        for entry in &mut entries {
-            if entry.script_body.trim().is_empty() {
-                let body = crate::auf_converter::synthesize_entry_lua_body(entry);
-                entry.compiled_ast = crate::lua_vm::compile_lua_script(&body);
-                entry.script_body = body;
-            }
-        }
-    }
+    // ※ ネイティブ DLL (.auf / .auf2) の機械語コード (func_proc) は実行しないため、
+    // 読込時にプラグイン名から推測した Lua コードを自動注入することはせず、
+    // 静的に抽出したパラメータ定義のみを保持する（手動移植用の .anm 雛形生成は auf_converter 側で明示実行する）。
 
     if description.is_empty() {
         description = match pe.arch {
-            BinaryArch::X86_32 => format!("初代 AviUtl 32-bit プラグイン ({})", kind.label()),
-            BinaryArch::X86_64 => format!("AviUtl2 / 64-bit ネイティブプラグイン ({})", kind.label()),
+            BinaryArch::X86_32 => format!("32-bit DLL 定義のみ読込・ネイティブ処理未実行 ({})", kind.label()),
+            BinaryArch::X86_64 => format!("64-bit DLL 定義のみ読込・ネイティブ処理未実行 ({})", kind.label()),
             _ => kind.label().to_string(),
         };
     }

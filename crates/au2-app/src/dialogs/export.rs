@@ -138,7 +138,7 @@ impl OpenAviApp {
         let is_running = self.export_modal.session.is_some();
         let has_ffmpeg = self.st.media.has_ffmpeg();
 
-        egui::Window::new("🎬 動画・音声の書き出し (エクスポート)")
+        egui::Window::new("動画・音声の書き出し (エクスポート)")
             .id(egui::Id::new("export_modal_window"))
             .frame(egui::Frame::window(&ctx.style()).fill(crate::theme::surface()))
             .collapsible(false)
@@ -149,12 +149,9 @@ impl OpenAviApp {
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing = vec2(10.0, 9.0);
 
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("🎞").size(26.0).color(crate::theme::accent_text()));
-                    ui.vertical(|ui| {
-                        ui.strong(RichText::new("動画・音声ファイルの書き出し").size(15.0));
-                        ui.weak("現在のタイムライン（図形・テキスト・画像・動画・音声・スクリプト効果）をファイルに出力します。");
-                    });
+                ui.vertical(|ui| {
+                    ui.strong(RichText::new("動画・音声ファイルの書き出し").size(15.0));
+                    ui.weak("現在のタイムライン（図形・テキスト・画像・動画・音声・スクリプト効果）をファイルに出力します。");
                 });
 
                 ui.separator();
@@ -203,7 +200,7 @@ impl OpenAviApp {
                                         {
                                             self.export_modal.config.output_path = PathBuf::from(path_str);
                                         }
-                                        if ui.button("📁 参照...").clicked() {
+                                        if ui.button("参照...").clicked() {
                                             let ext = self.export_modal.config.format.extension();
                                             let mut dlg = rfd::FileDialog::new()
                                                 .set_title("書き出し先のファイルを指定")
@@ -360,7 +357,7 @@ impl OpenAviApp {
                                                     });
 
                                                 if resolved.is_hardware_accelerated() {
-                                                    let tip = format!("⚡ GPU 高速エンコード有効 ({})", resolved.short_name());
+                                                    let tip = format!("GPU 高速エンコード有効 ({})", resolved.short_name());
                                                     ui.label(
                                                         RichText::new(tip)
                                                             .color(crate::theme::ok_text())
@@ -369,7 +366,7 @@ impl OpenAviApp {
                                                     );
                                                 } else {
                                                     ui.label(
-                                                        RichText::new("🛡️ CPU 安全エンコード (互換性重視)")
+                                                        RichText::new("CPU 安全エンコード (互換性重視)")
                                                             .color(crate::theme::text_muted())
                                                             .size(11.5),
                                                     );
@@ -411,7 +408,7 @@ impl OpenAviApp {
                                             if let (Some(inf), Some(outf)) = (self.st.timeline.in_point, self.st.timeline.out_point) {
                                                 let (sf, ef) = (inf.min(outf), inf.max(outf));
                                                 let btn = egui::Button::new(
-                                                    RichText::new(format!("📍 選択範囲 ({}〜{}F)", sf + 1, ef + 1))
+                                                    RichText::new(format!("選択範囲 ({}〜{}F)", sf + 1, ef + 1))
                                                         .color(Color32::WHITE)
                                                         .strong(),
                                                 ).fill(crate::theme::accent());
@@ -462,7 +459,7 @@ impl OpenAviApp {
                             crate::theme::warn_text(),
                             "⚠ 動画書き出しには FFmpeg が必要です。",
                         );
-                        if ui.button("⬇ FFmpeg を自動ダウンロード").clicked() {
+                        if ui.button("FFmpeg を自動ダウンロード").clicked() {
                             self.st.start_ffmpeg_download();
                         }
                     });
@@ -496,10 +493,10 @@ impl OpenAviApp {
                             ui.horizontal(|ui| {
                                 ui.colored_label(
                                     crate::theme::ok_text(),
-                                    format!("✅ 書き出しが完了しました: {}", done_path.display()),
+                                    format!("書き出しが完了しました: {}", done_path.display()),
                                 );
                                 if let Some(_parent) = done_path.parent() {
-                                    if ui.small_button("📂 保存先フォルダを開く").clicked() {
+                                    if ui.small_button("保存先フォルダを開く").clicked() {
                                         au2_platform::reveal_in_file_manager(done_path);
                                     }
                                 }
@@ -529,7 +526,7 @@ impl OpenAviApp {
                     } else {
                         let can_export = has_ffmpeg || self.export_modal.config.format.is_audio_only();
                         let start_btn = egui::Button::new(
-                            RichText::new("🎬 書き出しを開始")
+                            RichText::new("書き出しを開始")
                                 .color(Color32::WHITE)
                                 .strong()
                                 .size(13.5),

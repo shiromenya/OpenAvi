@@ -1,4 +1,4 @@
-﻿//! PSD 立ち絵・レイヤー分離・目パチ・口パク設定UI（PSDToolKit 互換）。
+//! PSD 立ち絵・レイヤー分離・目パチ・口パク設定UI（PSDToolKit 互換）。
 
 use au2_core::{Effect, Param, ParamValue};
 use eframe::egui::{self, CollapsingHeader, DragValue, Grid, RichText, Stroke};
@@ -60,7 +60,7 @@ pub(crate) fn psd_inspector_ui(
         .show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(
-                    RichText::new("🎨 PSD 立ち絵・レイヤー設定 (PSDToolKit 互換)")
+                    RichText::new("PSD 立ち絵・レイヤー設定 (PSDToolKit 互換)")
                         .strong()
                         .color(theme::accent_text()),
                 );
@@ -74,7 +74,7 @@ pub(crate) fn psd_inspector_ui(
                 );
                 if !psd_label.is_empty() {
                     ui.label(
-                        RichText::new(format!("✂ 抽出パーツ: {}", psd_label))
+                        RichText::new(format!("抽出パーツ: {}", psd_label))
                             .size(theme::typography::BODY_SM)
                             .color(theme::ok_text()),
                     );
@@ -96,9 +96,9 @@ pub(crate) fn psd_inspector_ui(
             // 0. レイヤー・パーツ分解ツールバー
             ui.add_space(theme::spacing::MD);
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("✂ メディア分解:").strong().size(theme::typography::BODY));
+                ui.label(RichText::new("メディア分解:").strong().size(theme::typography::BODY));
                 if ui
-                    .button("📁 パーツ(フォルダ)単位でタイムラインへ分解")
+                    .button("パーツ(フォルダ)単位でタイムラインへ分解")
                     .on_hover_text(
                         "眉・目・口・髪・体などのフォルダ単位で別々のレイヤー行へ分解配置します。\n\
                          各パーツの中心座標が自動計算されるため個別回転・揺れエフェクトに最適で、分解後も目パチ・口パク・表情切替がそのまま使えます。",
@@ -108,7 +108,7 @@ pub(crate) fn psd_inspector_ui(
                     *pending_action = Some(PsdPendingAction::DecomposeFolders { tight_crop: true });
                 }
                 if ui
-                    .button("📑 表示レイヤーを1枚ずつタイムラインへ分解")
+                    .button("表示レイヤーを1枚ずつタイムラインへ分解")
                     .on_hover_text(
                         "現在表示中の全ピクセルレイヤーを1枚ずつ別々のレイヤー行へ分解配置します。\n\
                          各レイヤーの描画範囲で自動トリミング＆座標配置され、ブレンドモード（乗算・スクリーン等）も自動引き継ぎされます。",
@@ -117,9 +117,9 @@ pub(crate) fn psd_inspector_ui(
                 {
                     *pending_action = Some(PsdPendingAction::DecomposeLayers { tight_crop: true });
                 }
-                ui.menu_button("💾 透過PNG書き出し / 詳細...", |ui| {
+                ui.menu_button("透過PNG書き出し / 詳細...", |ui| {
                     if ui
-                        .button("💾 パーツ(フォルダ)単位で透過PNG一括書き出し...")
+                        .button("パーツ(フォルダ)単位で透過PNG一括書き出し...")
                         .clicked()
                     {
                         *pending_action = Some(PsdPendingAction::ExportPng {
@@ -129,7 +129,7 @@ pub(crate) fn psd_inspector_ui(
                         ui.close_menu();
                     }
                     if ui
-                        .button("💾 表示レイヤーを1枚ずつ透過PNG一括書き出し...")
+                        .button("表示レイヤーを1枚ずつ透過PNG一括書き出し...")
                         .clicked()
                     {
                         *pending_action = Some(PsdPendingAction::ExportPng {
@@ -140,7 +140,7 @@ pub(crate) fn psd_inspector_ui(
                     }
                     ui.separator();
                     if ui
-                        .button("📁 パーツ単位でタイムラインへ分解 (元キャンバス余白を維持)")
+                        .button("パーツ単位でタイムラインへ分解 (元キャンバス余白を維持)")
                         .clicked()
                     {
                         *pending_action =
@@ -148,7 +148,7 @@ pub(crate) fn psd_inspector_ui(
                         ui.close_menu();
                     }
                     if ui
-                        .button("📑 表示レイヤーを1枚ずつ分解 (元キャンバス余白を維持)")
+                        .button("表示レイヤーを1枚ずつ分解 (元キャンバス余白を維持)")
                         .clicked()
                     {
                         *pending_action =
@@ -161,11 +161,11 @@ pub(crate) fn psd_inspector_ui(
             // 1. お気に入り (.pfv) プリセット
             if !doc.favorites.is_empty() {
                 ui.add_space(theme::spacing::MD);
-                ui.label(RichText::new("⭐ お気に入りプリセット (.pfv)").strong().size(theme::typography::BODY));
+                ui.label(RichText::new("お気に入りプリセット (.pfv)").strong().size(theme::typography::BODY));
                 ui.horizontal_wrapped(|ui| {
                     for fav in &doc.favorites {
                         if ui
-                            .button(format!("⭐ {}", fav.name))
+                            .button(format!("{}", fav.name))
                             .on_hover_text(format!("{} 個のレイヤー切替を一括適用", fav.active_paths.len()))
                             .clicked()
                         {
@@ -185,7 +185,7 @@ pub(crate) fn psd_inspector_ui(
 
             // 2. 目パチ・口パク 自動アニメーション設定
             CollapsingHeader::new(
-                RichText::new("👁 目パチ ・ 👄 口パク 自動アニメーション").strong(),
+                RichText::new("目パチ ・ 口パク 自動アニメーション").strong(),
             )
             .id_salt(("au2-psd-anim", id))
             .default_open(true)
@@ -194,7 +194,7 @@ pub(crate) fn psd_inspector_ui(
                 let mut blink_changed = false;
                 ui.horizontal_wrapped(|ui| {
                     if ui
-                        .checkbox(&mut blink_cfg.enabled, RichText::new("👁 自動目パチを有効化").strong())
+                        .checkbox(&mut blink_cfg.enabled, RichText::new("自動目パチを有効化").strong())
                         .changed()
                     {
                         if blink_cfg.enabled
@@ -314,10 +314,10 @@ pub(crate) fn psd_inspector_ui(
                 // --- 口パク ---
                 let mut lip_changed = false;
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("👄 口パク:").strong());
+                    ui.label(RichText::new("口パク:").strong());
                     for (mode, label) in [
                         (au2_media::PsdLipSyncMode::Off, "OFF"),
-                        (au2_media::PsdLipSyncMode::AudioSync, "🔊 音声連動"),
+                        (au2_media::PsdLipSyncMode::AudioSync, "音声連動"),
                         (au2_media::PsdLipSyncMode::Periodic, "⏱ 周期開閉"),
                     ] {
                         if ui.selectable_label(lipsync_cfg.mode == mode, label).clicked() {
@@ -460,7 +460,7 @@ pub(crate) fn psd_inspector_ui(
                 ui.add_space(4.0);
                 CollapsingHeader::new(
                     RichText::new(format!(
-                        "⚡ パーツ・表情クイック切替 ({} グループ)",
+                        "パーツ・表情クイック切替 ({} グループ)",
                         part_groups.len()
                     ))
                     .strong(),
@@ -479,7 +479,7 @@ pub(crate) fn psd_inspector_ui(
                                     .get(*folder_id)
                                     .map(|fl| fl.path.as_str())
                                     .unwrap_or("グループ");
-                                ui.label(RichText::new(format!("📁 {}", folder_label)).strong());
+                                ui.label(RichText::new(format!("{}", folder_label)).strong());
                                 ui.horizontal_wrapped(|ui| {
                                     for &child_id in child_ids {
                                         let Some(layer) = doc.layers.get(child_id) else {
@@ -529,7 +529,7 @@ pub(crate) fn psd_inspector_ui(
             // 4. 全レイヤー階層ツリー
             ui.add_space(4.0);
             CollapsingHeader::new(
-                RichText::new(format!("🗂 全レイヤー階層ツリー ({} 件)", visible_layer_count)).strong(),
+                RichText::new(format!("全レイヤー階層ツリー ({} 件)", visible_layer_count)).strong(),
             )
             .id_salt(("au2-psd-tree", id))
             .default_open(part_groups.is_empty())
@@ -550,13 +550,13 @@ pub(crate) fn psd_inspector_ui(
                             ui.horizontal(|ui| {
                                 ui.add_space(layer.depth as f32 * 14.0);
                                 let icon = if matches!(layer.kind, au2_media::PsdLayerKind::FolderStart { .. }) {
-                                    "📁"
+                                    "▸"
                                 } else if layer.is_radio {
-                                    "🔘"
+                                    "◉"
                                 } else if layer.is_mandatory {
-                                    "📌"
+                                    "*"
                                 } else {
-                                    "🖼"
+                                    "▫"
                                 };
                                 let label_text = format!("{} {}", icon, layer.name);
                                 if layer.is_mandatory && !is_isolated {

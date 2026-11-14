@@ -53,6 +53,7 @@ pub(crate) struct DrawCtx<'a> {
     pub(crate) camera: Option<Camera3D>,
     pub(crate) group_transform: Option<GroupTransform>,
     pub(crate) scene_depth: u32,
+    pub(crate) audio_waveform: &'a [f32],
 }
 
 /// 指定したシーン (`scene`) の `frame` における描画を実行します（サブシーン呼び出し・カメラ制御・グループ制御・時間制御・クリッピング対応）。
@@ -332,6 +333,38 @@ pub(crate) fn render_scene_at(
                 }
             }
         }
+
+        // レイヤー設定「座標のリンク (coordinate_link)」が有効な場合、直上のリンク元レイヤーの座標オフセットを加算
+        let mut cur = layer_idx;
+        while cur > 0 && scene.layers.get(cur).map(|l| l.coordinate_link).unwrap_or(false) {
+            cur -= 1;
+            if let Some(anchor_layer) = scene.layers.get(cur) {
+                if !anchor_layer.visible {
+                    continue;
+                }
+                let af = resolve_layer_frame(cur);
+                if let Some(anchor_obj) = anchor_layer.objects.iter().find(|o| o.contains(af)) {
+                    let arel = af - anchor_obj.frame_start;
+                    let adraw = anchor_obj
+                        .effect(&EffectKind::StandardDraw)
+                        .or_else(|| anchor_obj.effect(&EffectKind::ExtendedDraw));
+                    let mut ax = adraw.map(|d| d.eval("X", arel, 0.0)).unwrap_or(0.0);
+                    let mut ay = adraw.map(|d| d.eval("Y", arel, 0.0)).unwrap_or(0.0);
+                    let mut az = adraw.map(|d| d.eval("Z", arel, 0.0)).unwrap_or(0.0);
+                    for eff in &anchor_obj.effects {
+                        if eff.enabled && eff.name == "座標" {
+                            ax += eff.eval("X", arel, 0.0);
+                            ay += eff.eval("Y", arel, 0.0);
+                            az += eff.eval("Z", arel, 0.0);
+                        }
+                    }
+                    combined.ox += ax;
+                    combined.oy += ay;
+                    combined.oz += az;
+                }
+            }
+        }
+
         combined
     };
 
@@ -398,11 +431,18 @@ pub(crate) fn render_scene_at(
         })
     });
 
-    // 5. 「上のオブジェクトでクリッピング (obj.clipping)」の領域追跡を行いながら描画
+    // 5. 「上のオブジェクトでクリッピング (obj.clipping / layer.clip_above)」および「直前オブジェクト (PreviousObject)」の追跡を行いながら描画
     let mut last_non_clipping_bounds: Option<Rect> = None;
+    let mut last_media_object: Option<(&TimelineObject, Frame)> = None;
 
     for (_, _, layer_idx, obj, rel, gt) in render_items {
-        let clipped_painter = if obj.clipping {
+        let is_clipping = obj.clipping
+            || scene
+                .layers
+                .get(layer_idx)
+                .map(|l| l.clip_above)
+                .unwrap_or(false);
+        let clipped_painter = if is_clipping {
             if let Some(clip_r) = last_non_clipping_bounds {
                 Some(base_ctx.painter.with_clip_rect(clip_r.intersect(base_ctx.canvas)))
             } else {
@@ -426,10 +466,69 @@ pub(crate) fn render_scene_at(
             camera: active_camera.map(|(_, c)| c).or(base_ctx.camera),
             group_transform: Some(gt),
             scene_depth: base_ctx.scene_depth,
+            audio_waveform: base_ctx.audio_waveform,
         };
 
-        let drawn_bounds = draw_object(&item_ctx, layer_idx, obj, rel, selected_id == Some(obj.id));
-        if !obj.clipping {
+        let is_prev_obj = matches!(
+            obj.source().map(|s| &s.kind),
+            Some(EffectKind::PreviousObject)
+        );
+        let drawn_bounds = if is_prev_obj {
+            if let Some((prev_obj, _prev_rel)) = last_media_object {
+                if let Some(prev_src) = prev_obj.source() {
+                    let mut merged_effects = Vec::with_capacity(prev_obj.effects.len() + obj.effects.len());
+                    merged_effects.push(prev_src.clone());
+                    for eff in &prev_obj.effects {
+                        if !std::ptr::eq(eff, prev_src)
+                            && !matches!(
+                                eff.kind,
+                                EffectKind::StandardDraw
+                                    | EffectKind::ExtendedDraw
+                                    | EffectKind::StandardPlayback
+                            )
+                        {
+                            merged_effects.push(eff.clone());
+                        }
+                    }
+                    let obj_has_draw = obj.effects.iter().any(|e| {
+                        matches!(e.kind, EffectKind::StandardDraw | EffectKind::ExtendedDraw)
+                    });
+                    if !obj_has_draw {
+                        if let Some(prev_draw) = prev_obj
+                            .effect(&EffectKind::StandardDraw)
+                            .or_else(|| prev_obj.effect(&EffectKind::ExtendedDraw))
+                        {
+                            merged_effects.push(prev_draw.clone());
+                        }
+                    }
+                    for eff in &obj.effects {
+                        if !matches!(eff.kind, EffectKind::PreviousObject) {
+                            merged_effects.push(eff.clone());
+                        }
+                    }
+                    let mut merged_obj = prev_obj.clone();
+                    merged_obj.frame_start = obj.frame_start;
+                    merged_obj.frame_end = obj.frame_end;
+                    merged_obj.group = obj.group;
+                    merged_obj.camera_target = obj.camera_target;
+                    merged_obj.clipping = obj.clipping;
+                    merged_obj.effects = merged_effects;
+                    draw_object(&item_ctx, layer_idx, &merged_obj, rel, selected_id == Some(obj.id))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            let b = draw_object(&item_ctx, layer_idx, obj, rel, selected_id == Some(obj.id));
+            if obj.category() == ObjectCategory::Media {
+                last_media_object = Some((obj, rel));
+            }
+            b
+        };
+
+        if !is_clipping {
             last_non_clipping_bounds = drawn_bounds;
         }
     }
@@ -483,6 +582,9 @@ fn draw_object(ctx: &DrawCtx, layer_idx: usize, obj: &TimelineObject, rel: Frame
                     local_x: 0.0,
                     local_y: 0.0,
                     color_override: item.color_override,
+                    color2_override: item.color2_override,
+                    size_scale: item.size_scale,
+                    font_override: item.font_override.clone(),
                 };
                 if let Some(b) = draw_object_sub(
                     ctx,
@@ -1905,10 +2007,11 @@ fn draw_single_instance(
                                   local_off: egui::Vec2,
                                   galley: std::sync::Arc<egui::epaint::Galley>,
                                   col: Color32,
-                                  flip_y_around: Option<f32>|
+                                  flip_y_around: Option<f32>,
+                                  char_scale_up: f32|
              -> Option<Rect> {
                 let half = galley.size() * 0.5;
-                if use_3d_mesh || scale_up > 1.001 || flip_y_around.is_some() {
+                if use_3d_mesh || char_scale_up > 1.001 || flip_y_around.is_some() {
                     let shape = egui::epaint::TextShape::new(Pos2::ZERO, galley.clone(), col);
                     let clipped = egui::epaint::ClippedShape {
                         clip_rect: egui::Rect::EVERYTHING,
@@ -1923,8 +2026,8 @@ fn draw_single_instance(
                             let mut all_valid = true;
                             for v in &mut mesh.vertices {
                                 v.color = col;
-                                let gx = (v.pos.x - half.x) * scale_up * inv_k;
-                                let gy = (v.pos.y - half.y) * scale_up * inv_k;
+                                let gx = (v.pos.x - half.x) * char_scale_up * inv_k;
+                                let gy = (v.pos.y - half.y) * char_scale_up * inv_k;
                                 let lx = local_off.x + gx;
                                 let mut ly = local_off.y + gy;
                                 if let Some(my) = flip_y_around {
@@ -1980,6 +2083,7 @@ fn draw_single_instance(
             };
 
             let mut total_bounds: Option<Rect> = None;
+            let _ = (font_id, scale_up);
 
             for item in &char_items {
                 if item.ch == " " || item.ch == "　" {
@@ -1987,7 +2091,22 @@ fn draw_single_instance(
                 }
                 let item_off = vec2(item.local_x, item.local_y);
                 let main_col = apply_tint(item.color_override.unwrap_or(base_color));
-                let galley = painter.layout_no_wrap(item.ch.clone(), font_id.clone(), main_col);
+                let item_color2 = item.color2_override.unwrap_or(color2);
+                let item_scale = item.size_scale.clamp(0.1, 20.0);
+                let item_canvas_size = (raw_canvas_size * item_scale).max(1.0);
+                let item_scaled_raw = (item_canvas_size * k).max(1.0);
+                let (item_font_size, item_scale_up) = if item_scaled_raw > max_font_size {
+                    (max_font_size, (item_scaled_raw / max_font_size).min(100.0))
+                } else {
+                    (item_scaled_raw, 1.0)
+                };
+                let item_family = if let Some(ref f_ov) = item.font_override {
+                    crate::fonts::resolve_bound_font_family(painter.ctx(), Some(f_ov.as_str()))
+                } else {
+                    crate::fonts::resolve_bound_font_family(painter.ctx(), src.text("font"))
+                };
+                let item_font_id = FontId::new(item_font_size, item_family);
+                let galley = painter.layout_no_wrap(item.ch.clone(), item_font_id, main_col);
 
                 // 1. グロー効果 (`fx.glow_strength`)
                 if fx.glow_strength > 0.01 {
@@ -2002,7 +2121,7 @@ fn draw_single_instance(
                     let gc = Color32::from_rgba_unmultiplied(gcol.r(), gcol.g(), gcol.b(), glow_alpha);
                     let gr = (fx.glow_radius * 0.12).clamp(1.5, 8.0);
                     for (dx, dy) in [(-gr, 0.0), (gr, 0.0), (0.0, -gr), (0.0, gr)] {
-                        let _ = draw_galley_at(painter, item_off + vec2(dx, dy), galley.clone(), gc.gamma_multiply(0.45), None);
+                        let _ = draw_galley_at(painter, item_off + vec2(dx, dy), galley.clone(), gc.gamma_multiply(0.45), None, item_scale_up);
                     }
                 }
                 if fx.glow_only {
@@ -2012,36 +2131,36 @@ fn draw_single_instance(
                 // 2. シャドーフィルタ (`fx.shadow_offset`)
                 if let Some(sh_off) = fx.shadow_offset {
                     let sh_col = Color32::from_black_alpha((fx.shadow_alpha * alpha * 200.0) as u8);
-                    let _ = draw_galley_at(painter, item_off + sh_off, galley.clone(), sh_col, None);
+                    let _ = draw_galley_at(painter, item_off + sh_off, galley.clone(), sh_col, None, item_scale_up);
                 }
 
-                // 3. 文字装飾 (	ype = 1..4: 影付き / 縁取り) または 縁取りフィルタ (x.border_width)
+                // 3. 文字装飾 (type = 1..4: 影付き / 縁取り) または 縁取りフィルタ (fx.border_width)
                 if text_type == 1 || text_type == 2 {
                     // 多層ソフトドロップシャドウ（自然で上品なテロップ影）
                     let sh_a = if text_type == 1 { 0.85 } else { 0.45 };
-                    let d = (raw_canvas_size * 0.075).clamp(2.0, 64.0);
-                    let base_sc = color2.gamma_multiply(alpha * sh_a);
-                    let _ = draw_galley_at(painter, item_off + vec2(d, d), galley.clone(), base_sc, None);
+                    let d = (item_canvas_size * 0.075).clamp(2.0, 64.0);
+                    let base_sc = item_color2.gamma_multiply(alpha * sh_a);
+                    let _ = draw_galley_at(painter, item_off + vec2(d, d), galley.clone(), base_sc, None, item_scale_up);
 
                     // 微細ブラー層（ソフトエッジ）
-                    let blur_sc = color2.gamma_multiply(alpha * sh_a * 0.35);
+                    let blur_sc = item_color2.gamma_multiply(alpha * sh_a * 0.35);
                     let blur_r = (d * 0.45).clamp(1.0, 24.0);
                     for (bx, by) in [(-blur_r, 0.0), (blur_r, 0.0), (0.0, -blur_r), (0.0, blur_r)] {
-                        let _ = draw_galley_at(painter, item_off + vec2(d + bx, d + by), galley.clone(), blur_sc, None);
+                        let _ = draw_galley_at(painter, item_off + vec2(d + bx, d + by), galley.clone(), blur_sc, None, item_scale_up);
                     }
                 } else if text_type == 3 || text_type == 4 || fx.border_width > 0.5 {
                     // 高品質・角丸円周サンプリング縁取り（16〜24方向＋内側補間）
                     let bw = if fx.border_width > 0.5 {
                         fx.border_width
                     } else if text_type == 3 {
-                        (raw_canvas_size * 0.075).clamp(2.0, 64.0)
+                        (item_canvas_size * 0.075).clamp(2.0, 64.0)
                     } else {
-                        (raw_canvas_size * 0.040).clamp(1.2, 32.0)
+                        (item_canvas_size * 0.040).clamp(1.2, 32.0)
                     };
                     let bc = if fx.border_width > 0.5 {
-                        fx.border_color.unwrap_or(color2)
+                        fx.border_color.unwrap_or(item_color2)
                     } else {
-                        color2
+                        item_color2
                     }
                     .gamma_multiply(alpha);
 
@@ -2056,8 +2175,8 @@ fn draw_single_instance(
                         for i in 0..samples {
                             let angle = i as f32 * step_angle;
                             let (sa, ca) = (angle.sin(), angle.cos());
-                            let _ = draw_galley_at(painter, item_off + vec2(ca * r1, sa * r1), galley.clone(), bc, None);
-                            let _ = draw_galley_at(painter, item_off + vec2(ca * r2, sa * r2), galley.clone(), bc, None);
+                            let _ = draw_galley_at(painter, item_off + vec2(ca * r1, sa * r1), galley.clone(), bc, None, item_scale_up);
+                            let _ = draw_galley_at(painter, item_off + vec2(ca * r2, sa * r2), galley.clone(), bc, None, item_scale_up);
                         }
                     } else if bw >= 2.5 {
                         let inner_r = bw * 0.55;
@@ -2065,7 +2184,7 @@ fn draw_single_instance(
                             let angle = i as f32 * step_angle;
                             let dx = inner_r * angle.cos();
                             let dy = inner_r * angle.sin();
-                            let _ = draw_galley_at(painter, item_off + vec2(dx, dy), galley.clone(), bc, None);
+                            let _ = draw_galley_at(painter, item_off + vec2(dx, dy), galley.clone(), bc, None, item_scale_up);
                         }
                     }
                     // 外周サンプリング
@@ -2073,7 +2192,7 @@ fn draw_single_instance(
                         let angle = i as f32 * step_angle;
                         let dx = bw * angle.cos();
                         let dy = bw * angle.sin();
-                        let _ = draw_galley_at(painter, item_off + vec2(dx, dy), galley.clone(), bc, None);
+                        let _ = draw_galley_at(painter, item_off + vec2(dx, dy), galley.clone(), bc, None, item_scale_up);
                     }
                 }
 
@@ -2082,8 +2201,8 @@ fn draw_single_instance(
                     let shift_canvas = vec2(fx.chroma_angle.cos(), fx.chroma_angle.sin()) * fx.chroma_shift;
                     let r_col = Color32::from_rgba_unmultiplied(255, 50, 50, (alpha * 150.0) as u8);
                     let b_col = Color32::from_rgba_unmultiplied(50, 180, 255, (alpha * 150.0) as u8);
-                    let _ = draw_galley_at(painter, item_off - shift_canvas, galley.clone(), r_col, None);
-                    let _ = draw_galley_at(painter, item_off + shift_canvas, galley.clone(), b_col, None);
+                    let _ = draw_galley_at(painter, item_off - shift_canvas, galley.clone(), r_col, None, item_scale_up);
+                    let _ = draw_galley_at(painter, item_off + shift_canvas, galley.clone(), b_col, None, item_scale_up);
                 }
 
                 // 5. 凸エッジ (`fx.bevel_width`)
@@ -2091,19 +2210,19 @@ fn draw_single_instance(
                     let bd = (fx.bevel_width * 0.35).clamp(0.8, 3.5);
                     let hi_col = Color32::from_white_alpha((alpha * 110.0) as u8);
                     let lo_col = Color32::from_black_alpha((alpha * 140.0) as u8);
-                    let _ = draw_galley_at(painter, item_off + vec2(bd, bd), galley.clone(), lo_col, None);
-                    let _ = draw_galley_at(painter, item_off - vec2(bd * 0.8, bd * 0.8), galley.clone(), hi_col, None);
+                    let _ = draw_galley_at(painter, item_off + vec2(bd, bd), galley.clone(), lo_col, None, item_scale_up);
+                    let _ = draw_galley_at(painter, item_off - vec2(bd * 0.8, bd * 0.8), galley.clone(), hi_col, None, item_scale_up);
                 }
 
                 // 6. 本体文字描画
-                if let Some(r) = draw_galley_at(painter, item_off, galley.clone(), main_col, None) {
+                if let Some(r) = draw_galley_at(painter, item_off, galley.clone(), main_col, None, item_scale_up) {
                     total_bounds = Some(total_bounds.map(|b| b.union(r)).unwrap_or(r));
                 }
 
                 // 7. ミラー反射 (`fx.mirror_alpha`)
                 if fx.mirror_alpha > 0.01 {
                     let m_col = main_col.gamma_multiply(fx.mirror_alpha * 0.45);
-                    let _ = draw_galley_at(painter, item_off, galley, m_col, Some(mirror_bottom_y));
+                    let _ = draw_galley_at(painter, item_off, galley, m_col, Some(mirror_bottom_y), item_scale_up);
                 }
             }
 
@@ -2151,6 +2270,7 @@ fn draw_single_instance(
                     camera: ctx.camera,
                     group_transform: Some(sub_gt),
                     scene_depth: ctx.scene_depth + 1,
+                    audio_waveform: ctx.audio_waveform,
                 };
                 render_scene_at(&sub_ctx, sub_scene, sub_frame, None);
             }
@@ -2175,13 +2295,54 @@ fn draw_single_instance(
         EffectKind::AudioWaveform => {
             let w = src.eval("横幅", rel, 240.0) as f32 * k;
             let h = src.eval("高さ", rel, 100.0) as f32 * k;
+            let vol_scale = (src.eval("音量", rel, 100.0) / 100.0).clamp(0.0, 5.0) as f32;
+            let wf_type = src
+                .text("type")
+                .and_then(|s| s.trim().parse::<u8>().ok())
+                .unwrap_or(0);
             let col = apply_tint(src.text("color").and_then(parse_color).unwrap_or(Color32::WHITE));
-            let bars = 32usize;
-            let bar_w = (w / bars as f32).max(1.5);
+            let bars = if !ctx.audio_waveform.is_empty() {
+                ctx.audio_waveform.len()
+            } else {
+                32usize
+            };
+            let step_x = w / bars.max(1) as f32;
+            let bar_w = step_x.max(1.5);
+            let mut prev_pt: Option<Pos2> = None;
             for i in 0..bars {
-                let amp = (aviutl_rand(0.1, 1.0, i as i32, rel as i64 / 2) as f32) * h * 0.5;
-                let bx = center.x - w * 0.5 + (i as f32 + 0.5) * (w / bars as f32);
-                painter.line_segment([pos2(bx, center.y - amp), pos2(bx, center.y + amp)], Stroke::new(bar_w * 0.7, col));
+                let norm_amp = if !ctx.audio_waveform.is_empty() {
+                    (ctx.audio_waveform[i] * vol_scale).clamp(0.0, 1.0)
+                } else {
+                    let phase = (rel as f32 * 0.18) + (i as f32 * 0.35);
+                    ((phase.sin() * 0.35 + (phase * 2.3).cos() * 0.25).abs() + 0.08).clamp(0.05, 0.9)
+                        * vol_scale.min(1.5)
+                };
+                let amp = norm_amp * h * 0.5;
+                let bx = center.x - w * 0.5 + (i as f32 + 0.5) * step_x;
+                match wf_type {
+                    1 | 3 => {
+                        let sign = if i % 2 == 0 { -1.0 } else { 1.0 };
+                        let pt = pos2(bx, center.y + sign * amp);
+                        if let Some(p0) = prev_pt {
+                            painter.line_segment([p0, pt], Stroke::new((1.8 * k).max(1.2), col));
+                        }
+                        prev_pt = Some(pt);
+                    }
+                    2 => {
+                        let bottom_y = center.y + h * 0.5;
+                        let top_y = (bottom_y - amp * 1.8).max(center.y - h * 0.5);
+                        painter.line_segment(
+                            [pos2(bx, bottom_y), pos2(bx, top_y)],
+                            Stroke::new(bar_w * 0.72, col),
+                        );
+                    }
+                    _ => {
+                        painter.line_segment(
+                            [pos2(bx, center.y - amp), pos2(bx, center.y + amp)],
+                            Stroke::new(bar_w * 0.72, col),
+                        );
+                    }
+                }
             }
             Some(Rect::from_center_size(center, vec2(w, h)))
         }

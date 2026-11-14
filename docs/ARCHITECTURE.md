@@ -17,7 +17,7 @@ au2-app ──► au2-aup ──► au2-exo ──► au2-core
 | `au2-core` | プロジェクト / シーン / レイヤー / オブジェクト / トラック（補間）のデータモデル | UI・ファイル形式・OS に非依存 |
 | `au2-exo` | `.exo` / `.exa`（拡張編集エイリアス）の読み書き、文字コード判別 | ラウンドトリップ保持が必須 |
 | `au2-aup` | `.aup2`（AviUtl2）と `.aup`（初代バイナリ。`legacy_aup.rs`）の読み書き | 旧 `.aup` は内部で `.exo` テキストに変換して `au2-exo` に渡す |
-| `au2-plugin` | `.anm/.obj/.cam/.scn/.tra`（Lua 互換 VM: `lua_vm.rs`）と PE プラグイン解析（`pe_loader.rs`） | PE 解析は純粋なバイト列処理（OS 非依存） |
+| `au2-plugin` | `.anm/.obj/.cam/.scn/.tra`（組み込み Lua サブセット: `lua_vm.rs`）と PE パラメータ定義の静的抽出（`pe_loader.rs`） | PE 解析は純粋なバイト列処理（DLL の動的ロードや機械語実行は行わない） |
 | `au2-media` | 画像・動画・音声のデコード、FFmpeg 探索・自動導入、音声出力エンジン | Windows / macOS / Linux 両対応 |
 | `au2-platform` | **OS 依存の窓口**（ホーム/デスクトップ/ユーザーデータ領域、`.exe` 拡張子、コンソール非表示、ファイラ表示） | 他クレートは環境変数や `cfg(windows)` を直接使わずここを経由する |
 | `au2-app` | eframe/egui の GUI（`state.rs` = 編集状態、`panels/` = 各パネル、`export.rs` = 動画/音声書き出し、`app.rs` = ウィンドウ/メニュー） | |

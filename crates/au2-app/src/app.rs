@@ -211,9 +211,9 @@ fn handle_shortcuts(ctx: &egui::Context, st: &mut EditorState) {
         if !i.modifiers.command && !i.modifiers.ctrl && !i.modifiers.alt && i.key_pressed(Key::S) {
             st.timeline.snap_enabled = !st.timeline.snap_enabled;
             st.status = if st.timeline.snap_enabled {
-                "🧲 スナップ（吸着）を有効にしました".into()
+                "スナップ（吸着）を有効にしました".into()
             } else {
-                "🧲 スナップ（吸着）を無効にしました".into()
+                "スナップ（吸着）を無効にしました".into()
             };
         }
         // 選択範囲（In点・Out点）ショートカット
@@ -369,8 +369,12 @@ impl OpenAviApp {
         match self.layout {
             LayoutMode::Docked => {
                 egui::CentralPanel::default().frame(egui::Frame::none()).show(ctx, |ui| {
+                    let mut dock_style = Style::from_egui(ctx.style().as_ref());
+                    dock_style.separator.width = 2.0;
+                    dock_style.tab_bar.height = 24.0;
+                    dock_style.tab.tab_body.inner_margin = egui::Margin::same(6.0);
                     DockArea::new(&mut self.dock)
-                        .style(Style::from_egui(ctx.style().as_ref()))
+                        .style(dock_style)
                         .show_inside(ui, &mut Viewer { st: &mut self.st });
                 });
             }
@@ -469,7 +473,7 @@ impl OpenAviApp {
                 ui.menu_button("ファイル", |ui| {
                     if ui
                         .add(
-                            egui::Button::new("📄 新規プロジェクト...")
+                            egui::Button::new("新規プロジェクト...")
                                 .shortcut_text(ctx.format_shortcut(&SC_NEW)),
                         )
                         .clicked()
@@ -480,7 +484,7 @@ impl OpenAviApp {
                     ui.separator();
                     if ui
                         .add(
-                            egui::Button::new("📂 ファイルを開く / 素材・プラグインを一括取込 (自動判別)...")
+                            egui::Button::new("ファイルを開く / 素材・プラグインを一括取込 (自動判別)...")
                                 .shortcut_text(ctx.format_shortcut(&SC_OPEN)),
                         )
                         .clicked()
@@ -490,7 +494,7 @@ impl OpenAviApp {
                     }
                     if ui
                         .add(
-                            egui::Button::new("🎬 動画・画像・音声をタイムラインに追加...")
+                            egui::Button::new("動画・画像・音声をタイムラインに追加...")
                                 .shortcut_text(ctx.format_shortcut(&SC_IMPORT)),
                         )
                         .clicked()
@@ -500,18 +504,18 @@ impl OpenAviApp {
                         let frame = self.st.frame;
                         self.st.add_media_dialog(layer, frame);
                     }
-                    if ui.button("🧩 プラグイン・スクリプトをインストール (.anm/.obj/.auf等)...").clicked() {
+                    if ui.button("プラグイン・スクリプトをインストール (.anm/.obj/.auf等)...").clicked() {
                         ui.close_menu();
                         self.st.install_plugin_dialog();
                     }
                     ui.separator();
-                    if ui.button("📁 プロジェクトを開く (.aup2 / .aup / .exo)...").clicked() {
+                    if ui.button("プロジェクトを開く (.aup2 / .aup / .exo)...").clicked() {
                         ui.close_menu();
                         self.st.open_project_dialog();
                     }
                     if ui
                         .add(
-                            egui::Button::new("💾 プロジェクトを保存 (.aup2 / .aup)...")
+                            egui::Button::new("プロジェクトを保存 (.aup2 / .aup)...")
                                 .shortcut_text(ctx.format_shortcut(&SC_SAVE)),
                         )
                         .clicked()
@@ -519,14 +523,14 @@ impl OpenAviApp {
                         ui.close_menu();
                         self.st.save_project_dialog();
                     }
-                    if ui.button("📤 オブジェクトファイルのエクスポート (.exo)...").clicked() {
+                    if ui.button("オブジェクトファイルのエクスポート (.exo)...").clicked() {
                         ui.close_menu();
                         self.st.export_exo_dialog();
                     }
                     if ui
                         .add(
                             egui::Button::new(
-                                RichText::new("🎬 動画・音声の書き出し (MP4 / AVI / GIF / WAV)...")
+                                RichText::new("動画・音声の書き出し (MP4 / AVI / GIF / WAV)...")
                                     .strong()
                                     .color(crate::theme::accent_text()),
                             )
@@ -538,7 +542,7 @@ impl OpenAviApp {
                         self.export_modal.open_for_state(&self.st);
                     }
                     ui.separator();
-                    if ui.button("🔄 サンプルプロジェクトを再読み込み").clicked() {
+                    if ui.button("サンプルプロジェクトを再読み込み").clicked() {
                         self.st.load_exo(SAMPLE_EXO, None);
                         ui.close_menu();
                     }
@@ -608,7 +612,7 @@ impl OpenAviApp {
                     if ui
                         .add_enabled(
                             has_selection,
-                            egui::Button::new("🗑 選択オブジェクトを削除").shortcut_text("Delete"),
+                            egui::Button::new("選択オブジェクトを削除").shortcut_text("Delete"),
                         )
                         .clicked()
                     {
@@ -621,7 +625,7 @@ impl OpenAviApp {
                     if ui
                         .add_enabled(
                             has_selection,
-                            egui::Button::new("📋 コピー").shortcut_text(ctx.format_shortcut(&SC_COPY)),
+                            egui::Button::new("コピー").shortcut_text(ctx.format_shortcut(&SC_COPY)),
                         )
                         .clicked()
                     {
@@ -633,7 +637,7 @@ impl OpenAviApp {
                     if ui
                         .add_enabled(
                             can_paste,
-                            egui::Button::new("📋 貼り付け").shortcut_text(ctx.format_shortcut(&SC_PASTE)),
+                            egui::Button::new("貼り付け").shortcut_text(ctx.format_shortcut(&SC_PASTE)),
                         )
                         .clicked()
                     {
@@ -644,7 +648,7 @@ impl OpenAviApp {
                     if ui
                         .add_enabled(
                             has_selection,
-                            egui::Button::new("📄 複製").shortcut_text(ctx.format_shortcut(&SC_DUPLICATE)),
+                            egui::Button::new("複製").shortcut_text(ctx.format_shortcut(&SC_DUPLICATE)),
                         )
                         .clicked()
                     {
@@ -654,7 +658,7 @@ impl OpenAviApp {
 
                     if ui
                         .add(
-                            egui::Button::new("✂ 再生ヘッド位置で分割").shortcut_text(ctx.format_shortcut(&SC_SPLIT)),
+                            egui::Button::new("再生ヘッド位置で分割").shortcut_text(ctx.format_shortcut(&SC_SPLIT)),
                         )
                         .clicked()
                     {
@@ -664,18 +668,18 @@ impl OpenAviApp {
 
                     ui.separator();
 
-                    if ui.checkbox(&mut self.st.timeline.snap_enabled, "🧲 スナップ（吸着）を有効化").clicked() {
+                    if ui.checkbox(&mut self.st.timeline.snap_enabled, "スナップ（吸着）を有効化").clicked() {
                         self.st.status = if self.st.timeline.snap_enabled {
-                            "🧲 スナップ（吸着）を有効にしました".into()
+                            "スナップ（吸着）を有効にしました".into()
                         } else {
-                            "🧲 スナップ（吸着）を無効にしました".into()
+                            "スナップ（吸着）を無効にしました".into()
                         };
                     }
                 });
                 ui.menu_button("表示", |ui| {
                     ui.checkbox(
                         &mut self.st.timeline.show_clip_previews,
-                        "🖼 タイムラインのクリップ内プレビューを表示",
+                        "タイムラインのクリップ内プレビューを表示",
                     );
                     ui.separator();
                     ui.radio_value(&mut self.layout, LayoutMode::Docked, "シングルウィンドウ（ドッキング）");
@@ -683,9 +687,9 @@ impl OpenAviApp {
                     ui.separator();
                     let cur_pref = crate::theme::preference();
                     let mut sel_pref = cur_pref;
-                    ui.radio_value(&mut sel_pref, crate::theme::ThemePreference::Dark, "🌙 ダークモード");
-                    ui.radio_value(&mut sel_pref, crate::theme::ThemePreference::Light, "☀ ライトモード");
-                    ui.radio_value(&mut sel_pref, crate::theme::ThemePreference::System, "💻 システム設定に従う");
+                    ui.radio_value(&mut sel_pref, crate::theme::ThemePreference::Dark, "ダークモード");
+                    ui.radio_value(&mut sel_pref, crate::theme::ThemePreference::Light, "ライトモード");
+                    ui.radio_value(&mut sel_pref, crate::theme::ThemePreference::System, "システム設定に従う");
                     if sel_pref != cur_pref {
                         crate::theme::set_preference(ctx, sel_pref);
                     }
@@ -709,7 +713,7 @@ impl OpenAviApp {
                     }
                     ui.separator();
                     if ui
-                        .button("🔬 .auf 仕様解析・移植スタジオ (開発者向け)...")
+                        .button(".auf パラメータ抽出・雛形生成 (開発者向け)...")
                         .clicked()
                     {
                         self.st.open_auf_porter(None);
@@ -751,7 +755,7 @@ impl OpenAviApp {
                         .collect();
                     let mut switch_to: Option<u32> = None;
                     ui.menu_button(
-                        egui::RichText::new(format!("🎬 シーン: {}", cur_name))
+                        egui::RichText::new(format!("シーン: {}", cur_name))
                             .strong()
                             .color(crate::theme::accent_text()),
                         |ui| {
@@ -788,7 +792,7 @@ impl OpenAviApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(4.0);
                     let exp_btn = egui::Button::new(
-                        RichText::new("🎬 動画書き出し")
+                        RichText::new("動画書き出し")
                             .color(Color32::WHITE)
                             .strong()
                             .size(12.5),
@@ -805,19 +809,19 @@ impl OpenAviApp {
 
                     ui.add_space(6.0);
                     let (theme_label, hover_text) = match crate::theme::preference() {
-                        crate::theme::ThemePreference::Dark => ("🌙 ダーク", "クリックでライトモードに切り替えます"),
-                        crate::theme::ThemePreference::Light => ("☀ ライト", "クリックでシステム設定に切り替えます"),
+                        crate::theme::ThemePreference::Dark => ("表示: ダーク", "クリックでライトモードに切り替えます"),
+                        crate::theme::ThemePreference::Light => ("表示: ライト", "クリックでシステム設定に切り替えます"),
                         crate::theme::ThemePreference::System => {
                             if crate::theme::is_dark() {
-                                ("💻 システム", "システム設定（現在: ダーク）に追従中。クリックでダークモードに固定します")
+                                ("表示: 自動", "システム設定（現在: ダーク）に追従中。クリックでダークモードに固定します")
                             } else {
-                                ("💻 システム", "システム設定（現在: ライト）に追従中。クリックでダークモードに固定します")
+                                ("表示: 自動", "システム設定（現在: ライト）に追従中。クリックでダークモードに固定します")
                             }
                         }
                     };
                     let next_pref = crate::theme::preference().cycled();
-                    let theme_btn = egui::Button::new(RichText::new(theme_label).size(12.0))
-                        .min_size(vec2(80.0, 26.0));
+                    let theme_btn = egui::Button::new(RichText::new(theme_label).size(11.5))
+                        .min_size(vec2(78.0, 24.0));
                     if ui
                         .add(theme_btn)
                         .on_hover_text(hover_text)
@@ -897,7 +901,7 @@ impl OpenAviApp {
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let dl_btn = egui::Button::new(
-                                egui::RichText::new("⬇ FFmpeg を自動ダウンロード")
+                                egui::RichText::new("FFmpeg を自動ダウンロード")
                                     .color(Color32::WHITE)
                                     .strong(),
                             )
@@ -952,7 +956,7 @@ impl OpenAviApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let is_audio = first.kind_name.contains("音声");
                         let relink_btn = egui::Button::new(
-                            egui::RichText::new("📁 素材フォルダを指定して一括割り当て...")
+                            egui::RichText::new("素材フォルダを指定して一括割り当て...")
                                 .color(Color32::WHITE)
                                 .strong(),
                         )
@@ -967,11 +971,11 @@ impl OpenAviApp {
                             self.st.relink_from_folder_dialog();
                         }
                         let single_label = if first.kind_name.contains("画像") {
-                            "🖼 このファイルだけ選択..."
+                            "このファイルだけ選択..."
                         } else if is_audio {
-                            "🎵 このファイルだけ選択..."
+                            "このファイルだけ選択..."
                         } else {
-                            "🎞 このファイルだけ選択..."
+                            "このファイルだけ選択..."
                         };
                         if ui.button(single_label).clicked() {
                             self.st.relink_media_dialog(None, &first.original_path, is_audio);

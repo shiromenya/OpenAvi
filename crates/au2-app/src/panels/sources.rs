@@ -20,31 +20,31 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     egui::Frame::none()
         .fill(theme::surface_alt())
         .stroke(egui::Stroke::new(1.0_f32, theme::border()))
-        .rounding(egui::Rounding::same(8.0))
-        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+        .rounding(theme::rounding::md())
+        .inner_margin(egui::Margin::symmetric(6.0, 5.0))
         .show(ui, |ui| {
             let txt_color = theme::text();
             let items: [(egui::WidgetText, &str); 3] = [
                 (
-                    RichText::new("📂 開く / 一括取込").strong().color(txt_color).into(),
+                    RichText::new("開く / 取込").strong().color(txt_color).into(),
                     "プロジェクト(.aup/.exo)、動画・画像・音声、プラグイン(.anm/.auf等)を自動判別して開く・インストールします",
                 ),
                 (
-                    RichText::new("🎬 素材追加")
+                    RichText::new("＋ 素材追加")
                         .strong()
                         .color(if theme::is_dark() { theme::accent_text() } else { txt_color })
                         .into(),
                     "動画・画像・音声ファイルをソース一覧に追加します",
                 ),
                 (
-                    RichText::new("🧩 プラグイン追加")
+                    RichText::new("＋ プラグイン")
                         .strong()
-                        .color(if theme::is_dark() { theme::ok_text() } else { txt_color })
+                        .color(txt_color)
                         .into(),
                     ".anm / .obj / .auf 等のスクリプト・プラグインをインストールします",
                 ),
             ];
-            match button_grid(ui, &items, 130.0) {
+            match button_grid(ui, &items, 78.0) {
                 Some(0) => st.smart_open_dialog(),
                 Some(1) => st.import_sources_dialog(),
                 Some(2) => st.install_plugin_dialog(),
@@ -74,7 +74,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
             } else {
                 ui.small(format!("音声ファイル: {}", item.path.display()));
             }
-            let place_btn = egui::Button::new(RichText::new("➕ タイムラインに配置").strong())
+            let place_btn = egui::Button::new(RichText::new("タイムラインに配置").strong())
                 .min_size(vec2(ui.available_width(), super::BUTTON_H));
             if ui.add(place_btn).clicked() {
                 let layer = st.timeline.context_target.layer;
@@ -86,24 +86,24 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
 
     ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         // ---- 3. メディア素材リスト ----
-        CollapsingHeader::new(RichText::new(format!("📁 メディア素材 ({})", st.sources.len())).strong())
+        CollapsingHeader::new(RichText::new(format!("メディア素材 ({})", st.sources.len())).strong())
             .default_open(true)
             .show(ui, |ui| {
                 if st.sources.is_empty() {
-                    ui.weak("素材がありません。「🎬 素材追加...」またはドラッグ＆ドロップで追加できます。");
+                    ui.weak("素材がありません。「＋ 素材追加」またはドラッグ＆ドロップで追加できます。");
                 } else {
                     let mut to_place: Option<PathBuf> = None;
                     for (idx, src) in st.sources.iter().enumerate() {
                         let icon = match src.kind {
-                            MediaKind::Video => "🎞",
+                            MediaKind::Video => "▶",
                             MediaKind::Image => {
                                 if au2_media::is_psd_path(&src.path) {
-                                    "🎨"
+                                    "◈"
                                 } else {
-                                    "🖼"
+                                    "▣"
                                 }
                             }
-                            MediaKind::Audio => "🔊",
+                            MediaKind::Audio => "♪",
                         };
                         let selected = st.selected_source == Some(idx);
                         ui.horizontal(|ui| {
@@ -143,7 +143,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
         ui.add_space(4.0);
 
         // ---- 4. 標準オブジェクト・プリセット ----
-        CollapsingHeader::new(RichText::new("✨ 標準オブジェクトの追加").strong())
+        CollapsingHeader::new(RichText::new("標準オブジェクトの追加").strong())
             .default_open(true)
             .show(ui, |ui| {
                 let layer = st.timeline.context_target.layer;
@@ -151,20 +151,20 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                 let end = start + 149;
 
                 let items: [(egui::WidgetText, &str); 14] = [
-                    ("📝 テキスト".into(), ""),
-                    ("🎨 PSD立ち絵...".into(), "PSDファイル(.psd/.psb)を選択して立ち絵オブジェクトとして配置します"),
-                    ("🔴 図形 (円)".into(), ""),
-                    ("🟩 図形 (四角形)".into(), ""),
-                    ("⭐ 図形 (星型)".into(), ""),
-                    ("🖥 フレームバッファ".into(), ""),
-                    ("📊 音声波形表示".into(), ""),
-                    ("✨ パーティクル出力".into(), ""),
-                    ("🎬 シーン呼出".into(), ""),
-                    ("🎨 色調補正".into(), ""),
-                    ("🎞 シーンチェンジ".into(), ""),
+                    ("テキスト".into(), ""),
+                    ("PSD立ち絵...".into(), "PSDファイル(.psd/.psb)を選択して立ち絵オブジェクトとして配置します"),
+                    ("図形 (円)".into(), ""),
+                    ("図形 (四角形)".into(), ""),
+                    ("図形 (星型)".into(), ""),
+                    ("フレームバッファ".into(), ""),
+                    ("音声波形表示".into(), ""),
+                    ("パーティクル出力".into(), ""),
+                    ("シーン呼出".into(), ""),
+                    ("色調補正".into(), ""),
+                    ("シーンチェンジ".into(), ""),
                     ("⏱ 時間制御".into(), ""),
-                    ("📐 グループ制御".into(), ""),
-                    ("🎥 カメラ制御".into(), ""),
+                    ("グループ制御".into(), ""),
+                    ("カメラ制御".into(), ""),
                 ];
                 if let Some(i) = button_grid(ui, &items, 130.0) {
                     if i == 1 {
@@ -224,7 +224,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
             .collect();
 
         CollapsingHeader::new(
-            RichText::new(format!("🧩 プラグイン・スクリプト ({})", visible_plugin_indices.len())).strong(),
+            RichText::new(format!("プラグイン・スクリプト ({})", visible_plugin_indices.len())).strong(),
         )
         .default_open(true)
         .show(ui, |ui| {
@@ -238,17 +238,17 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                     _ => theme::text_muted(),
                 };
                 let icon = match p.kind {
-                    PluginKind::AnmScript => "✨",
-                    PluginKind::ObjScript => "🔷",
-                    PluginKind::CamScript => "🎥",
-                    PluginKind::ScnScript => "🎬",
-                    PluginKind::TraScript => "📈",
-                    PluginKind::FilterDll => "🧪",
-                    PluginKind::InputDll => "📥",
-                    PluginKind::OutputDll => "📤",
-                    PluginKind::ColorDll => "🎨",
-                    PluginKind::Mod2Dll => "📦",
-                    PluginKind::Aux2Dll => "⚙",
+                    PluginKind::AnmScript => "◆",
+                    PluginKind::ObjScript => "◈",
+                    PluginKind::CamScript => "◎",
+                    PluginKind::ScnScript => "▸",
+                    PluginKind::TraScript => "∿",
+                    PluginKind::FilterDll => "▪",
+                    PluginKind::InputDll => "▸",
+                    PluginKind::OutputDll => "◂",
+                    PluginKind::ColorDll => "◈",
+                    PluginKind::Mod2Dll => "▫",
+                    PluginKind::Aux2Dll => "▪",
                 };
                 let group_header = format!("{icon} {} ({})", p.file_name, p.entries.len());
                 let header_id = ui.make_persistent_id(format!("src_plugin_grp_{}_{}", idx, p.file_name));
@@ -265,7 +265,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                                     .color(theme::text_muted()),
                             );
                             ui.colored_label(badge_color, format!("[{}]", p.arch.label()))
-                                .on_hover_text(p.arch.description());
+                                .on_hover_text(format!("{} — {}", p.arch.description(), p.status.summary()));
                         });
 
                         for entry in &p.entries {

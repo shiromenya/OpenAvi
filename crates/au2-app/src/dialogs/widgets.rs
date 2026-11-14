@@ -2,9 +2,9 @@
 
 use eframe::egui::{self, vec2, Color32, Stroke};
 
-/// Word / モダン OS 風の美しいカプセル型トグルスイッチ UI。
+/// カプセル型トグルスイッチ UI。
 pub fn toggle_switch_ui(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
-    let desired_size = vec2(32.0, 18.0);
+    let desired_size = vec2(28.0, 15.0);
     let (rect, mut response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
     if response.clicked() {
         *on = !*on;
@@ -13,14 +13,14 @@ pub fn toggle_switch_ui(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
     if ui.is_rect_visible(rect) {
         let how_on = ui.ctx().animate_bool_responsive(response.id, *on);
         let bg_fill = if *on {
-            Color32::from_rgb(37, 99, 235) // Office / Word 風の鮮やかなブルー
+            crate::theme::accent()
         } else {
-            Color32::from_rgb(60, 64, 75)
+            crate::theme::flip(Color32::from_rgb(54, 54, 60))
         };
         let stroke_color = if response.hovered() {
-            Color32::from_rgb(147, 197, 253)
+            crate::theme::accent_hi()
         } else {
-            Color32::from_gray(80)
+            crate::theme::border()
         };
         ui.painter().rect(
             rect,
@@ -28,9 +28,9 @@ pub fn toggle_switch_ui(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
             bg_fill,
             Stroke::new(1.0_f32, stroke_color),
         );
-        let radius = 0.5 * rect.height() - 2.5;
+        let radius = 0.5 * rect.height() - 2.0;
         let x = egui::lerp(
-            (rect.left() + radius + 3.0)..=(rect.right() - radius - 3.0),
+            (rect.left() + radius + 2.0)..=(rect.right() - radius - 2.0),
             how_on,
         );
         let center = egui::pos2(x, rect.center().y);

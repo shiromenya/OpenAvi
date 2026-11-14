@@ -114,6 +114,20 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
     }
 
     let has_ffmpeg = st.media.has_ffmpeg();
+    let needs_waveform = st.scene.layers.iter().any(|l| {
+        l.visible
+            && l.objects.iter().any(|o| {
+                o.contains(frame)
+                    && o.source()
+                        .map(|s| matches!(s.kind, EffectKind::AudioWaveform | EffectKind::Scene))
+                        .unwrap_or(false)
+            })
+    });
+    let waveform_bins = if needs_waveform {
+        st.sample_audio_waveform_at(frame, 64)
+    } else {
+        Vec::new()
+    };
 
     let ctx = DrawCtx {
         painter: &painter,
@@ -129,6 +143,7 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
         camera: None,
         group_transform: None,
         scene_depth: 0,
+        audio_waveform: &waveform_bins,
     };
 
     render_scene_at(&ctx, &st.scene, frame, st.selected);
@@ -308,7 +323,7 @@ fn bottom_transport_bar(ui: &mut egui::Ui, st: &mut EditorState) {
     ui.painter().rect(
         tc_badge_rect,
         egui::Rounding::same(5.0),
-        crate::theme::flip(Color32::from_rgb(28, 34, 46)),
+        crate::theme::flip(Color32::from_rgb(28, 29, 32)),
         Stroke::new(1.0_f32, crate::theme::flip(Color32::from_rgb(45, 60, 90))),
     );
     ui.painter().text(
@@ -522,7 +537,7 @@ fn draw_audio_peak_meter(ui: &egui::Ui, rect: Rect, peak_l: f32, peak_r: f32) {
         );
 
         let meter_rect = Rect::from_min_size(pos2(rect.left() + label_w, y), vec2(bar_w, bar_h));
-        painter.rect_filled(meter_rect, 1.0, Color32::from_rgb(18, 22, 28));
+        painter.rect_filled(meter_rect, 1.0, Color32::from_rgb(18, 19, 20));
 
         // 緑 (-60..-15dB: 0.0..0.75) / 黄 (-15..-6dB: 0.75..0.90) / 赤 (-6..0dB: 0.90..1.0) のセグメント描画
         let bands: &[(f32, f32, Color32)] = &[
@@ -549,7 +564,7 @@ fn draw_audio_peak_meter(ui: &egui::Ui, rect: Rect, peak_l: f32, peak_r: f32) {
             let h_col = if *hold > 0.90 {
                 Color32::from_rgb(255, 92, 92)
             } else {
-                Color32::from_rgb(235, 240, 248)
+                Color32::from_rgb(235, 236, 238)
             };
             painter.rect_filled(Rect::from_min_size(pos2(hx, y), vec2(2.0, bar_h)), 0.5, h_col);
         }
@@ -614,6 +629,122 @@ mod tests {
         step_meter_channel(0.0, 0.1, &mut disp, &mut hold, &mut timer);
         assert!(disp > 0.7 && disp < 0.95);
         assert!((hold - 0.95).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_text_control_tags_color_size_wait_clear_pos() {
+        let egui_ctx = egui::Context::default();
+        let canvas = Rect::from_min_size(egui::Pos2::ZERO, vec2(640.0, 360.0));
+        let textures = std::collections::HashMap::new();
+        let plugins = au2_plugin::PluginRegistry::default();
+        let scenes = std::collections::BTreeMap::new();
+
+        let mut txt_obj = au2_core::TimelineObject::new_text(
+            0,
+            90,
+            "<#ff0000,00ff00><s68,MS Gothic>A<p+20,-10><w0.5>B<c1.0>C",
+        );
+        let src = txt_obj.source_mut().unwrap();
+        if let Some(t) = src.track_mut("サイズ") {
+            t.keyframes[0].value = 34.0;
+        }
+        // 表示速度 = 10文字/秒 (1文字あたり 0.1秒)
+        if let Some(t) = src.track_mut("表示速度") {
+            t.keyframes[0].value = 10.0;
+        }
+        let src = txt_obj.source().unwrap();
+
+        // 1) frame = 3 (0.10秒 @ 30fps): 'A' のみ表示 ('B' は 0.1 + 0.5 + 0.1 = 0.7秒必要)
+        let _ = egui_ctx.run(egui::RawInput::default(), |c| {
+            let painter = egui::Painter::new(c.clone(), egui::LayerId::background(), canvas);
+            let draw_ctx = DrawCtx {
+                painter: &painter,
+                canvas,
+                scale: 1.0,
+                fps: 30.0,
+                screen_w: 640.0,
+                screen_h: 360.0,
+                textures: &textures,
+                plugins: &plugins,
+                scenes: &scenes,
+                has_ffmpeg: false,
+                camera: None,
+                group_transform: None,
+                scene_depth: 0,
+                audio_waveform: &[],
+            };
+            let (items_f3, _) = layout_aviutl_text(&draw_ctx, &src, 3);
+            assert_eq!(items_f3.len(), 1);
+            assert_eq!(items_f3[0].ch, "A");
+            assert_eq!(items_f3[0].color_override, Some(Color32::from_rgb(255, 0, 0)));
+            assert_eq!(items_f3[0].color2_override, Some(Color32::from_rgb(0, 255, 0)));
+            assert!((items_f3[0].size_scale - 2.0).abs() < 1e-3);
+            assert_eq!(items_f3[0].font_override.as_deref(), Some("MS Gothic"));
+
+            // 2) frame = 24 (0.80秒 @ 30fps): <w0.5> を通過し 'A' と 'B' が表示され、'B' には <p+20,-10> が適用されている
+            let (items_f24, _) = layout_aviutl_text(&draw_ctx, &src, 24);
+            assert_eq!(items_f24.len(), 2);
+            assert_eq!(items_f24[1].ch, "B");
+            assert!((items_f24[1].local_y - (items_f24[0].local_y - 10.0)).abs() < 1e-3);
+
+            // 3) frame = 60 (2.00秒 @ 30fps): <c1.0> を通過し 'A','B' がクリアされ 'C' のみ表示
+            let (items_f60, _) = layout_aviutl_text(&draw_ctx, &src, 60);
+            assert_eq!(items_f60.len(), 1);
+            assert_eq!(items_f60[0].ch, "C");
+        });
+    }
+
+    #[test]
+    fn test_layer_coordinate_link_and_previous_object_rendering() {
+        let egui_ctx = egui::Context::default();
+        let canvas = Rect::from_min_size(egui::Pos2::ZERO, vec2(320.0, 240.0));
+        let textures = std::collections::HashMap::new();
+        let plugins = au2_plugin::PluginRegistry::default();
+        let scenes = std::collections::BTreeMap::new();
+
+        let mut scene = au2_core::Scene::default();
+        // Layer 0: 図形オブジェクト (X = 80, Y = 40)
+        let mut obj0 = au2_core::TimelineObject::new_shape(0, 30, 1, "ff4040");
+        if let Some(d) = obj0.effect_mut(&EffectKind::StandardDraw) {
+            if let Some(tx) = d.track_mut("X") {
+                tx.keyframes[0].value = 80.0;
+            }
+            if let Some(ty) = d.track_mut("Y") {
+                ty.keyframes[0].value = 40.0;
+            }
+        }
+        scene.layers[0].objects.push(obj0);
+
+        // Layer 1: coordinate_link = true & clip_above = true + 直前オブジェクト (PreviousObject)
+        scene.layers[1].coordinate_link = true;
+        scene.layers[1].clip_above = true;
+        let mut obj1 = au2_core::TimelineObject::new(0, 30);
+        obj1.effects.push(au2_core::Effect::new("直前オブジェクト"));
+        obj1.effects.push(au2_core::Effect::new("標準描画"));
+        scene.layers[1].objects.push(obj1);
+
+        let full = egui_ctx.run(egui::RawInput::default(), |c| {
+            let painter = egui::Painter::new(c.clone(), egui::LayerId::background(), canvas);
+            let draw_ctx = DrawCtx {
+                painter: &painter,
+                canvas,
+                scale: 1.0,
+                fps: 30.0,
+                screen_w: 320.0,
+                screen_h: 240.0,
+                textures: &textures,
+                plugins: &plugins,
+                scenes: &scenes,
+                has_ffmpeg: false,
+                camera: None,
+                group_transform: None,
+                scene_depth: 0,
+                audio_waveform: &[0.25, 0.5, 0.75, 1.0],
+            };
+            render_scene_at(&draw_ctx, &scene, 0, None);
+        });
+        // Layer 0 の図形と Layer 1 の直前オブジェクトの両方がシェイプとして出力されていること
+        assert!(full.shapes.len() >= 2);
     }
 }
 

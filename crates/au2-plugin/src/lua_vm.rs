@@ -1,8 +1,10 @@
-//! AviUtl (初代拡張編集) および AviUtl2 (ExEdit2) 互換の組み込み Lua スクリプト実行エンジン。
+//! 初代 AviUtl (拡張編集) および AviUtl2 (ExEdit2) スクリプト向けの組み込み Lua サブセット実行エンジン。
 //!
+//! ※ 公式の Lua 5.1 VM / LuaJIT ではなく、Rust による軽量な独自 AST インタプリタ実装です。
 //! `.anm`, `.obj`, `.cam`, `.scn`, `.tra`（および `.anm2`, `.obj2`, `.cam2`, `.scn2`, `.tra2`）内の
-//! Lua スクリプトをサンドボックス内で高速に評価し、`obj.*` プロパティ変更・`obj.draw()`・
-//! `obj.drawpoly()`・`obj.load()`・`obj.mes()`・`obj.effect()` 等の描画コマンドを生成します。
+//! 基本構文および `obj.*` プロパティ変更・`obj.draw()`・`obj.drawpoly()`・`obj.load()`・
+//! `obj.mes()`・`obj.effect()` 等の描画コマンドを評価します。
+//! 外部 C/DLL モジュール（`require` / `package.loadlib`）や生ピクセルバッファの直接メモリ書き換えには非対応です。
 
 use std::collections::HashMap;
 use std::f64::consts::PI;
@@ -2707,7 +2709,9 @@ impl<'a> Vm<'a> {
             }
 
             // ------------------------------------------------------------------------
-            // [ピクセルデータ・補間法・シェーダー制御 API]
+            // [ピクセルデータ・補間法 API (サイズ取得フォールバック / 生ピクセル操作は no-op)]
+            // ※ 本エンジンはベクター/メッシュプリミティブ合成方式のため、Cポインタや生RGBA配列の直接書き換えは行いません。
+            //    スクリプトが `local data, w, h = obj.getpixeldata()` で画像サイズ (w, h) を参照するケースのみ維持します。
             // ------------------------------------------------------------------------
             "pixeloption" => {
                 if let Some(val) = args.get(1).or_else(|| args.first()) {
