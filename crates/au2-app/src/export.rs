@@ -758,6 +758,8 @@ impl SceneSoftwareRenderer {
                 group_transform: None,
                 scene_depth: 0,
                 audio_waveform: &waveform_bins,
+                current_scene: Some((scene_ref, frame)),
+                layer_limit: None,
             };
             render_scene_at(&draw_ctx, scene_ref, frame, None);
         });
@@ -1067,6 +1069,51 @@ pub fn mix_scene_audio_to_wav_bytes(
             let Some(src) = obj.source().filter(|s| s.enabled) else {
                 continue;
             };
+            if matches!(src.kind, EffectKind::SceneAudio | EffectKind::Scene) {
+                let scene_id = src
+                    .text("scene")
+                    .and_then(|s| s.trim().parse::<u32>().ok())
+                    .unwrap_or(1);
+                let start_pos_f = src.eval("再生位置", 0, 0.0).max(0.0).round() as Frame;
+                if let Some(sub_scene) = st.scenes.get(&scene_id) {
+                    for s_layer in &sub_scene.layers {
+                        if !s_layer.visible {
+                            continue;
+                        }
+                        for s_obj in &s_layer.objects {
+                            let Some(s_src) = s_obj.source().filter(|s| s.enabled) else {
+                                continue;
+                            };
+                            if !matches!(s_src.kind, EffectKind::AudioFile | EffectKind::VideoFile) {
+                                continue;
+                            }
+                            let Some(file_str) = s_src.text("file").filter(|s| !s.trim().is_empty()) else {
+                                continue;
+                            };
+                            if s_obj.frame_end < start_pos_f {
+                                continue;
+                            }
+                            let rel_s = s_obj.frame_start.saturating_sub(start_pos_f);
+                            let rel_e = s_obj.frame_end.saturating_sub(start_pos_f);
+                            let mapped_s = obj.frame_start + rel_s;
+                            let mapped_e = (obj.frame_start + rel_e).min(obj.frame_end);
+                            if mapped_s <= mapped_e && mapped_e >= start_frame && mapped_s <= end_frame {
+                                let mut cloned = s_obj.clone();
+                                cloned.frame_start = mapped_s;
+                                cloned.frame_end = mapped_e;
+                                candidates.push(AudioClip {
+                                    is_audio_obj: s_src.kind == EffectKind::AudioFile,
+                                    file_str: file_str.to_string(),
+                                    frame_start: mapped_s,
+                                    frame_end: mapped_e,
+                                    obj_clone: cloned,
+                                });
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
             if !matches!(src.kind, EffectKind::AudioFile | EffectKind::VideoFile) {
                 continue;
             }
@@ -1119,13 +1166,19 @@ pub fn mix_scene_audio_to_wav_bytes(
             ((src_eff.eval("再生位置", 0, 1.0) - 1.0) / fps).max(0.0)
         };
         let speed = (src_eff.eval("再生速度", 0, 100.0) / 100.0).max(0.0);
+        let loop_play = src_eff.eval("ループ再生", 0, src_eff.eval("check0", 0, 0.0)) >= 0.5;
+        let is_mono = clip
+            .obj_clone
+            .effects
+            .iter()
+            .any(|e| e.enabled && e.name == "モノラル化");
 
-        // 音声フェード
+        // 音声フェード / 音量フェード / フェード
         let (fade_in_sec, fade_out_sec) = clip
             .obj_clone
             .effects
             .iter()
-            .find(|e| e.enabled && e.name == "音声フェード")
+            .find(|e| e.enabled && (e.name == "音声フェード" || e.name == "音量フェード" || e.name == "フェード"))
             .map(|e| (e.eval("イン", 0, 0.0).max(0.0), e.eval("アウト", 0, 0.0).max(0.0)))
             .unwrap_or((0.0, 0.0));
 
@@ -1137,8 +1190,10 @@ pub fn mix_scene_audio_to_wav_bytes(
             let rel_frame = (rel_sec * fps).floor() as u32;
 
             let src_sec = base_start_sec + rel_sec * speed;
-            let src_sample_idx = (src_sec * SAMPLE_RATE as f64).floor() as usize;
-            if src_sample_idx >= src_total_frames {
+            let mut src_sample_idx = (src_sec * SAMPLE_RATE as f64).floor() as usize;
+            if loop_play && src_total_frames > 0 {
+                src_sample_idx %= src_total_frames;
+            } else if src_sample_idx >= src_total_frames {
                 break;
             }
 
@@ -1170,8 +1225,13 @@ pub fn mix_scene_audio_to_wav_bytes(
             let gain_l = vol * fade_gain * (1.0 - pan.max(0.0));
             let gain_r = vol * fade_gain * (1.0 + pan.min(0.0));
 
-            let l = pcm[src_sample_idx * 2] as f32 / 32768.0;
-            let r = pcm[src_sample_idx * 2 + 1] as f32 / 32768.0;
+            let mut l = pcm[src_sample_idx * 2] as f32 / 32768.0;
+            let mut r = pcm[src_sample_idx * 2 + 1] as f32 / 32768.0;
+            if is_mono {
+                let m = (l + r) * 0.5;
+                l = m;
+                r = m;
+            }
 
             mix_buf[out_idx * 2] += l * gain_l;
             mix_buf[out_idx * 2 + 1] += r * gain_r;

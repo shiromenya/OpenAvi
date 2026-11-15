@@ -94,6 +94,7 @@ impl EditorState {
             preview_drag: None,
             preview_snap_x: false,
             preview_snap_y: false,
+            preview_grid_mode: 0,
             resolved_paths: HashMap::new(),
             audio_sync_cache: None,
             extra_search_dirs: Vec::new(),

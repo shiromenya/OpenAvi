@@ -828,6 +828,8 @@ impl PluginRegistry {
         }
 
         // 高速検索インデックスを構築
+        let mut tra_map: std::collections::HashMap<String, Vec<lua_vm::Stmt>> =
+            std::collections::HashMap::new();
         for (p_idx, p) in self.plugins.iter().enumerate() {
             let stem = Path::new(&p.file_name)
                 .file_stem()
@@ -840,9 +842,22 @@ impl PluginRegistry {
                 self.index_map.entry(sec_only.to_string()).or_insert((p_idx, e_idx));
                 // 旧来の `セクション名@ファイル名` 書式での参照互換性
                 let legacy_key = format!("{}@{stem}", sec_only);
-                self.index_map.entry(legacy_key).or_insert((p_idx, e_idx));
+                self.index_map.entry(legacy_key.clone()).or_insert((p_idx, e_idx));
+
+                if p.kind == PluginKind::TraScript && !e.compiled_ast.is_empty() {
+                    tra_map.entry(e.display_name.clone()).or_insert_with(|| e.compiled_ast.clone());
+                    tra_map.entry(e.section_name.clone()).or_insert_with(|| e.compiled_ast.clone());
+                    tra_map.entry(sec_only.to_string()).or_insert_with(|| e.compiled_ast.clone());
+                    tra_map.entry(legacy_key).or_insert_with(|| e.compiled_ast.clone());
+                }
             }
         }
+        if let Ok(mut guard) = global_tra_scripts().write() {
+            for (k, v) in tra_map {
+                guard.insert(k, v);
+            }
+        }
+        au2_core::set_tra_script_evaluator(eval_registered_tra_script);
     }
 
     /// 外部のプラグイン／スクリプトファイルを `plugin_dir` にコピーしてインストールします。
@@ -1012,6 +1027,56 @@ impl PluginRegistry {
         }
         true
     }
+}
+
+fn global_tra_scripts(
+) -> &'static std::sync::RwLock<std::collections::HashMap<String, Vec<lua_vm::Stmt>>> {
+    static TRA_SCRIPTS: std::sync::OnceLock<
+        std::sync::RwLock<std::collections::HashMap<String, Vec<lua_vm::Stmt>>>,
+    > = std::sync::OnceLock::new();
+    TRA_SCRIPTS.get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()))
+}
+
+/// カスタム `.tra` / `.tra2` スクリプトソースを名前付きで登録し、`au2_core::Track::evaluate` から呼び出せるようにします。
+pub fn register_tra_script_source(name: &str, lua_source: &str) {
+    let ast = lua_vm::compile_lua_script(lua_source);
+    if let Ok(mut guard) = global_tra_scripts().write() {
+        guard.insert(name.to_string(), ast.clone());
+        let sec = name.split('@').next().unwrap_or(name);
+        guard.insert(sec.to_string(), ast);
+    }
+    au2_core::set_tra_script_evaluator(eval_registered_tra_script);
+}
+
+fn eval_registered_tra_script(
+    script_name: &str,
+    point_values: &[f64],
+    section_index: usize,
+    section_ratio: f64,
+    param: f64,
+    accelerate: bool,
+    decelerate: bool,
+) -> Option<f64> {
+    let ast = {
+        let guard = global_tra_scripts().read().ok()?;
+        let sec = script_name.split('@').next().unwrap_or(script_name);
+        guard
+            .get(script_name)
+            .or_else(|| guard.get(sec))
+            .cloned()?
+    };
+    let mut state = LuaObjState {
+        point_values: point_values.to_vec(),
+        point_index: section_index,
+        point_time: section_ratio.clamp(0.0, 1.0),
+        point_totaltime: 1.0,
+        point_param: param,
+        point_accelerate: accelerate,
+        point_decelerate: decelerate,
+        ..LuaObjState::default()
+    };
+    lua_vm::execute_compiled_script(&ast, &mut state);
+    state.return_value
 }
 
 /// 拡張編集互換の標準アニメーション効果スクリプト（クリーンルーム実装）

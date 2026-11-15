@@ -445,9 +445,18 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                             std::iter::once(id).collect()
                         };
 
-                        // スナップ吸着判定（始点または終点）
-                        let snap_start = find_snap_frame(st, new_start, 9.0, &ignore_ids);
-                        let snap_end = find_snap_frame(st, new_start + obj_len, 9.0, &ignore_ids);
+                        // スナップ吸着判定（始点または終点、Alt キー押下時は一時無効）
+                        let alt_suppress = ui.input(|i| i.modifiers.alt);
+                        let snap_start = if alt_suppress {
+                            None
+                        } else {
+                            find_snap_frame(st, new_start, 9.0, &ignore_ids)
+                        };
+                        let snap_end = if alt_suppress {
+                            None
+                        } else {
+                            find_snap_frame(st, new_start + obj_len, 9.0, &ignore_ids)
+                        };
                         if let Some(s) = snap_start {
                             new_start = s;
                             st.timeline.active_snap_line = Some(s);
@@ -521,7 +530,8 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                 if let Some(p) = resp.interact_pointer_pos() {
                     let mut new_start = xf(p.x);
                     let ignore_ids: std::collections::HashSet<ObjectId> = std::iter::once(id).collect();
-                    if let Some(snap_f) = find_snap_frame(st, new_start, 9.0, &ignore_ids) {
+                    let alt_suppress = ui.input(|i| i.modifiers.alt);
+                    if let Some(snap_f) = (!alt_suppress).then(|| find_snap_frame(st, new_start, 9.0, &ignore_ids)).flatten() {
                         new_start = snap_f;
                         st.timeline.active_snap_line = Some(snap_f);
                     } else {
@@ -539,7 +549,8 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                 if let Some(p) = resp.interact_pointer_pos() {
                     let mut new_end = xf(p.x);
                     let ignore_ids: std::collections::HashSet<ObjectId> = std::iter::once(id).collect();
-                    if let Some(snap_f) = find_snap_frame(st, new_end + 1, 9.0, &ignore_ids) {
+                    let alt_suppress = ui.input(|i| i.modifiers.alt);
+                    if let Some(snap_f) = (!alt_suppress).then(|| find_snap_frame(st, new_end + 1, 9.0, &ignore_ids)).flatten() {
                         new_end = snap_f.saturating_sub(1);
                         st.timeline.active_snap_line = Some(snap_f);
                     } else {

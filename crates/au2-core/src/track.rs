@@ -7,6 +7,17 @@
 
 use crate::time::Frame;
 
+/// `.tra` / `.tra2` トラックバー移動スクリプトの評価コールバック型。
+/// 引数: `(script_name, point_values, section_index, section_ratio, param, accelerate, decelerate)`
+pub type TraScriptEvaluator = fn(&str, &[f64], usize, f64, f64, bool, bool) -> Option<f64>;
+
+static TRA_SCRIPT_EVALUATOR: std::sync::OnceLock<TraScriptEvaluator> = std::sync::OnceLock::new();
+
+/// `au2-plugin` 側から `.tra` / `.tra2` スクリプト実行フックを登録します。
+pub fn set_tra_script_evaluator(eval_fn: TraScriptEvaluator) {
+    let _ = TRA_SCRIPT_EVALUATOR.set(eval_fn);
+}
+
 /// 移動方法の種類。
 ///
 /// 数値コードは `.exo` における移動方法番号（下位ビット）です。
@@ -305,7 +316,48 @@ impl Track {
                         r0
                     };
                     lerp(a.value, b.value, r)
+                } else if sec.contains("バウンス") || sec.contains("弾む") || sec.contains("跳ねる") {
+                    let bounces = param_num.clamp(1, 10) as f64;
+                    let bt = if raw_t < 0.363636 {
+                        7.5625 * raw_t * raw_t
+                    } else {
+                        let phase = (raw_t - 0.363636) / 0.636364;
+                        let decay = (1.0 - phase).powi(2);
+                        1.0 - (phase * bounces * std::f64::consts::PI).cos().abs() * 0.35 * decay
+                    };
+                    lerp(a.value, b.value, bt)
+                } else if sec.contains("ゴム") || sec.contains("伸縮") || sec.contains("オーバーシュート") {
+                    let strength = (param_num.max(1) as f64 * 0.35).clamp(0.35, 3.5);
+                    let et = if raw_t <= 0.0 || raw_t >= 1.0 {
+                        raw_t
+                    } else {
+                        let c4 = (2.0 * std::f64::consts::PI) / 3.0;
+                        (-2.0_f64).powf(10.0 * raw_t) * ((raw_t * 10.0 * strength - 0.75) * c4).sin() + 1.0
+                    };
+                    lerp(a.value, b.value, et)
+                } else if sec.contains("段階") || sec.contains("ステップ") || sec.contains("階段") {
+                    let steps = param_num.max(2) as f64;
+                    let st = (raw_t * steps).floor() / steps;
+                    lerp(a.value, b.value, interp.easing.apply(st))
+                } else if sec.contains("サイン") || sec.contains("正弦波") || sec.contains("振動") {
+                    let freq = param_num.max(1) as f64;
+                    let wave = 0.5 - 0.5 * (raw_t * freq * 2.0 * std::f64::consts::PI).cos();
+                    lerp(a.value, b.value, wave)
                 } else {
+                    if let Some(eval_fn) = TRA_SCRIPT_EVALUATOR.get() {
+                        let pts: Vec<f64> = keys.iter().map(|k| k.value).collect();
+                        if let Some(v) = eval_fn(
+                            script_name,
+                            &pts,
+                            i,
+                            raw_t,
+                            param_num as f64,
+                            interp.easing.accel(),
+                            interp.easing.decel(),
+                        ) {
+                            return v;
+                        }
+                    }
                     lerp(a.value, b.value, t)
                 }
             }

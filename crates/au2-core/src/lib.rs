@@ -40,4 +40,4 @@ pub use id::ObjectId;
 pub use object::{ObjectCategory, TimelineObject};
 pub use project::{Layer, Project, Scene, SceneSettings, MAX_LAYERS};
 pub use time::{Frame, Rational};
-pub use track::{Easing, Interpolation, Keyframe, MoveKind, Track};
+pub use track::{set_tra_script_evaluator, Easing, Interpolation, Keyframe, MoveKind, TraScriptEvaluator, Track};

@@ -36,8 +36,15 @@ pub fn find_snap_frame(
     check_target(0);
     // 2. 現在の再生ヘッド位置
     check_target(st.frame);
+    // 3. In 点 / Out 点（選択・書き出し範囲境界）
+    if let Some(in_f) = st.timeline.in_point {
+        check_target(in_f);
+    }
+    if let Some(out_f) = st.timeline.out_point {
+        check_target(out_f + 1);
+    }
 
-    // 3. 他オブジェクトの境界（始点および終点 + 1）
+    // 4. 他オブジェクトの境界（始点・終点 + 1・中間点）
     for layer in &st.scene.layers {
         for obj in &layer.objects {
             if ignore_ids.contains(&obj.id) {
@@ -45,6 +52,9 @@ pub fn find_snap_frame(
             }
             check_target(obj.frame_start);
             check_target(obj.frame_end + 1);
+            for &mid in &obj.midpoints {
+                check_target(mid);
+            }
         }
     }
 

@@ -54,6 +54,8 @@ pub(crate) struct DrawCtx<'a> {
     pub(crate) group_transform: Option<GroupTransform>,
     pub(crate) scene_depth: u32,
     pub(crate) audio_waveform: &'a [f32],
+    pub(crate) current_scene: Option<(&'a au2_core::Scene, Frame)>,
+    pub(crate) layer_limit: Option<usize>,
 }
 
 /// 指定したシーン (`scene`) の `frame` における描画を実行します（サブシーン呼び出し・カメラ制御・グループ制御・時間制御・クリッピング対応）。
@@ -373,6 +375,11 @@ pub(crate) fn render_scene_at(
     let cam_layer = active_camera.map(|(l, _)| l).unwrap_or(0);
 
     for (layer_idx, layer) in scene.layers.iter().enumerate() {
+        if let Some(limit) = base_ctx.layer_limit {
+            if layer_idx >= limit {
+                break;
+            }
+        }
         if !layer.visible {
             continue;
         }
@@ -467,6 +474,8 @@ pub(crate) fn render_scene_at(
             group_transform: Some(gt),
             scene_depth: base_ctx.scene_depth,
             audio_waveform: base_ctx.audio_waveform,
+            current_scene: Some((scene, frame)),
+            layer_limit: base_ctx.layer_limit,
         };
 
         let is_prev_obj = matches!(
@@ -2271,6 +2280,8 @@ fn draw_single_instance(
                     group_transform: Some(sub_gt),
                     scene_depth: ctx.scene_depth + 1,
                     audio_waveform: ctx.audio_waveform,
+                    current_scene: Some((sub_scene, sub_frame)),
+                    layer_limit: None,
                 };
                 render_scene_at(&sub_ctx, sub_scene, sub_frame, None);
             }
@@ -2423,6 +2434,73 @@ fn draw_single_instance(
             }
         }
         EffectKind::FrameBuffer => {
+            let clear_fb = src.eval("フレームバッファをクリア", rel, src.eval("check0", rel, 0.0)) >= 0.5;
+            if clear_fb {
+                painter.rect_filled(ctx.canvas, 0.0, Color32::BLACK);
+            }
+            let has_transform = x.abs() > 0.5
+                || y.abs() > 0.5
+                || (zoom - 1.0).abs() > 0.005
+                || angle.abs() > 0.005
+                || alpha < 0.995;
+            if (clear_fb || has_transform) && alpha > 0.005 && ctx.scene_depth < 4 {
+                if let Some((cur_scene, cur_frame)) = ctx.current_scene {
+                    let fb_layer_idx = cur_scene.find(obj.id).map(|(li, _)| li).unwrap_or(0);
+                    if fb_layer_idx > 0 {
+                        let mut fb_gt = ctx.group_transform.unwrap_or_default();
+                        fb_gt.ox = x as f64;
+                        fb_gt.oy = y as f64;
+                        fb_gt.zoom = zoom as f64;
+                        fb_gt.rz = angle.to_degrees() as f64;
+                        fb_gt.alpha = alpha as f64;
+                        let fb_ctx = DrawCtx {
+                            painter,
+                            canvas: ctx.canvas,
+                            scale: ctx.scale,
+                            fps: ctx.fps,
+                            screen_w: ctx.screen_w,
+                            screen_h: ctx.screen_h,
+                            textures: ctx.textures,
+                            plugins: ctx.plugins,
+                            scenes: ctx.scenes,
+                            has_ffmpeg: ctx.has_ffmpeg,
+                            camera: ctx.camera,
+                            group_transform: Some(fb_gt),
+                            scene_depth: ctx.scene_depth + 1,
+                            audio_waveform: ctx.audio_waveform,
+                            current_scene: Some((cur_scene, cur_frame)),
+                            layer_limit: Some(fb_layer_idx),
+                        };
+                        render_scene_at(&fb_ctx, cur_scene, cur_frame, None);
+                    }
+                }
+            }
+            if fx.hsv_shift.0.abs() > 0.01 {
+                let b_delta = fx.hsv_shift.0;
+                let ov = if b_delta > 0.0 {
+                    Color32::from_white_alpha((b_delta.min(1.0) * alpha * 150.0) as u8)
+                } else {
+                    Color32::from_black_alpha(((-b_delta).min(1.0) * alpha * 220.0) as u8)
+                };
+                painter.rect_filled(ctx.canvas, 0.0, ov);
+            }
+            if let Some((tcol, t_str)) = fx.tint_color {
+                let a = (t_str * alpha * 140.0).clamp(0.0, 220.0) as u8;
+                painter.rect_filled(
+                    ctx.canvas,
+                    0.0,
+                    Color32::from_rgba_unmultiplied(tcol.r(), tcol.g(), tcol.b(), a),
+                );
+            }
+            if fx.glow_strength > 0.01 {
+                let gcol = fx.glow_color.unwrap_or(Color32::from_rgb(255, 248, 220));
+                let a = (fx.glow_strength * alpha * 75.0).clamp(0.0, 180.0) as u8;
+                painter.rect_filled(
+                    ctx.canvas,
+                    0.0,
+                    Color32::from_rgba_unmultiplied(gcol.r(), gcol.g(), gcol.b(), a),
+                );
+            }
             if fx.chroma_shift > 0.5 {
                 let shift = (fx.chroma_shift * ctx.scale).clamp(1.0, 24.0);
                 let r_rect = Rect::from_min_max(ctx.canvas.left_top(), pos2(ctx.canvas.left() + shift * 1.5, ctx.canvas.bottom()));

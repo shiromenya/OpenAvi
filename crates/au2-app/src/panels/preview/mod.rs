@@ -144,6 +144,8 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
         group_transform: None,
         scene_depth: 0,
         audio_waveform: &waveform_bins,
+        current_scene: Some((&st.scene, frame)),
+        layer_limit: None,
     };
 
     render_scene_at(&ctx, &st.scene, frame, st.selected);
@@ -186,22 +188,39 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
                 let mut target_ya = drag.orig_y.0 + dy;
                 let mut target_yb = drag.orig_y.1 + dy;
 
-                // 画面中央スナップ（8px 以内で X=0 または Y=0 に吸着）
+                // 画面中央スナップ（8px 以内で X=0 または Y=0、三分割グリッド有効時は ±W/6・±H/6 にも吸着）
                 let snap_threshold_canvas = 8.0_f64 / (scale as f64);
+                let alt_suppress = ui.input(|i| i.modifiers.alt);
                 let mut snapped_x = false;
                 let mut snapped_y = false;
 
-                if target_xa.abs() <= snap_threshold_canvas {
-                    let snap_d = -target_xa;
-                    target_xa = 0.0;
-                    target_xb += snap_d;
-                    snapped_x = true;
-                }
-                if target_ya.abs() <= snap_threshold_canvas {
-                    let snap_d = -target_ya;
-                    target_ya = 0.0;
-                    target_yb += snap_d;
-                    snapped_y = true;
+                if !alt_suppress {
+                    let mut x_targets = vec![0.0_f64];
+                    let mut y_targets = vec![0.0_f64];
+                    if st.preview_grid_mode == 2 {
+                        let tx = (sw as f64) / 6.0;
+                        let ty = (sh as f64) / 6.0;
+                        x_targets.extend_from_slice(&[-tx, tx]);
+                        y_targets.extend_from_slice(&[-ty, ty]);
+                    }
+                    for gx in x_targets {
+                        if (target_xa - gx).abs() <= snap_threshold_canvas {
+                            let snap_d = gx - target_xa;
+                            target_xa = gx;
+                            target_xb += snap_d;
+                            snapped_x = true;
+                            break;
+                        }
+                    }
+                    for gy in y_targets {
+                        if (target_ya - gy).abs() <= snap_threshold_canvas {
+                            let snap_d = gy - target_ya;
+                            target_ya = gy;
+                            target_yb += snap_d;
+                            snapped_y = true;
+                            break;
+                        }
+                    }
                 }
 
                 st.preview_snap_x = snapped_x;
@@ -228,6 +247,33 @@ pub fn ui(ui: &mut egui::Ui, st: &mut EditorState) {
             st.preview_drag = None;
             st.preview_snap_x = false;
             st.preview_snap_y = false;
+        }
+    }
+
+    // プレビューガイド・セーフエリア枠・三分割グリッドの描画
+    if st.preview_grid_mode > 0 {
+        let guide_stroke = Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(180, 220, 255, 85));
+        let safe90 = Rect::from_center_size(canvas.center(), canvas.size() * 0.90);
+        let safe80 = Rect::from_center_size(canvas.center(), canvas.size() * 0.80);
+        painter.rect_stroke(safe90, 0.0, guide_stroke);
+        painter.rect_stroke(safe80, 0.0, Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 210, 120, 75)));
+        // センター十字
+        painter.line_segment(
+            [pos2(canvas.center().x, canvas.top()), pos2(canvas.center().x, canvas.bottom())],
+            guide_stroke,
+        );
+        painter.line_segment(
+            [pos2(canvas.left(), canvas.center().y), pos2(canvas.right(), canvas.center().y)],
+            guide_stroke,
+        );
+        if st.preview_grid_mode == 2 {
+            let third_stroke = Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(120, 255, 190, 90));
+            for k in [1.0_f32 / 3.0, 2.0_f32 / 3.0] {
+                let gx = canvas.left() + canvas.width() * k;
+                let gy = canvas.top() + canvas.height() * k;
+                painter.line_segment([pos2(gx, canvas.top()), pos2(gx, canvas.bottom())], third_stroke);
+                painter.line_segment([pos2(canvas.left(), gy), pos2(canvas.right(), gy)], third_stroke);
+            }
         }
     }
 
@@ -362,7 +408,7 @@ fn bottom_transport_bar(ui: &mut egui::Ui, st: &mut EditorState) {
     let play_w = 108.0_f32;
     let gap = 6.0_f32;
     let btn_h = 28.0_f32;
-    let group_w = nav_w * 4.0 + play_w + gap * 4.0;
+    let group_w = nav_w * 5.0 + play_w + gap * 5.0;
     let mut group_x = (row2_rect.center().x - group_w * 0.5).floor();
     if group_x < left_end + 16.0 {
         group_x = (left_end + 16.0).floor();
@@ -408,6 +454,25 @@ fn bottom_transport_bar(ui: &mut egui::Ui, st: &mut EditorState) {
     }
     if nav_btn(&mut btn_ui, "⏭", "最終フレームへ (End)").clicked() {
         st.set_frame(last);
+    }
+    let grid_label = match st.preview_grid_mode {
+        1 => "╋",
+        2 => "＃",
+        _ => "⊞",
+    };
+    if nav_btn(
+        &mut btn_ui,
+        grid_label,
+        "プレビューガイド切替 (OFF → センター十字＋セーフエリア → 三分割グリッド＋セーフエリア)",
+    )
+    .clicked()
+    {
+        st.preview_grid_mode = (st.preview_grid_mode + 1) % 3;
+        st.status = match st.preview_grid_mode {
+            1 => "プレビューガイド: センター十字＋セーフエリア枠 (80% / 90%)".into(),
+            2 => "プレビューガイド: 三分割グリッド＋セーフエリア枠 (ドラッグ時三分割線吸着)".into(),
+            _ => "プレビューガイド: OFF".into(),
+        };
     }
 
     // 右端：オーディオピークメーター (L/R) ＆ 解像度表示
@@ -672,6 +737,8 @@ mod tests {
                 group_transform: None,
                 scene_depth: 0,
                 audio_waveform: &[],
+                current_scene: None,
+                layer_limit: None,
             };
             let (items_f3, _) = layout_aviutl_text(&draw_ctx, &src, 3);
             assert_eq!(items_f3.len(), 1);
@@ -740,11 +807,72 @@ mod tests {
                 group_transform: None,
                 scene_depth: 0,
                 audio_waveform: &[0.25, 0.5, 0.75, 1.0],
+                current_scene: Some((&scene, 0)),
+                layer_limit: None,
             };
             render_scene_at(&draw_ctx, &scene, 0, None);
         });
         // Layer 0 の図形と Layer 1 の直前オブジェクトの両方がシェイプとして出力されていること
         assert!(full.shapes.len() >= 2);
+    }
+
+    #[test]
+    fn test_framebuffer_object_clear_and_transform_rendering() {
+        let egui_ctx = egui::Context::default();
+        let canvas = Rect::from_min_size(egui::Pos2::ZERO, vec2(320.0, 240.0));
+        let textures = std::collections::HashMap::new();
+        let plugins = au2_plugin::PluginRegistry::default();
+        let scenes = std::collections::BTreeMap::new();
+
+        let mut scene = au2_core::Scene::default();
+        // Layer 0: 図形オブジェクト
+        let obj0 = au2_core::TimelineObject::new_shape(0, 30, 1, "4080ff");
+        scene.layers[0].objects.push(obj0);
+
+        // Layer 1: フレームバッファ (X = 30, 拡大率 = 120, フレームバッファをクリア = ON)
+        let mut fb_obj = au2_core::TimelineObject::new(0, 30);
+        let mut fb_eff = au2_core::Effect::new("フレームバッファ");
+        fb_eff.params.push(au2_core::Param {
+            key: "フレームバッファをクリア".into(),
+            value: au2_core::ParamValue::Track(au2_core::Track::constant(1.0, 0)),
+        });
+        let mut fb_draw = au2_core::Effect::new("標準描画");
+        fb_draw.params.push(au2_core::Param {
+            key: "X".into(),
+            value: au2_core::ParamValue::Track(au2_core::Track::constant(30.0, 1)),
+        });
+        fb_draw.params.push(au2_core::Param {
+            key: "拡大率".into(),
+            value: au2_core::ParamValue::Track(au2_core::Track::constant(120.0, 1)),
+        });
+        fb_obj.effects.push(fb_eff);
+        fb_obj.effects.push(fb_draw);
+        scene.layers[1].objects.push(fb_obj);
+
+        let full = egui_ctx.run(egui::RawInput::default(), |c| {
+            let painter = egui::Painter::new(c.clone(), egui::LayerId::background(), canvas);
+            let draw_ctx = DrawCtx {
+                painter: &painter,
+                canvas,
+                scale: 1.0,
+                fps: 30.0,
+                screen_w: 320.0,
+                screen_h: 240.0,
+                textures: &textures,
+                plugins: &plugins,
+                scenes: &scenes,
+                has_ffmpeg: false,
+                camera: None,
+                group_transform: None,
+                scene_depth: 0,
+                audio_waveform: &[],
+                current_scene: Some((&scene, 0)),
+                layer_limit: None,
+            };
+            render_scene_at(&draw_ctx, &scene, 0, None);
+        });
+        // Layer 0 描画 + フレームバッファクリア矩形 + Layer 0 再描画シェイプが出力されていること
+        assert!(full.shapes.len() >= 3);
     }
 }
 

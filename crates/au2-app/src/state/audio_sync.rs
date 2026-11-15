@@ -20,15 +20,26 @@ use au2_media::AudioTrackItem;
 
 use super::EditorState;
 
+#[derive(Clone, Copy, PartialEq)]
+struct PlaybackEval {
+    offset_sec: f64,
+    volume: f32,
+    pan: f32,
+    speed: f64,
+    loop_play: bool,
+    mono: bool,
+}
+
 /// キャッシュされた 1 本分の再生対象トラック（構成情報＋直近にエンジンへ渡した値）。
 pub(crate) struct AudioSyncEntry {
+    /// `None` の場合はメインシーン、`Some((scene_id, parent_layer, parent_obj))` の場合はサブシーンの音声
+    sub_scene_ref: Option<(u32, usize, usize)>,
     layer_idx: usize,
     obj_idx: usize,
     frame_start: Frame,
     frame_end: Frame,
     audio: Arc<Vec<i16>>,
-    last_offset_sec: f64,
-    last_volume: f32,
+    last_eval: PlaybackEval,
 }
 
 /// 音声トラック構成のキャッシュ。`signature` が一致する間は再構築しません。
@@ -49,25 +60,62 @@ fn is_playable_kind(kind: &EffectKind) -> bool {
     matches!(kind, EffectKind::AudioFile | EffectKind::VideoFile)
 }
 
-/// オブジェクトの現在フレームにおける `(再生位置[秒], 音量[0.0..])` を評価します。
-/// 再生対象でない場合は `None`。
-fn playback_params(obj: &TimelineObject, fps: f64, cur_frame: Frame) -> Option<(f64, f32)> {
+/// オブジェクトの現在フレームにおける再生パラメータ（再生位置・音量フェード込の音量・左右パン・再生速度・ループ・モノラル化）を評価します。
+fn playback_params(obj: &TimelineObject, fps: f64, cur_frame: Frame) -> Option<PlaybackEval> {
     let src = obj.source().filter(|s| s.enabled)?;
     if !is_playable_kind(&src.kind) {
         return None;
     }
+    let fps_safe = fps.max(1.0);
     let rel = (cur_frame as i64 - obj.frame_start as i64).max(0) as u32;
     let start_pos = if src.kind == EffectKind::AudioFile {
         src.eval("再生位置", rel, 0.0).max(0.0)
     } else {
-        ((src.eval("再生位置", rel, 1.0) - 1.0) / fps.max(1.0)).max(0.0)
+        ((src.eval("再生位置", rel, 1.0) - 1.0) / fps_safe).max(0.0)
     };
-    let volume = (obj
+    let speed = (src.eval("再生速度", rel, 100.0) / 100.0).max(0.0);
+    let loop_play = src.eval("ループ再生", rel, src.eval("check0", rel, 0.0)) >= 0.5;
+    let mut volume = (obj
         .effect(&EffectKind::StandardPlayback)
         .map(|e| e.eval("音量", rel, 100.0))
         .unwrap_or(100.0)
         / 100.0) as f32;
-    Some((start_pos, volume))
+    let pan = (obj
+        .effect(&EffectKind::StandardPlayback)
+        .map(|e| e.eval("左右", rel, 0.0))
+        .unwrap_or(0.0)
+        / 100.0)
+        .clamp(-1.0, 1.0) as f32;
+
+    // 音量フェード / 音声フェード / フェード (イン・アウト秒数)
+    for eff in &obj.effects {
+        if eff.enabled && (eff.name == "音量フェード" || eff.name == "音声フェード" || eff.name == "フェード") {
+            let fade_in_sec = eff.eval("イン", rel, 0.0).max(0.0);
+            let fade_out_sec = eff.eval("アウト", rel, 0.0).max(0.0);
+            let rel_sec = rel as f64 / fps_safe;
+            let remain_sec = (obj.frame_end.saturating_sub(cur_frame) as f64 + 1.0) / fps_safe;
+            if fade_in_sec > 0.001 && rel_sec < fade_in_sec {
+                volume *= (rel_sec / fade_in_sec).clamp(0.0, 1.0) as f32;
+            }
+            if fade_out_sec > 0.001 && remain_sec < fade_out_sec {
+                volume *= (remain_sec / fade_out_sec).clamp(0.0, 1.0) as f32;
+            }
+        }
+    }
+
+    let mono = obj
+        .effects
+        .iter()
+        .any(|e| e.enabled && e.name == "モノラル化");
+
+    Some(PlaybackEval {
+        offset_sec: start_pos,
+        volume,
+        pan,
+        speed: if speed <= 0.0 { 1.0 } else { speed },
+        loop_play,
+        mono,
+    })
 }
 
 impl EditorState {
@@ -89,6 +137,14 @@ impl EditorState {
                 let Some(src) = obj.source().filter(|s| s.enabled) else {
                     continue;
                 };
+                if matches!(src.kind, EffectKind::SceneAudio | EffectKind::Scene) {
+                    let scene_id = src
+                        .text("scene")
+                        .and_then(|s| s.trim().parse::<u32>().ok())
+                        .unwrap_or(1);
+                    (li, oi, obj.id, obj.frame_start, obj.frame_end, scene_id).hash(&mut h);
+                    continue;
+                }
                 if !is_playable_kind(&src.kind) {
                     continue;
                 }
@@ -110,11 +166,12 @@ impl EditorState {
         h.finish()
     }
 
-    /// 現在のシーンから再生対象トラックの構成を構築します（パス解決・PCM 取得を含む）。
+    /// 現在のシーンから再生対象トラックの構成を構築します（パス解決・PCM 取得・サブシーン音声展開を含む）。
     fn build_audio_sync_entries(&mut self, fps: f64) -> Vec<AudioSyncEntry> {
         struct Candidate {
             is_audio_obj: bool,
             file_str: String,
+            sub_scene_ref: Option<(u32, usize, usize)>,
             layer_idx: usize,
             obj_idx: usize,
             frame_start: Frame,
@@ -130,6 +187,50 @@ impl EditorState {
                 let Some(src) = obj.source().filter(|s| s.enabled) else {
                     continue;
                 };
+                if matches!(src.kind, EffectKind::SceneAudio | EffectKind::Scene) {
+                    let scene_id = src
+                        .text("scene")
+                        .and_then(|s| s.trim().parse::<u32>().ok())
+                        .unwrap_or(1);
+                    let start_pos_f = src.eval("再生位置", 0, 0.0).max(0.0).round() as Frame;
+                    if let Some(sub_scene) = self.scenes.get(&scene_id) {
+                        for (s_li, s_layer) in sub_scene.layers.iter().enumerate() {
+                            if !s_layer.visible {
+                                continue;
+                            }
+                            for (s_oi, s_obj) in s_layer.objects.iter().enumerate() {
+                                let Some(s_src) = s_obj.source().filter(|s| s.enabled) else {
+                                    continue;
+                                };
+                                if !is_playable_kind(&s_src.kind) {
+                                    continue;
+                                }
+                                let Some(file_str) = s_src.text("file").filter(|s| !s.trim().is_empty()) else {
+                                    continue;
+                                };
+                                if s_obj.frame_end < start_pos_f {
+                                    continue;
+                                }
+                                let rel_s = s_obj.frame_start.saturating_sub(start_pos_f);
+                                let rel_e = s_obj.frame_end.saturating_sub(start_pos_f);
+                                let mapped_s = obj.frame_start + rel_s;
+                                let mapped_e = (obj.frame_start + rel_e).min(obj.frame_end);
+                                if mapped_s <= mapped_e {
+                                    candidates.push(Candidate {
+                                        is_audio_obj: s_src.kind == EffectKind::AudioFile,
+                                        file_str: file_str.to_string(),
+                                        sub_scene_ref: Some((scene_id, li, oi)),
+                                        layer_idx: s_li,
+                                        obj_idx: s_oi,
+                                        frame_start: mapped_s,
+                                        frame_end: mapped_e,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
                 if !is_playable_kind(&src.kind) {
                     continue;
                 }
@@ -139,6 +240,7 @@ impl EditorState {
                 candidates.push(Candidate {
                     is_audio_obj: src.kind == EffectKind::AudioFile,
                     file_str: file_str.to_string(),
+                    sub_scene_ref: None,
                     layer_idx: li,
                     obj_idx: oi,
                     frame_start: obj.frame_start,
@@ -163,21 +265,41 @@ impl EditorState {
             let Some(pcm) = self.media.get_audio_pcm(&path) else {
                 continue;
             };
-            let Some((offset, volume)) = self.scene.layers[c.layer_idx]
-                .objects
-                .get(c.obj_idx)
-                .and_then(|o| playback_params(o, fps, cur_frame))
-            else {
+            let eval_opt = if let Some((sc_id, p_li, p_oi)) = c.sub_scene_ref {
+                let parent_vol = self
+                    .scene
+                    .layers
+                    .get(p_li)
+                    .and_then(|l| l.objects.get(p_oi))
+                    .and_then(|po| po.effect(&EffectKind::StandardPlayback))
+                    .map(|e| (e.eval("音量", 0, 100.0) / 100.0) as f32)
+                    .unwrap_or(1.0);
+                self.scenes
+                    .get(&sc_id)
+                    .and_then(|sc| sc.layers.get(c.layer_idx))
+                    .and_then(|l| l.objects.get(c.obj_idx))
+                    .and_then(|o| playback_params(o, fps, cur_frame.saturating_sub(c.frame_start) + o.frame_start))
+                    .map(|mut ev| {
+                        ev.volume *= parent_vol;
+                        ev
+                    })
+            } else {
+                self.scene.layers[c.layer_idx]
+                    .objects
+                    .get(c.obj_idx)
+                    .and_then(|o| playback_params(o, fps, cur_frame))
+            };
+            let Some(eval) = eval_opt else {
                 continue;
             };
             entries.push(AudioSyncEntry {
+                sub_scene_ref: c.sub_scene_ref,
                 layer_idx: c.layer_idx,
                 obj_idx: c.obj_idx,
                 frame_start: c.frame_start,
                 frame_end: c.frame_end,
                 audio: pcm,
-                last_offset_sec: offset,
-                last_volume: volume,
+                last_eval: eval,
             });
         }
         entries
@@ -186,7 +308,7 @@ impl EditorState {
     /// 現在のタイムライン上の音声トラックをオーディオエンジンに同期供給します。
     ///
     /// トラック構成はキャッシュし、シーン構成が変わったときだけ再構築します。
-    /// 再生位置・音量は毎フレーム評価し、変化があったときだけエンジンに反映します。
+    /// 再生位置・音量・パン等は毎フレーム評価し、変化があったときだけエンジンに反映します。
     pub fn sync_audio_playback(&mut self) {
         let fps = self.scene.settings.frame_rate.as_f64();
         let signature = self.audio_sync_signature(fps);
@@ -199,18 +321,36 @@ impl EditorState {
         } else if let Some(cache) = self.audio_sync_cache.as_mut() {
             let cur_frame = self.frame;
             for e in cache.entries.iter_mut() {
-                let Some((offset, volume)) = self
-                    .scene
-                    .layers
-                    .get(e.layer_idx)
-                    .and_then(|l| l.objects.get(e.obj_idx))
-                    .and_then(|o| playback_params(o, fps, cur_frame))
-                else {
+                let eval_opt = if let Some((sc_id, p_li, p_oi)) = e.sub_scene_ref {
+                    let parent_vol = self
+                        .scene
+                        .layers
+                        .get(p_li)
+                        .and_then(|l| l.objects.get(p_oi))
+                        .and_then(|po| po.effect(&EffectKind::StandardPlayback))
+                        .map(|ef| (ef.eval("音量", 0, 100.0) / 100.0) as f32)
+                        .unwrap_or(1.0);
+                    self.scenes
+                        .get(&sc_id)
+                        .and_then(|sc| sc.layers.get(e.layer_idx))
+                        .and_then(|l| l.objects.get(e.obj_idx))
+                        .and_then(|o| playback_params(o, fps, cur_frame.saturating_sub(e.frame_start) + o.frame_start))
+                        .map(|mut ev| {
+                            ev.volume *= parent_vol;
+                            ev
+                        })
+                } else {
+                    self.scene
+                        .layers
+                        .get(e.layer_idx)
+                        .and_then(|l| l.objects.get(e.obj_idx))
+                        .and_then(|o| playback_params(o, fps, cur_frame))
+                };
+                let Some(eval) = eval_opt else {
                     continue;
                 };
-                if offset != e.last_offset_sec || volume != e.last_volume {
-                    e.last_offset_sec = offset;
-                    e.last_volume = volume;
+                if eval != e.last_eval {
+                    e.last_eval = eval;
                     changed = true;
                 }
             }
@@ -225,8 +365,12 @@ impl EditorState {
                         audio: Arc::clone(&e.audio),
                         start_frame: e.frame_start,
                         end_frame: e.frame_end,
-                        offset_sec: e.last_offset_sec,
-                        volume: e.last_volume,
+                        offset_sec: e.last_eval.offset_sec,
+                        volume: e.last_eval.volume,
+                        pan: e.last_eval.pan,
+                        speed: e.last_eval.speed,
+                        loop_play: e.last_eval.loop_play,
+                        mono: e.last_eval.mono,
                     })
                     .collect();
                 self.audio.set_active_tracks(tracks);

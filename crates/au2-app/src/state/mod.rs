@@ -82,6 +82,8 @@ pub struct EditorState {
     /// プレビュー画面の中央吸着ガイド線（X軸中央 = 縦線, Y軸中央 = 横線）
     pub preview_snap_x: bool,
     pub preview_snap_y: bool,
+    /// プレビュー画面のグリッド・ガイド表示モード（0: OFF, 1: センター十字＋セーフエリア, 2: 三分割グリッド＋セーフエリア）
+    pub preview_grid_mode: u8,
     /// ファイルパス解決のキャッシュ（毎フレームの OS ディスク IO / exists 呼び出しを削減）
     pub resolved_paths: HashMap<String, Option<PathBuf>>,
     /// 再生中の音声トラック構成キャッシュ（毎フレームの全オブジェクト走査・再構築を回避）
@@ -127,6 +129,7 @@ impl Default for EditorState {
             preview_drag: None,
             preview_snap_x: false,
             preview_snap_y: false,
+            preview_grid_mode: 0,
             resolved_paths: HashMap::new(),
             audio_sync_cache: None,
             extra_search_dirs: Vec::new(),

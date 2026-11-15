@@ -438,6 +438,10 @@ pub struct AudioTrackItem {
     pub end_frame: u32,
     pub offset_sec: f64,
     pub volume: f32,
+    pub pan: f32,
+    pub speed: f64,
+    pub loop_play: bool,
+    pub mono: bool,
 }
 
 struct PeakHistorySample {
@@ -551,18 +555,48 @@ pub fn mix_audio_chunk(
         let track_start_sample_frame = (track_start_sec * SAMPLE_RATE as f64).round() as isize;
         let offset_sample_frame = (trk.offset_sec * SAMPLE_RATE as f64).round() as isize;
         let vol = trk.volume.clamp(0.0, 2.0);
+        let pan = trk.pan.clamp(-1.0, 1.0);
+        let gain_l = vol * (1.0 - pan.max(0.0));
+        let gain_r = vol * (1.0 + pan.min(0.0));
+        let speed = if trk.speed <= 0.0 { 1.0 } else { trk.speed };
         let total_interleaved = trk.audio.len();
+        let total_sf = total_interleaved / (CHANNELS as usize);
+        if total_sf == 0 {
+            continue;
+        }
 
         for f in 0..chunk_frames {
             let timeline_sf = (cursor_sample_frame + f) as isize;
-            let rel_sf = timeline_sf - track_start_sample_frame + offset_sample_frame;
+            let rel_timeline_sf = timeline_sf - track_start_sample_frame;
+            if rel_timeline_sf < 0 {
+                continue;
+            }
+            let scaled_rel_sf = if (speed - 1.0).abs() < 1e-6 {
+                rel_timeline_sf
+            } else {
+                ((rel_timeline_sf as f64) * speed).round() as isize
+            };
+            let rel_sf = scaled_rel_sf + offset_sample_frame;
             if rel_sf < 0 {
                 continue;
             }
-            let base = (rel_sf as usize) * (CHANNELS as usize);
+            let mut src_sf = rel_sf as usize;
+            if trk.loop_play {
+                src_sf %= total_sf;
+            } else if src_sf >= total_sf {
+                continue;
+            }
+            let base = src_sf * (CHANNELS as usize);
             if base + 1 < total_interleaved {
-                mix_buf[f * 2] += trk.audio[base] as f32 * vol;
-                mix_buf[f * 2 + 1] += trk.audio[base + 1] as f32 * vol;
+                let mut l = trk.audio[base] as f32;
+                let mut r = trk.audio[base + 1] as f32;
+                if trk.mono {
+                    let m = (l + r) * 0.5;
+                    l = m;
+                    r = m;
+                }
+                mix_buf[f * 2] += l * gain_l;
+                mix_buf[f * 2 + 1] += r * gain_r;
             }
         }
     }
@@ -1296,6 +1330,10 @@ mod tests {
             end_frame: 30,
             offset_sec: 0.0,
             volume: 1.0,
+            pan: 0.0,
+            speed: 1.0,
+            loop_play: false,
+            mono: false,
         };
         let trk2 = AudioTrackItem {
             audio: Arc::new(vec![500i16, 500, 1000, 1000]),
@@ -1303,6 +1341,10 @@ mod tests {
             end_frame: 30,
             offset_sec: 0.0,
             volume: 0.5,
+            pan: 0.0,
+            speed: 1.0,
+            loop_play: false,
+            mono: false,
         };
         let mut buf = vec![0u8; 2 * 4]; // 2 frames * 2ch * 2bytes
         let (pl, pr) = mix_audio_chunk(&[trk1, trk2], 0, 2, 30.0, &mut buf);

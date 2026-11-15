@@ -24,6 +24,10 @@ fn main() {
         end_frame: 60,
         offset_sec: 0.0,
         volume: 1.0,
+        pan: 0.0,
+        speed: 1.0,
+        loop_play: false,
+        mono: false,
     };
 
     println!("Setting active track (2 seconds of 440Hz tone)...");

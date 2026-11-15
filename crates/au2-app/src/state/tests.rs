@@ -169,3 +169,70 @@ fn test_split_at_playhead_with_undo() {
     assert_eq!(restored.frame_start, 0);
     assert_eq!(restored.frame_end, 60);
 }
+
+#[test]
+fn test_tra_script_evaluator_and_extended_move_kinds() {
+    use au2_core::{Interpolation, Keyframe, MoveKind, Track};
+
+    // カスタム .tra スクリプトを登録して Track::evaluate から呼び出されることを検証
+    au2_plugin::register_tra_script_source(
+        "カスタム二乗移動@custom_tra",
+        r#"
+        local idx, ratio = obj.getpoint("index")
+        local v0 = obj.getpoint(math.floor(idx))
+        local v1 = obj.getpoint(math.floor(idx) + 1)
+        return v0 + (v1 - v0) * (ratio * ratio) + obj.getpoint("param")
+        "#,
+    );
+
+    let mut interp = Interpolation::new(MoveKind::Script("カスタム二乗移動@custom_tra".into()));
+    interp.param = Some("5".into());
+    let track = Track {
+        keyframes: vec![
+            Keyframe { frame: 0, value: 100.0 },
+            Keyframe { frame: 100, value: 200.0 },
+        ],
+        interpolation: Some(interp),
+        precision: 1,
+    };
+    // frame 50 -> ratio = 0.5 -> 100 + 100 * 0.25 + 5 = 130.0
+    let val = track.evaluate(50);
+    assert!((val - 130.0).abs() < 1e-4, "expected 130.0, got {val}");
+
+    // 段階（ステップ）移動・バウンス移動の検証
+    let mut step_interp = Interpolation::new(MoveKind::Script("段階移動".into()));
+    step_interp.param = Some("4".into());
+    let step_track = Track {
+        keyframes: vec![
+            Keyframe { frame: 0, value: 0.0 },
+            Keyframe { frame: 100, value: 100.0 },
+        ],
+        interpolation: Some(step_interp),
+        precision: 1,
+    };
+    assert!((step_track.evaluate(40) - 25.0).abs() < 1e-4);
+    assert!((step_track.evaluate(60) - 50.0).abs() < 1e-4);
+}
+
+#[test]
+fn test_timeline_snap_in_out_and_midpoints() {
+    use crate::panels::timeline::snap::find_snap_frame;
+
+    let mut st = EditorState::default();
+    st.timeline.snap_enabled = true;
+    st.timeline.px_per_frame = 4.0;
+    st.timeline.in_point = Some(40);
+    st.timeline.out_point = Some(79); // out_point + 1 = 80
+
+    let mut obj = TimelineObject::new(10, 120);
+    obj.midpoints = vec![55];
+    st.scene.insert_object(0, obj);
+
+    let ignore = std::collections::HashSet::new();
+    // In 点 (40) への吸着
+    assert_eq!(find_snap_frame(&st, 41, 9.0, &ignore), Some(40));
+    // Out 点境界 (80) への吸着
+    assert_eq!(find_snap_frame(&st, 81, 9.0, &ignore), Some(80));
+    // 中間点 (55) への吸着
+    assert_eq!(find_snap_frame(&st, 56, 9.0, &ignore), Some(55));
+}
