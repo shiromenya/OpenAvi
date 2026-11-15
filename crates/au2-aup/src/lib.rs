@@ -24,7 +24,7 @@ use au2_core::{
     Easing, Effect, EffectKind, Frame, Interpolation, Keyframe, MoveKind, Param, ParamValue,
     Rational, Scene, SceneSettings, TimelineObject, Track,
 };
-use au2_exo::{parse_exo_bytes, write_exo_bytes, TextEncoding};
+use au2_exo::parse_exo_bytes;
 use thiserror::Error;
 
 /// 初代 AviUtl プロジェクトファイルの32バイト標準ヘッダ
@@ -104,7 +104,12 @@ pub fn write_aup2_multi_scene_string(
 
         for (li, layer) in scene.layers.iter().enumerate() {
             let has_name = layer.name.as_ref().is_some_and(|n| !n.is_empty());
-            if has_name || !layer.visible || layer.locked {
+            if has_name
+                || !layer.visible
+                || layer.locked
+                || layer.coordinate_link
+                || layer.clip_above
+            {
                 let _ = write!(out, "[layer.{layer_sec_idx}]\r\nlayer={li}\r\n");
                 if scene_id > 0 || scenes.len() > 1 {
                     let _ = write!(out, "scene={scene_id}\r\n");
@@ -119,6 +124,12 @@ pub fn write_aup2_multi_scene_string(
                 }
                 if layer.locked {
                     out.push_str("lock=1\r\n");
+                }
+                if layer.coordinate_link {
+                    out.push_str("link=1\r\n");
+                }
+                if layer.clip_above {
+                    out.push_str("clip=1\r\n");
                 }
                 layer_sec_idx += 1;
             }
@@ -184,6 +195,11 @@ fn write_aup2_object_section(
         }
     }
     let _ = write!(out, "layer={layer}\r\nframe={frame_list}\r\n");
+    if let Some(g) = obj.group {
+        if g > 0 {
+            let _ = write!(out, "group={g}\r\n");
+        }
+    }
     if obj.clipping {
         out.push_str("clipping=1\r\n");
     }
@@ -236,14 +252,25 @@ fn write_aup2_effect(
     keys: &[Frame],
     obj_dur_sec: f64,
 ) {
-    // アニメーション効果 (@揺れ 等) や動画/音声の再生エフェクト名を本家 AviUtl2 標準名に変換
-    if eff.name == "アニメーション効果" {
-        let raw_name = eff.text("name").unwrap_or("震える");
+    // アニメーション効果 / カスタムオブジェクト / カメラ効果 や動画/音声の再生エフェクト名を本家 AviUtl2 標準名に変換
+    if matches!(
+        eff.name.as_str(),
+        "アニメーション効果" | "カスタムオブジェクト" | "カメラ効果"
+    ) {
+        let default_script = match eff.name.as_str() {
+            "カスタムオブジェクト" => "集中線",
+            "カメラ効果" => "手ぶれ",
+            _ => "震える",
+        };
+        let raw_name = eff
+            .text("name")
+            .filter(|s| !s.is_empty())
+            .unwrap_or(default_script);
         let base_name = raw_name.split('@').next().unwrap_or(raw_name);
         let aup2_eff_name = match base_name {
             "揺れ" | "震える" => "震える",
             "点滅" => "点滅",
-            "回転" => "座標の回転(個別オブジェクト)",
+            "回転" if eff.name == "アニメーション効果" => "座標の回転(個別オブジェクト)",
             other => other,
         };
         let _ = write!(out, "[{obj_idx}.{eff_idx}]\r\neffect.name={aup2_eff_name}\r\n");
@@ -251,7 +278,15 @@ fn write_aup2_effect(
             out.push_str("effect.disable=1\r\n");
         }
         for p in &eff.params {
-            if matches!(p.key.as_str(), "name" | "filter" | "param") {
+            if p.key == "name" {
+                continue;
+            }
+            if matches!(p.key.as_str(), "type" | "filter" | "param") {
+                if let ParamValue::Text(s) = &p.value {
+                    if !s.is_empty() && s != "0" {
+                        let _ = write!(out, "{}={}\r\n", p.key, escape_aup2_text(s));
+                    }
+                }
                 continue;
             }
             let out_key = match (aup2_eff_name, p.key.as_str()) {
@@ -267,9 +302,8 @@ fn write_aup2_effect(
                 ("座標の回転(個別オブジェクト)", "track2") => "中心Y",
                 (_, k) => k,
             };
-            if let ParamValue::Track(t) = &p.value {
-                let _ = write!(out, "{out_key}={}\r\n", format_aup2_track(t, keys));
-            }
+            let val = format_param_value(&p.value, keys);
+            let _ = write!(out, "{out_key}={val}\r\n");
         }
         return;
     }
@@ -598,7 +632,7 @@ fn blend_code_to_aup2(code: &str) -> &str {
     }
 }
 
-fn blend_aup2_to_code(name: &str) -> &str {
+pub(crate) fn blend_aup2_to_code(name: &str) -> &str {
     match name.trim() {
         "通常" | "0" => "0",
         "加算" | "1" => "1",
@@ -951,6 +985,17 @@ fn parse_aup2_or_alias_str(text: &str, allow_alias: bool) -> Result<AupDocument,
             || ls.get("state").is_some_and(|v| v.trim().parse::<u32>().unwrap_or(0) & 2 != 0)
         {
             layer.locked = true;
+        }
+        if ls.get("link").is_some_and(|v| v.trim() == "1")
+            || ls.get("state").is_some_and(|v| v.trim().parse::<u32>().unwrap_or(0) & 0x10 != 0)
+        {
+            layer.coordinate_link = true;
+        }
+        if ls.get("clip").is_some_and(|v| v.trim() == "1")
+            || ls.get("clipping").is_some_and(|v| v.trim() == "1")
+            || ls.get("state").is_some_and(|v| v.trim().parse::<u32>().unwrap_or(0) & 0x20 != 0)
+        {
+            layer.clip_above = true;
         }
     }
 
@@ -1308,6 +1353,22 @@ fn normalize_aup2_effect_name(name: &str) -> (String, Option<String>) {
         "手ぶれ" | "目標中心回転" | "目標サイズ固定視野角" => {
             ("カメラ効果".into(), Some(name.to_string()))
         }
+        // AviUtl2 標準カスタムオブジェクト (script.obj2)
+        "集中線"
+        | "走査線"
+        | "カウンター"
+        | "レンズフレア"
+        | "雲"
+        | "星"
+        | "雪"
+        | "雨"
+        | "ランダム小物配置(カメラ制御)"
+        | "ライン(移動軌跡)"
+        | "扇型"
+        | "多角形"
+        | "周辺ボケ光量"
+        | "フレア"
+        | "水面" => ("カスタムオブジェクト".into(), Some(name.to_string())),
         other => (other.to_string(), None),
     }
 }
@@ -1407,6 +1468,8 @@ fn is_text_setting_key(key: &str) -> bool {
             | "図形の種類"
             | "合成モード"
             | "name"
+            | "param"
+            | "filter"
             | "blend"
             | "type"
             | "align"
@@ -1650,27 +1713,18 @@ fn finalize_aup2_segments(segments: Vec<Aup2Segment>, scene: &mut Scene) {
 // 初代 AviUtl (.aup) バイナリパーサー & ライター
 // ============================================================================
 
-/// シーンを初代 `.aup` バイナリ形式でシリアライズします。
+/// シーンを本家 AviUtl 1.10 + 拡張編集 0.92 (`80EE`) 完全互換の `.aup` バイナリ形式でシリアライズします。
 pub fn write_aup_bytes(scene: &Scene) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(AUP_HEADER_018);
+    legacy_aup::write_legacy_aup(scene)
+}
 
-    let s = &scene.settings;
-    out.extend_from_slice(&s.width.to_le_bytes());
-    out.extend_from_slice(&s.height.to_le_bytes());
-    out.extend_from_slice(&s.frame_rate.num.to_le_bytes());
-    out.extend_from_slice(&s.frame_rate.den.to_le_bytes());
-    out.extend_from_slice(&s.length.to_le_bytes());
-    out.extend_from_slice(&s.audio_rate.to_le_bytes());
-    out.extend_from_slice(&s.audio_channels.to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes());
-
-    out.extend_from_slice(OAVI_CHUNK_MAGIC);
-    let exo_bytes = write_exo_bytes(scene, TextEncoding::ShiftJis);
-    out.extend_from_slice(&(exo_bytes.len() as u32).to_le_bytes());
-    out.extend_from_slice(&exo_bytes);
-
-    out
+/// マルチシーンプロジェクトを本家 AviUtl 1.10 + 拡張編集 0.92 (`80EE`) 完全互換の `.aup` バイナリ形式でシリアライズします。
+pub fn write_aup_multi_scene_bytes(
+    scenes: &BTreeMap<u32, Scene>,
+    editing_scene: u32,
+    cursor_frame: Frame,
+) -> Vec<u8> {
+    legacy_aup::write_legacy_aup_multi_scene(scenes, editing_scene, cursor_frame)
 }
 
 /// 初代 `.aup` バイナリまたは `.aup2` テキストを自動判別して解析します。
@@ -1721,7 +1775,10 @@ pub fn parse_aup_bytes(bytes: &[u8]) -> Result<AupDocument, AupError> {
 
     // 初代 AviUtl (.aup) の拡張編集バイナリおよび本体データを純粋 Rust で高精度パース
     if let Ok(doc) = legacy_aup::parse_legacy_aup(bytes) {
-        if doc.scene.object_count() > 0 {
+        if doc.scene.object_count() > 0
+            || doc.scenes.values().any(|s| s.object_count() > 0)
+            || doc.warnings.iter().any(|w| w.contains("拡張編集データ"))
+        {
             return Ok(doc);
         }
     }
@@ -2453,5 +2510,65 @@ Z軸回転=350.00,10.00,直線移動(回転)
         // 4. ランダムな不正バイト列
         let garbage = vec![0xcc; 512];
         assert!(parse_aup_bytes(&garbage).is_err());
+    }
+
+    #[test]
+    fn test_rle_comp_decomp_roundtrip() {
+        let mut original = Vec::new();
+        original.extend_from_slice(&[1, 2, 3, 4, 5]);
+        original.extend_from_slice(&[0xAA; 20]);
+        original.extend_from_slice(&[9, 8, 7]);
+        original.extend_from_slice(&[0x00; 5000]);
+        for i in 0..300u16 {
+            original.push((i % 251) as u8);
+        }
+        original.extend_from_slice(&[0xFF; 1024]);
+
+        let comp = legacy_aup::compress_aup(&original);
+        let decomp = legacy_aup::decompress_aup(&comp, original.len());
+        assert_eq!(decomp, original);
+    }
+
+    #[test]
+    fn test_bidirectional_aup_and_aup2_conversion() {
+        // 1. AupDotNet の実在 .aup ファイル群で .aup -> .aup2 -> .aup 相互変換を検証
+        let base_dir = Path::new(r"C:\Users\user\.gemini\antigravity\scratch\aupdotnet\AupDotNet-main\testdata\Exedit");
+        for file_name in ["LayerScene.aup", "Chain.aup", "Group.aup", "EffectSet01.aup"] {
+            let path = base_dir.join(file_name);
+            if !path.exists() {
+                continue;
+            }
+            let orig_bytes = std::fs::read(&path).expect("read sample aup");
+            let doc1 = parse_aup_bytes(&orig_bytes).expect("parse original .aup");
+            let orig_total_objs: usize = doc1.scenes.values().map(|s| s.object_count()).sum();
+            assert!(orig_total_objs > 0, "{file_name} should have objects");
+
+            // .aup -> .aup2 に変換
+            let aup2_str = write_aup2_multi_scene_string(&doc1.scenes, 0, Some(&path), doc1.cursor_frame);
+            let doc_aup2 = parse_aup2_str(&aup2_str).expect("parse converted .aup2");
+            let aup2_total_objs: usize = doc_aup2.scenes.values().map(|s| s.object_count()).sum();
+            assert_eq!(aup2_total_objs, orig_total_objs, "{file_name}: object count after .aup -> .aup2");
+
+            // .aup2 -> 本家 .aup (EditHandle + #temp0 + 80EE) に逆変換
+            let re_aup_bytes = write_aup_multi_scene_bytes(&doc_aup2.scenes, 0, doc_aup2.cursor_frame);
+            assert!(re_aup_bytes.starts_with(AUP_HEADER_018));
+            assert!(find_subslice(&re_aup_bytes, b"FilterProject 0.1\0").is_some());
+            assert!(find_subslice(&re_aup_bytes, OAVI_CHUNK_MAGIC).is_none());
+
+            let doc_reaup = parse_aup_bytes(&re_aup_bytes).expect("parse re-encoded .aup");
+            let reaup_total_objs: usize = doc_reaup.scenes.values().map(|s| s.object_count()).sum();
+            assert_eq!(reaup_total_objs, orig_total_objs, "{file_name}: object count after .aup2 -> .aup");
+
+            if file_name == "LayerScene.aup" {
+                let sc0 = doc_reaup.scenes.get(&0).expect("Scene 0");
+                assert_eq!(sc0.layers[1].name.as_deref(), Some("レイヤー2"));
+                assert!(!sc0.layers[1].visible);
+                assert_eq!(sc0.layers[2].name.as_deref(), Some("3番目"));
+                assert!(sc0.layers[2].locked);
+                assert!(sc0.layers[3].coordinate_link);
+                assert_eq!(sc0.layers[4].name.as_deref(), Some("Layer 5"));
+                assert!(sc0.layers[4].clip_above);
+            }
+        }
     }
 }

@@ -523,6 +523,27 @@ impl OpenAviApp {
                         ui.close_menu();
                         self.st.save_project_dialog();
                     }
+                    if ui
+                        .button("AviUtl2 形式で別名保存 (.aup2 — 本家 AviUtl2 互換)...")
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        self.st.save_as_aup2_dialog();
+                    }
+                    if ui
+                        .button("初代 AviUtl 形式で別名保存 (.aup — 本家 AviUtl + 拡張編集 0.92 互換)...")
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        self.st.save_as_legacy_aup_dialog();
+                    }
+                    if ui
+                        .button("プロジェクト形式を相互変換 (.aup ⇄ .aup2)...")
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        self.st.convert_project_file_dialog();
+                    }
                     if ui.button("オブジェクトファイルのエクスポート (.exo)...").clicked() {
                         ui.close_menu();
                         self.st.export_exo_dialog();

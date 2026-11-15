@@ -26,7 +26,9 @@ impl EditorState {
             .is_some_and(|e| e.eq_ignore_ascii_case("exo"));
 
         let bytes = if is_legacy_aup {
-            au2_aup::write_aup_bytes(&self.scene)
+            let mut all_scenes = self.scenes.clone();
+            all_scenes.insert(0, self.scene.clone());
+            au2_aup::write_aup_multi_scene_bytes(&all_scenes, 0, self.frame)
         } else if is_exo {
             au2_exo::write_exo_bytes(&self.scene, self.encoding)
         } else if !self.scenes.is_empty() {
@@ -463,7 +465,12 @@ impl EditorState {
                 dlg = dlg.set_directory(dir);
             }
             if let Some(stem) = p.file_stem() {
-                dlg = dlg.set_file_name(format!("{}.aup2", stem.to_string_lossy()));
+                let ext = p
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .filter(|e| e.eq_ignore_ascii_case("aup") || e.eq_ignore_ascii_case("aup2"))
+                    .unwrap_or("aup2");
+                dlg = dlg.set_file_name(format!("{}.{}", stem.to_string_lossy(), ext));
             }
         }
         if let Some(path) = dlg.save_file() {
@@ -482,6 +489,169 @@ impl EditorState {
             }
         } else {
             false
+        }
+    }
+
+    /// 本家 AviUtl2 互換の `.aup2` プロジェクトとして保存するダイアログ。
+    pub fn save_as_aup2_dialog(&mut self) -> bool {
+        let mut dlg = rfd::FileDialog::new()
+            .set_title("AviUtl2 プロジェクトとして保存 (.aup2 — 本家 AviUtl2 互換)")
+            .add_filter("AviUtl2 プロジェクトファイル (.aup2)", &["aup2"])
+            .set_file_name("project.aup2");
+        if let Some(p) = &self.file_path {
+            if let Some(dir) = p.parent() {
+                dlg = dlg.set_directory(dir);
+            }
+            if let Some(stem) = p.file_stem() {
+                dlg = dlg.set_file_name(format!("{}.aup2", stem.to_string_lossy()));
+            }
+        }
+        if let Some(mut path) = dlg.save_file() {
+            if path.extension().and_then(|e| e.to_str()).is_none() {
+                path.set_extension("aup2");
+            }
+            match self.write_to_path(&path) {
+                Ok(()) => {
+                    let time_str = self.autosave.last_saved_time_str.as_deref().unwrap_or("");
+                    self.status = format!(
+                        "本家 AviUtl2 互換プロジェクト (.aup2) として保存しました: {} [{time_str}]",
+                        path.display()
+                    );
+                    self.file_path = Some(path);
+                    true
+                }
+                Err(e) => {
+                    self.status = format!(".aup2 保存に失敗しました: {e}");
+                    false
+                }
+            }
+        } else {
+            false
+        }
+    }
+
+    /// 本家 初代 AviUtl 1.10 + 拡張編集 0.92 (`80EE`) 完全互換の `.aup` プロジェクトとして保存するダイアログ。
+    pub fn save_as_legacy_aup_dialog(&mut self) -> bool {
+        let mut dlg = rfd::FileDialog::new()
+            .set_title("初代 AviUtl プロジェクトとして保存 (.aup — 本家 AviUtl + 拡張編集 0.92 互換)")
+            .add_filter("初代 AviUtl プロジェクトファイル (.aup)", &["aup"])
+            .set_file_name("project.aup");
+        if let Some(p) = &self.file_path {
+            if let Some(dir) = p.parent() {
+                dlg = dlg.set_directory(dir);
+            }
+            if let Some(stem) = p.file_stem() {
+                dlg = dlg.set_file_name(format!("{}.aup", stem.to_string_lossy()));
+            }
+        }
+        if let Some(mut path) = dlg.save_file() {
+            if path.extension().and_then(|e| e.to_str()).is_none() {
+                path.set_extension("aup");
+            }
+            match self.write_to_path(&path) {
+                Ok(()) => {
+                    let time_str = self.autosave.last_saved_time_str.as_deref().unwrap_or("");
+                    self.status = format!(
+                        "本家 初代 AviUtl 互換プロジェクト (.aup) として保存しました: {} [{time_str}]",
+                        path.display()
+                    );
+                    self.file_path = Some(path);
+                    true
+                }
+                Err(e) => {
+                    self.status = format!(".aup 保存に失敗しました: {e}");
+                    false
+                }
+            }
+        } else {
+            false
+        }
+    }
+
+    /// ディスク上の `.aup` ファイルを `.aup2` に、または `.aup2` ファイルを `.aup` に相互変換します。
+    pub fn convert_project_file_dialog(&mut self) {
+        let Some(src_path) = rfd::FileDialog::new()
+            .set_title("変換元のプロジェクトファイルを選択 (.aup または .aup2)")
+            .add_filter("AviUtl / AviUtl2 プロジェクト (.aup, .aup2)", &["aup", "aup2"])
+            .pick_file()
+        else {
+            return;
+        };
+
+        let raw_bytes = match std::fs::read(&src_path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.status = format!("変換元ファイルの読み込みに失敗しました: {e}");
+                return;
+            }
+        };
+
+        let src_is_aup2 = src_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("aup2"))
+            || !raw_bytes.starts_with(au2_aup::AUP_HEADER_PREFIX);
+
+        let doc = match if src_is_aup2 {
+            au2_aup::parse_aup2_bytes(&raw_bytes)
+        } else {
+            au2_aup::parse_aup_bytes(&raw_bytes)
+        } {
+            Ok(d) => d,
+            Err(e) => {
+                self.status = format!("変換元プロジェクトの解析に失敗しました: {e}");
+                return;
+            }
+        };
+
+        let target_ext = if src_is_aup2 { "aup" } else { "aup2" };
+        let stem = src_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "converted".to_string());
+        let mut save_dlg = rfd::FileDialog::new()
+            .set_title(if src_is_aup2 {
+                "変換先の初代 AviUtl プロジェクト (.aup) を保存"
+            } else {
+                "変換先の AviUtl2 プロジェクト (.aup2) を保存"
+            })
+            .set_file_name(format!("{stem}.{target_ext}"));
+        if let Some(dir) = src_path.parent() {
+            save_dlg = save_dlg.set_directory(dir);
+        }
+        save_dlg = if src_is_aup2 {
+            save_dlg.add_filter("初代 AviUtl プロジェクトファイル (.aup)", &["aup"])
+        } else {
+            save_dlg.add_filter("AviUtl2 プロジェクトファイル (.aup2)", &["aup2"])
+        };
+
+        if let Some(mut dst_path) = save_dlg.save_file() {
+            if dst_path.extension().and_then(|e| e.to_str()).is_none() {
+                dst_path.set_extension(target_ext);
+            }
+            let mut scenes = doc.scenes.clone();
+            if scenes.is_empty() {
+                scenes.insert(0, doc.scene.clone());
+            }
+            let out_bytes = if src_is_aup2 {
+                au2_aup::write_aup_multi_scene_bytes(&scenes, 0, doc.cursor_frame)
+            } else {
+                au2_aup::write_aup2_multi_scene_string(&scenes, 0, Some(&dst_path), doc.cursor_frame)
+                    .into_bytes()
+            };
+            match std::fs::write(&dst_path, &out_bytes) {
+                Ok(()) => {
+                    self.load_path(&dst_path);
+                    self.status = format!(
+                        "プロジェクト形式を変換して読み込みました: {} → {}",
+                        src_path.file_name().unwrap_or_default().to_string_lossy(),
+                        dst_path.display()
+                    );
+                }
+                Err(e) => {
+                    self.status = format!("変換先ファイルの書き出しに失敗しました: {e}");
+                }
+            }
         }
     }
 

@@ -4,6 +4,19 @@
 
 ---
 
+## [v3.1.0] - 2026-11-16
+
+### 🔄 `.aup` ⇄ `.aup2` 双方向ネイティブ互換・直接変換
+- **旧AviUtl（`aviutl.exe` + `exedit.auf` 0.92）ネイティブ互換 `.aup` バイナリ出力** ([legacy_aup.rs](crates/au2-aup/src/legacy_aup.rs)):
+  - `"AviUtl ProjectFile version 0.18"` ヘッダ、`EditHandle`、`FrameStatus`（10系統 RLE圧縮）、`#temp0` `FilterConfig`（拡張編集・拡張編集(音声) 有効化）、および `"FilterProject 0.1"` `"拡張編集"` `80EE` ペイロード（RLE圧縮）を完全生成。
+  - ExEdit 0.92 準拠の 108 種の `EffectType` テーブル、全 50 シーン定義、レイヤー属性（表示/ロック/座標リンク/クリッピング/レイヤー名）、トラックバースクリプト、および中間点チェイン（`ObjectFlag::Chain`）への自動分割に対応。
+- **`.aup2` 出力の AviUtl2 互換性強化** ([lib.rs](crates/au2-aup/src/lib.rs)):
+  - レイヤーの `link=1` / `clip=1`、オブジェクトの `group=`、組み込みの `アニメーション効果` / `カスタムオブジェクト` / `カメラ効果` のスクリプト名・タイプ番号マッピングを双方向で保持。
+- **GUI メニューからの保存・直接変換** ([project.rs](crates/au2-app/src/state/project.rs), [app.rs](crates/au2-app/src/app.rs)):
+  - 「ファイル」メニューに「名前を付けて保存 (.aup2 / .aup)...」「AviUtl2形式 (.aup2) で保存...」「旧AviUtl形式 (.aup) で保存...」「プロジェクト変換 (.aup ⇄ .aup2)...」を追加。
+
+---
+
 ## [v2.8.0] - 2026-11-12
 
 ### ⚡ 再生パフォーマンスの改善
