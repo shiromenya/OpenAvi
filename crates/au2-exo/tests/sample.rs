@@ -86,3 +86,47 @@ fn roundtrip_is_stable() {
 fn missing_header_is_error() {
     assert!(parse_exo_str("[0]\nstart=1\nend=2\nlayer=1\n").is_err());
 }
+
+#[test]
+fn script_track_move_roundtrip() {
+    let exo = "\
+[exedit]
+width=1280
+height=720
+rate=30
+scale=1
+length=60
+audio_rate=44100
+audio_ch=2
+[0]
+start=1
+end=60
+layer=1
+overlay=1
+camera=0
+[0.0]
+_name=図形
+サイズ=100
+縦横比=0.0
+ライン幅=4000
+type=0
+color=ffffff
+name=
+[0.1]
+_name=標準描画
+X=-100.0,100.0,15@イージング,21
+Y=0.0,200.0,111@バウンス
+Z=0.0
+拡大率=100.00
+透明度=0.0
+回転=0.00
+blend=0
+";
+    let doc = parse_exo_str(exo).unwrap();
+    assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+    let out = write_exo_string(&doc.scene);
+    assert!(out.contains("X=-100.0,100.0,15@イージング,21"), "out:\n{out}");
+    assert!(out.contains("Y=0.0,200.0,111@バウンス"), "out:\n{out}");
+    let reparsed = parse_exo_str(&out).unwrap();
+    assert_eq!(write_exo_string(&reparsed.scene), out);
+}

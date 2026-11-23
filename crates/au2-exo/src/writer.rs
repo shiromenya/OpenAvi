@@ -108,7 +108,8 @@ fn mode_string(interp: &Interpolation) -> String {
         MoveKind::MoveAmount => 5,
         MoveKind::Random => 6,
         MoveKind::Other(c) => *c,
-        // TODO: スクリプト移動の番号体系は実ファイルで要検証。読込時の値があればそれを使う。
+        // ExEdit 0.92 におけるトラックバー移動スクリプトの標準ベースコードは 15 (0x0F)。
+        // 読込時に保持された legacy_code がある場合はそれを優先する。
         MoveKind::Script(_) => interp.legacy_code.unwrap_or(15),
     };
     let flags = match interp.easing {

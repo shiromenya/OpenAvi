@@ -60,6 +60,39 @@ fn is_playable_kind(kind: &EffectKind) -> bool {
     matches!(kind, EffectKind::AudioFile | EffectKind::VideoFile)
 }
 
+/// 音声フェード系エフェクト名か判定します（リアルタイム再生・書き出し共通）。
+pub(crate) fn is_audio_fade_effect(name: &str) -> bool {
+    matches!(name, "音量フェード" | "音声フェード" | "フェード")
+}
+
+/// オブジェクトに適用されている全ての有効な音声フェードエフェクトから現在時刻のフェードゲイン (`0.0..=1.0`) を計算します。
+pub(crate) fn eval_audio_fade_gain(
+    obj: &TimelineObject,
+    rel_frame: u32,
+    rel_sec: f64,
+    remain_sec: f64,
+) -> f32 {
+    let mut gain = 1.0f32;
+    for eff in &obj.effects {
+        if eff.enabled && is_audio_fade_effect(&eff.name) {
+            let fade_in_sec = eff.eval("イン", rel_frame, 0.0).max(0.0);
+            let fade_out_sec = eff.eval("アウト", rel_frame, 0.0).max(0.0);
+            if fade_in_sec > 0.001 && rel_sec < fade_in_sec {
+                gain *= (rel_sec / fade_in_sec).clamp(0.0, 1.0) as f32;
+            }
+            if fade_out_sec > 0.001 && remain_sec < fade_out_sec {
+                gain *= (remain_sec / fade_out_sec).clamp(0.0, 1.0) as f32;
+            }
+        }
+    }
+    gain
+}
+
+/// オブジェクトに有効な「モノラル化」エフェクトが付与されているか判定します。
+pub(crate) fn is_audio_mono(obj: &TimelineObject) -> bool {
+    obj.effects.iter().any(|e| e.enabled && e.name == "モノラル化")
+}
+
 /// オブジェクトの現在フレームにおける再生パラメータ（再生位置・音量フェード込の音量・左右パン・再生速度・ループ・モノラル化）を評価します。
 fn playback_params(obj: &TimelineObject, fps: f64, cur_frame: Frame) -> Option<PlaybackEval> {
     let src = obj.source().filter(|s| s.enabled)?;
@@ -87,26 +120,11 @@ fn playback_params(obj: &TimelineObject, fps: f64, cur_frame: Frame) -> Option<P
         / 100.0)
         .clamp(-1.0, 1.0) as f32;
 
-    // 音量フェード / 音声フェード / フェード (イン・アウト秒数)
-    for eff in &obj.effects {
-        if eff.enabled && (eff.name == "音量フェード" || eff.name == "音声フェード" || eff.name == "フェード") {
-            let fade_in_sec = eff.eval("イン", rel, 0.0).max(0.0);
-            let fade_out_sec = eff.eval("アウト", rel, 0.0).max(0.0);
-            let rel_sec = rel as f64 / fps_safe;
-            let remain_sec = (obj.frame_end.saturating_sub(cur_frame) as f64 + 1.0) / fps_safe;
-            if fade_in_sec > 0.001 && rel_sec < fade_in_sec {
-                volume *= (rel_sec / fade_in_sec).clamp(0.0, 1.0) as f32;
-            }
-            if fade_out_sec > 0.001 && remain_sec < fade_out_sec {
-                volume *= (remain_sec / fade_out_sec).clamp(0.0, 1.0) as f32;
-            }
-        }
-    }
+    let rel_sec = rel as f64 / fps_safe;
+    let remain_sec = (obj.frame_end.saturating_sub(cur_frame) as f64 + 1.0) / fps_safe;
+    volume *= eval_audio_fade_gain(obj, rel, rel_sec, remain_sec);
 
-    let mono = obj
-        .effects
-        .iter()
-        .any(|e| e.enabled && e.name == "モノラル化");
+    let mono = is_audio_mono(obj);
 
     Some(PlaybackEval {
         offset_sec: start_pos,

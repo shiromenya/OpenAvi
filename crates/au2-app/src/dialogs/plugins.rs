@@ -32,7 +32,7 @@ impl OpenAviApp {
                         self.st.open_auf_porter(None);
                     }
                 });
-                ui.weak("※ スクリプト (.anm/.obj 等) は組み込み Lua サブセットで動作します。ネイティブ DLL (.auf 等) はパラメータ定義の静的読込のみで DLL 機械語は実行されません。");
+                ui.weak("※ スクリプト (.anm/.obj/.cam/.scn/.tra 等) は組み込み Lua サブセットで動作します。32bit ネイティブ DLL (.auf 等) の実行互換は方針として対象外（非対応）です。");
                 ui.separator();
 
                 if self.st.plugins.plugins.is_empty() {
